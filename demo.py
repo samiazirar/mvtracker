@@ -64,8 +64,13 @@ def main():
     p.add_argument(
         "--batch_size_frames", 
         type=int, 
-        default=60, 
+        default=120, 
         help="Number of frames to process at once when batch processing is enabled."
+    )
+    p.add_argument(
+        "--optimize_performance",
+        action="store_true",
+        help="Enable performance optimizations (larger batches, reduced I/O)."
     )
     p.add_argument(
         "--rrd",
@@ -120,32 +125,51 @@ def main():
     if args.batch_processing:
         # For batch processing, we'll load data batch by batch instead of all at once
         print(f"Batch processing enabled: {args.batch_size_views} views, {args.batch_size_frames} frames per batch")
+        
+        # Performance optimization: increase batch sizes if requested
+        if args.optimize_performance:
+            # Try to fit more data per batch to reduce overhead
+            effective_batch_frames = min(args.batch_size_frames * 2, 240)  # Cap at 240 frames
+            effective_batch_views = args.batch_size_views
+            print(f"Performance mode: Using larger batches - {effective_batch_views} views, {effective_batch_frames} frames")
+        else:
+            effective_batch_frames = args.batch_size_frames
+            effective_batch_views = args.batch_size_views
+        
         print("Loading data in batches to minimize memory usage...")
         
         num_views_total = sample['rgbs'].shape[0] 
         num_frames_total = sample['rgbs'].shape[1]
         
-        # Calculate effective number of frames after temporal stride
-        effective_frames = (num_frames_total + temporal_stride - 1) // temporal_stride
-        
         pred_tracks_batched = []
         pred_vis_batched = []
         
-        for view_start in range(0, num_views_total, args.batch_size_views):
-            view_end = min(view_start + args.batch_size_views, num_views_total)
+        import time
+        total_start_time = time.time()
+        
+        batch_count = 0
+        for view_start in range(0, num_views_total, effective_batch_views):
+            view_end = min(view_start + effective_batch_views, num_views_total)
             
-            for frame_start in range(0, num_frames_total, args.batch_size_frames * temporal_stride):
-                frame_end = min(frame_start + args.batch_size_frames * temporal_stride, num_frames_total)
+            for frame_start in range(0, num_frames_total, effective_batch_frames * temporal_stride):
+                frame_end = min(frame_start + effective_batch_frames * temporal_stride, num_frames_total)
                 
-                print(f"Loading and processing views {view_start}:{view_end}, frames {frame_start}:{frame_end}")
+                batch_start_time = time.time()
+                batch_count += 1
+                
+                print(f"[Batch {batch_count}] Loading views {view_start}:{view_end}, frames {frame_start}:{frame_end}")
                 
                 # Load only this batch from memory-mapped file
+                load_start = time.time()
                 rgbs_batch = torch.from_numpy(sample["rgbs"][view_start:view_end, frame_start:frame_end:temporal_stride]).float()
                 depths_batch = torch.from_numpy(sample["depths"][view_start:view_end, frame_start:frame_end:temporal_stride]).float()
                 intrs_batch = torch.from_numpy(sample["intrs"][view_start:view_end, frame_start:frame_end:temporal_stride]).float()
                 extrs_batch = torch.from_numpy(sample["extrs"][view_start:view_end, frame_start:frame_end:temporal_stride]).float()
+                load_time = time.time() - load_start
+                load_time = time.time() - load_start
                 
                 # Apply spatial downsampling if requested
+                preprocess_start = time.time()
                 if spatial_downsample > 1:
                     rgbs_batch = rgbs_batch[:, :, :, ::spatial_downsample, ::spatial_downsample]
                     depths_batch = depths_batch[:, :, :, ::spatial_downsample, ::spatial_downsample]
@@ -155,10 +179,10 @@ def main():
                     intrs_batch[:, :, 1, 1] /= spatial_downsample  # fy
                     intrs_batch[:, :, 0, 2] /= spatial_downsample  # cx
                     intrs_batch[:, :, 1, 2] /= spatial_downsample  # cy
+                preprocess_time = time.time() - preprocess_start
                 
-                print(f"Batch shape: {rgbs_batch.shape}")
                 batch_memory_gb = rgbs_batch.numel() * 4 / (1024**3) + depths_batch.numel() * 4 / (1024**3)
-                print(f"Batch memory: {batch_memory_gb:.2f} GB")
+                print(f"  Batch shape: {rgbs_batch.shape}, Memory: {batch_memory_gb:.2f} GB, Load: {load_time:.2f}s")
                 
                 # Load query points once (they are small)
                 if view_start == 0 and frame_start == 0:
@@ -191,7 +215,7 @@ def main():
                         pts = pool[idx]
                         ts = torch.full((pts.shape[0], 1), float(t0), device=pts.device)
                         query_points = torch.cat([ts, pts], dim=1).float()
-                        print(f"Sampled {pts.shape[0]} queries from depth at t={t0} within r<={xy_radius}, z∈[{z_min},{z_max}].")
+                        print(f"  Sampled {pts.shape[0]} queries from depth at t={t0} within r<={xy_radius}, z∈[{z_min},{z_max}].")
                 
                 # Filter query points for this temporal batch
                 if query_points.shape[0] > 0:
@@ -211,10 +235,11 @@ def main():
                     query_batch = query_points
                 
                 if query_batch.shape[0] == 0:
-                    print(f"No query points available, skipping batch...")
+                    print(f"  No query points available, skipping batch...")
                     continue
                 
                 # Run prediction on batch
+                inference_start = time.time()
                 torch.set_float32_matmul_precision("high")
                 amp_dtype = torch.bfloat16 if (device == "cuda" and torch.cuda.get_device_capability()[0] >= 8) else torch.float16
                 with torch.no_grad(), torch.cuda.amp.autocast(enabled=device == "cuda", dtype=amp_dtype):
@@ -225,6 +250,7 @@ def main():
                         extrs=extrs_batch[None].to(device),
                         query_points_3d=query_batch[None].to(device),
                     )
+                inference_time = time.time() - inference_start
                 
                 # Collect results
                 pred_tracks_batch = results_batch["traj_e"].cpu()
@@ -233,9 +259,16 @@ def main():
                 pred_tracks_batched.append(pred_tracks_batch)
                 pred_vis_batched.append(pred_vis_batch)
                 
-                # Clear GPU memory
-                torch.cuda.empty_cache()
+                # Clear GPU memory (less frequently if optimizing)
+                if not args.optimize_performance or batch_count % 3 == 0:
+                    torch.cuda.empty_cache()
                 del rgbs_batch, depths_batch, intrs_batch, extrs_batch
+                
+                batch_total_time = time.time() - batch_start_time
+                print(f"  Inference: {inference_time:.2f}s, Total batch: {batch_total_time:.2f}s")
+                
+        total_time = time.time() - total_start_time
+        print(f"Total processing time: {total_time:.2f}s for {batch_count} batches ({total_time/batch_count:.2f}s per batch)")
                 
         # Combine results from all batches
         if pred_tracks_batched:
