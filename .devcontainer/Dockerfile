@@ -21,12 +21,12 @@ RUN python -m pip install --upgrade pip && \
 COPY requirements.txt requirements.full.txt /tmp/
 
 # Install full repository requirements
-RUN pip install -r /tmp/requirements.full.txt && rm /tmp/requirements.txt /tmp/requirements.full.txt
+# RUN pip install -r /tmp/requirements.full.txt && rm /tmp/requirements.txt /tmp/requirements.full.txt
  
-# Speeds up attention
-RUN pip install --upgrade --no-build-isolation flash-attn==2.5.8 
-# Speeds up kNN
-RUN pip install "git+https://github.com/ethz-vlg/pointcept.git@2082918#subdirectory=libs/pointops"  
+# # Speeds up attention
+# RUN pip install --upgrade --no-build-isolation flash-attn==2.5.8 
+# # Speeds up kNN
+# RUN pip install "git+https://github.com/ethz-vlg/pointcept.git@2082918#subdirectory=libs/pointops"  
 WORKDIR /workspace
 
 EXPOSE 7860
