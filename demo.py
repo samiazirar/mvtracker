@@ -61,6 +61,15 @@ def main():
         token=os.getenv("HF_TOKEN"),
         repo_type="model",
     )
+    sample_original = np.load(sample_path)
+    rgbs_original = torch.from_numpy(sample_original["rgbs"]).float() 
+    depths_original = torch.from_numpy(sample_original["depths"]).float()  
+    intrs_original = torch.from_numpy(sample_original["intrs"]).float()  
+    extrs_original = torch.from_numpy(sample_original["extrs"]).float()  
+    query_points_original = torch.from_numpy(sample_original["query_points"]).float()  
+    print("Shapes: rgbs, depths, intrs, extrs, query_points:", rgbs_original.shape, depths_original.shape, intrs_original.shape, extrs_original.shape, query_points_original.shape)
+
+    sample_path = "/data/rh20t_api/data/RH20T/packed_npz/task_0013_user_0011_scene_0007_cfg_0003_human.npz"
     sample = np.load(sample_path)
 
     rgbs = torch.from_numpy(sample["rgbs"]).float()
@@ -68,6 +77,7 @@ def main():
     intrs = torch.from_numpy(sample["intrs"]).float()
     extrs = torch.from_numpy(sample["extrs"]).float()
     query_points = torch.from_numpy(sample["query_points"]).float()
+    print("Shapes: rgbs, depths, intrs, extrs, query_points:", rgbs.shape, depths.shape, intrs.shape, extrs.shape, query_points.shape)
     breakpoint()
     # Optionally, sample random queries in a cylinder of radius 12, height [-1, +10] and replace the demo queries
     if args.random_query_points:
