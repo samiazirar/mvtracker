@@ -3,7 +3,7 @@ Set up the environment:
 ```sh
 cd /local/home/frrajic/xode
 
-git clone --recursive git@github.com:m43/duster.git
+git clone --recursive git@github.com:ethz-vlg/duster.git
 cd duster
 
 # Fix models path, since there are two in the project

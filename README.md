@@ -1,7 +1,7 @@
 <div align="center" style="line-height:1.2; margin:0; padding:0;">
 <h1 style="margin-bottom:0em;">Multi-View 3D Point Tracking</h1>
 
-[![](https://img.shields.io/badge/arXiv-2508.TBD-b31b1b)](#)
+<a href="https://arxiv.org/abs/2508.21060"><img src="https://img.shields.io/badge/arXiv-2508.21060-b31b1b" alt="arXiv"></a>
 <a href="https://ethz-vlg.github.io/mvtracker/"><img src="https://img.shields.io/badge/Project%20Page-009688?logo=internetcomputer&logoColor=white" alt="Project Page"></a>
 <a href="https://ethz-vlg.github.io/mvtracker/#qualitative-visualization"><img src="https://img.shields.io/badge/Interactive%20Results-673ab7?logo=apachespark&logoColor=white" alt="Interactive Results"></a>
 [![](https://img.shields.io/badge/🤗%20Demo-Coming%20soon…-ffcc00)](#)
@@ -23,12 +23,19 @@
 <sup>4</sup>[Microsoft](https://www.microsoft.com/)
 </div>
 
+<p float="left">
+  <img alt="selfcap" src="https://github.com/user-attachments/assets/b502d193-c37c-43be-af6c-653b5de7597e" width="48%" /> 
+  <img alt="dexycb" src="https://github.com/user-attachments/assets/d14d4c6c-152e-4040-b29b-3da4b7e8b913" width="48%" /> 
+  <img alt="4d-dress-stretching" src="https://github.com/user-attachments/assets/f3eabdda-59e1-4032-b345-c4603ea86fc0" width="48%" />
+  <img alt="4d-dress-avatarmove" src="https://github.com/user-attachments/assets/3fef9924-84ad-4295-95e2-5b82ae7c3053" width="48%" />
+</p>
+
 MVTracker is the first **data-driven multi-view 3D point tracker** for tracking arbitrary 3D points across multiple cameras. It fuses multi-view features into a unified 3D feature point cloud, within which it leverages kNN-based correlation to capture spatiotemporal relationships across views. A transformer then iteratively refines the point tracks, handling occlusions and adapting to varying camera setups without per-sequence optimization.
 
 
 ## Updates
 
-- <ins>August 29, 2025</ins>: Public release.
+- <ins>August 28, 2025</ins>: Public release.
 
 
 ## Quick Start
@@ -82,9 +89,14 @@ Alternatively, you can run our interactive demo:
 python demo.py --rerun save --lightweight
 ```
 
-By default this saves a lightweight `.rrd` recording (e.g., `mvtracker_demo.rrd`) that you can open in any Rerun viewer. The simplest option is to drag and drop the file into the [online viewer](https://app.rerun.io/version/0.21.0). For the best experience, you can also install Rerun locally (`pip install rerun-sdk==0.21.0; rerun`).
+By default this saves a lightweight `.rrd` recording (e.g., `mvtracker_demo.rrd`) that you can open in any Rerun viewer. The simplest option is to drag and drop the file into the [online viewer](https://app.rerun.io/version/0.21.0). For the best experience, you can also install Rerun locally (`pip install rerun-sdk==0.21.0; rerun`). Results can be explored interactively in the viewer with WASD/QE navigation, mouse rotation and zoom, and timeline playback controls.
 
-If you are working on a cluster, you can stream results directly to your laptop by forwarding a port (`ssh -R 9876:localhost:9876 user@cluster`) and then running the demo in streaming mode (`python demo.py --rerun stream`), which sends live data into your local Rerun instance. If you are running the demo locally with GUI support, you can automatically spawn a Rerun window (`python demo.py --rerun spawn`). In all cases, results can be explored interactively with WASD/QE navigation, mouse rotation and zoom, and timeline playback controls.
+<details>
+<summary>[Interactive viewer on a cluster or with GUI support - click to expand]</summary>
+  
+If you are working on a cluster, you can stream results directly to your laptop by forwarding a port (`ssh -R 9876:localhost:9876 user@cluster`) and then running the demo in streaming mode (`python demo.py --rerun stream`), which sends live data into your local Rerun instance. If you are running the demo locally with GUI support, you can automatically spawn a Rerun window (`python demo.py --rerun spawn`).
+
+</details>
 
 
 ## Installation
@@ -114,6 +126,9 @@ To benchmark multi-view 3D point tracking, we provide preprocessed versions of t
 - **Panoptic Studio**: evaluation benchmark with real-world activities such as basketball, juggling, and toy play (10 sequences).  
 - **DexYCB**: evaluation benchmark with real-world hand–object interactions (10 sequences).  
 
+<details>
+<summary>[Downloading our preprocessed datasets - click to expand]</summary>
+  
 You can download and extract them as (~72 GB after extraction):
 
 ```bash
@@ -143,7 +158,20 @@ rm datasets/dex-ycb-multiview*.tar.gz
 # 72G     total
 ```
 
-For licensing and usage terms, please refer to the original datasets. If you wish to regenerate datasets from scratch, we provide scripts with docstrings that explain usage and list the commands we used. MV-Kubric data for training and testing can be generated with [ethz-vlg/kubric](https://github.com/ethz-vlg/kubric/blob/multiview-point-tracking/challenges/point_tracking_3d/worker.py). DexYCB can be downloaded and labels regenerated using [`scripts/dex_ycb_to_neus_format.py`](./scripts/dex_ycb_to_neus_format.py); note that we have created labels for 10 sequences, but DexYCB is much larger and more labels could be produced if needed. Panoptic Studio can be downloaded and labels regenerated using [`scripts/panoptic_studio_preprocessing.py`](./scripts/panoptic_studio_preprocessing.py). DUSt3R depths can be produced for any dataset with [`scripts/estimate_depth_with_duster.py`](./scripts/estimate_depth_with_duster.py). For unlabeled datasets used only in qualitative experiments, we provide the following preprocessing scripts: [4D-Dress](./scripts/4ddress_preprocessing.py), [Hi4D](./scripts/hi4d_preprocessing.py), [EgoExo4D](./scripts/egoexo4d_preprocessing.py), and [SelfCap](./scripts/selfcap_preprocessing.py).  
+</details>
+
+
+<details>
+<summary>[Regenerating datasets from scratch - click to expand]</summary>
+  
+If you wish to regenerate datasets from scratch, we provide scripts with docstrings that explain usage and list the commands we used. For licensing and usage terms, please refer to the original datasets. 
+- MV-Kubric data for training and testing can be generated with [ethz-vlg/kubric](https://github.com/ethz-vlg/kubric/blob/multiview-point-tracking/challenges/point_tracking_3d/worker.py).
+- DexYCB can be downloaded and labels regenerated using [`scripts/dex_ycb_to_neus_format.py`](./scripts/dex_ycb_to_neus_format.py); note that we have created labels for 10 sequences, but DexYCB is much larger and more labels could be produced if needed.
+- Panoptic Studio can be downloaded and labels regenerated using [`scripts/panoptic_studio_preprocessing.py`](./scripts/panoptic_studio_preprocessing.py).
+- DUSt3R depths can be produced for any dataset with [`scripts/estimate_depth_with_duster.py`](./scripts/estimate_depth_with_duster.py).
+- For unlabeled datasets used only in qualitative experiments, we provide the following preprocessing scripts: [4D-Dress](./scripts/4ddress_preprocessing.py), [Hi4D](./scripts/hi4d_preprocessing.py), [EgoExo4D](./scripts/egoexo4d_preprocessing.py), and [SelfCap](./scripts/selfcap_preprocessing.py).  
+
+</details>
 
 For quick testing, we also release a small **demo sample** (~200 MB):
 
@@ -153,9 +181,6 @@ python demo.py --random_query_points
 
 Our generic loader [`GenericSceneDataset`](./mvtracker/datasets/generic_scene_dataset.py) supports adding new datasets. It can compute depths on the fly with [DUSt3R](https://github.com/naver/dust3r), [VGGT](https://vgg-t.github.io), [MonoFusion](https://imnotprepared.github.io/research/25_DSR/index.html), or [MoGe-2](https://github.com/microsoft/MoGe), and can also estimate camera poses with VGGT.  
 
-**Scene normalization.** Performance depends strongly on scene normalization. MVTracker was trained on Kubric with randomized but bounded scales and camera setups. At test time, scenes with very different scales, rotations, or translations must be aligned to this distribution. Our generic loader provides an automatic normalization that assumes the ground plane is parallel to the XY plane. This automatic normalization worked reasonably well for 4D-Dress, Hi4D, EgoExo4D, and SelfCap. For Panoptic and DexYCB, we applied manual similarity transforms, which are encoded in the respective dataloaders. Robust, general-purpose normalization remains an open challenge.  
-
-**Main bottleneck.** The central challenge in multi-view 3D point tracking is 4D reconstruction: obtaining depth maps that are accurate, temporally consistent, and available in real time, especially under sparse-view setups. MVTracker performs well when sensor depth and camera calibration are provided, but in settings where both must be estimated, errors in reconstruction quickly make tracking unreliable. While learned motion priors help tolerate moderate noise, they cannot replace a robust reconstruction backbone. We believe progress will hinge on methods that jointly solve depth estimation and tracking for mutual refinement, or large-scale foundation models for 4D reconstruction and tracking that fully leverage data and compute. We hope the community will direct future efforts toward this goal.
 
 
 ## Evaluation
@@ -165,7 +190,7 @@ Evaluation is driven by Hydra configs. See [`mvtracker/cli/eval.py`](./mvtracker
 To evaluate MVTracker with our best model, first download the checkpoint from [Hugging Face](https://huggingface.co/ethz-vlg/mvtracker):
 
 ```bash
-wget https://huggingface.co/ethz-vlg/mvtracker/resolve/main/checkpoints/mvtracker_200000_june2025.pth -P checkpoints/
+wget https://huggingface.co/ethz-vlg/mvtracker/resolve/main/mvtracker_200000_june2025.pth -P checkpoints/
 ```
 
 Then run:
@@ -198,6 +223,9 @@ python -m mvtracker.cli.eval experiment_path=logs/cotracker3-online model=cotrac
 
 For more baselines and dataset setups (e.g. varying camera counts, camera subsets, etc.), see [`scripts/slurm/eval.sh`](./scripts/slurm/eval.sh) for the commands used in our experiments.
 
+<details>
+<summary>[Details on evaluation parameters - click to expand]</summary>
+  
 The evaluation datasets are specified with `datasets.eval.names`. Each name is parsed by the dataset `from_name()` factory (see e.g. [`DexYCBMultiViewDataset.from_name`](./mvtracker/datasets/dexycb_multiview_dataset.py)), which supports modifiers such as `-views`, `-duster`, `-novelviews`, `-removehand`, `-2dpt`, or `-cached`. This makes it easy to select subsets of cameras, enable different depth sources, or ensure deterministic track sampling. The main labeled benchmarks are:
 - **Kubric (synthetic)** — e.g. `kubric-multiview-v3-views0123`  
 - **Panoptic Studio (real)** — e.g. `panoptic-multiview-views1_7_14_20`  
@@ -212,6 +240,7 @@ For reproducibility of our main results, we also provide *cached* variants of ea
 - `dex-ycb-multiview-views0123-cached`  
 - `dex-ycb-multiview-duster0123-cached`  
 
+</details>
 
 ## Training
 
@@ -226,6 +255,24 @@ For a full-scale MVTracker on an 80 GB GPU:
 ```bash
 python -m mvtracker.cli.train +experiment=mvtracker_overfit
 ```
+
+## Practical Considerations
+
+<details>
+<summary>[Scene normalization - click to expand]</summary>
+
+Performance depends strongly on scene normalization. MVTracker was trained on Kubric with randomized but bounded scales and camera setups. At test time, scenes with very different scales, rotations, or translations must be aligned to this distribution. Our generic loader provides an automatic normalization that assumes the ground plane is parallel to the XY plane. This automatic normalization worked reasonably well for 4D-Dress, Hi4D, EgoExo4D, and SelfCap. For Panoptic and DexYCB, we applied manual similarity transforms, which are encoded in the respective dataloaders. Robust, general-purpose normalization remains an open challenge.  
+
+</details>
+
+
+<details>
+<summary>[Challenges and future directions - click to expand]</summary>
+
+The central challenge in multi-view 3D point tracking is 4D reconstruction: obtaining depth maps that are accurate, temporally consistent, and available in real time, especially under sparse-view setups. MVTracker performs well when sensor depth and camera calibration are provided, but in settings where both must be estimated, errors in reconstruction quickly make tracking unreliable. While learned motion priors help tolerate moderate noise, they cannot replace a robust reconstruction backbone. We believe progress will hinge on methods that jointly solve depth estimation and tracking for mutual refinement, or large-scale foundation models for 4D reconstruction and tracking that fully leverage data and compute. We hope the community will direct future efforts toward this goal.
+
+
+</details>
 
 
 ## Acknowledgements

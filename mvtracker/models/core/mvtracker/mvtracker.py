@@ -824,8 +824,9 @@ class PointcloudCorrBlock:
                 neighbor_indices.append(neighbor_indices_i)
             neighbor_dists = torch.cat(neighbor_dists)
             neighbor_indices = torch.cat(neighbor_indices)
-        neighbor_xyz = self.xyz[torch.arange(self.B)[:, None, None], neighbor_indices]
-        neighbor_fvec = self.fvec[torch.arange(self.B)[:, None, None], neighbor_indices]
+        batch_idx = torch.arange(self.B, device=self.xyz.device)[:, None, None]
+        neighbor_xyz = self.xyz[batch_idx, neighbor_indices]
+        neighbor_fvec = self.fvec[batch_idx, neighbor_indices]
 
         # Compute the local correlations
         targets_grouped = targets.view(self.B, M, self.groups, -1)

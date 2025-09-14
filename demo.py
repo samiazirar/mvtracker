@@ -68,7 +68,7 @@ def main():
     intrs = torch.from_numpy(sample["intrs"]).float()
     extrs = torch.from_numpy(sample["extrs"]).float()
     query_points = torch.from_numpy(sample["query_points"]).float()
-
+    breakpoint()
     # Optionally, sample random queries in a cylinder of radius 12, height [-1, +10] and replace the demo queries
     if args.random_query_points:
         from mvtracker.models.core.model_utils import init_pointcloud_from_rgbd
