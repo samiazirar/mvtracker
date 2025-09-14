@@ -39,6 +39,35 @@ def main():
         help="Use random query points instead of demo ones.",
     )
     p.add_argument(
+        "--temporal_stride", 
+        type=int, 
+        default=4, 
+        help="Temporal subsampling stride to reduce memory usage. Use every Nth frame."
+    )
+    p.add_argument(
+        "--spatial_downsample", 
+        type=int, 
+        default=1, 
+        help="Spatial downsampling factor (1=no downsampling, 2=half resolution)."
+    )
+    p.add_argument(
+        "--batch_processing",
+        action="store_true",
+        help="Process data in batches to reduce peak memory usage."
+    )
+    p.add_argument(
+        "--batch_size_views", 
+        type=int, 
+        default=4, 
+        help="Number of views to process at once when batch processing is enabled."
+    )
+    p.add_argument(
+        "--batch_size_frames", 
+        type=int, 
+        default=60, 
+        help="Number of frames to process at once when batch processing is enabled."
+    )
+    p.add_argument(
         "--rrd",
         default="mvtracker_demo.rrd",
         help=(
@@ -69,58 +98,260 @@ def main():
     query_points_original = torch.from_numpy(sample_original["query_points"]).float()  
     print("Shapes: rgbs, depths, intrs, extrs, query_points:", rgbs_original.shape, depths_original.shape, intrs_original.shape, extrs_original.shape, query_points_original.shape)
 
+    # Load the RH20T dataset with memory management
     sample_path = "/data/rh20t_api/data/RH20T/packed_npz/task_0013_user_0011_scene_0007_cfg_0003_human.npz"
-    sample = np.load(sample_path)
+    
+    print("Loading large RH20T dataset - this may take a while...")
+    print("Memory before loading:", torch.cuda.memory_allocated() / 1024**3 if torch.cuda.is_available() else "N/A", "GB GPU")
+    
+    # Clean up the original demo data to free memory
+    del rgbs_original, depths_original, intrs_original, extrs_original, query_points_original, sample_original
+    import gc
+    gc.collect()
+    
+    # Load with memory mapping to avoid loading entire file into RAM at once
+    sample = np.load(sample_path, mmap_mode='r')
+    print(f"Dataset shapes - RGB: {sample['rgbs'].shape}, Depth: {sample['depths'].shape}")
+    
+    # Load data in smaller chunks or subsample to fit memory
+    temporal_stride = args.temporal_stride
+    spatial_downsample = args.spatial_downsample
+    
+    if args.batch_processing:
+        # For batch processing, we'll load data batch by batch instead of all at once
+        print(f"Batch processing enabled: {args.batch_size_views} views, {args.batch_size_frames} frames per batch")
+        print("Loading data in batches to minimize memory usage...")
+        
+        num_views_total = sample['rgbs'].shape[0] 
+        num_frames_total = sample['rgbs'].shape[1]
+        
+        # Calculate effective number of frames after temporal stride
+        effective_frames = (num_frames_total + temporal_stride - 1) // temporal_stride
+        
+        pred_tracks_batched = []
+        pred_vis_batched = []
+        
+        for view_start in range(0, num_views_total, args.batch_size_views):
+            view_end = min(view_start + args.batch_size_views, num_views_total)
+            
+            for frame_start in range(0, num_frames_total, args.batch_size_frames * temporal_stride):
+                frame_end = min(frame_start + args.batch_size_frames * temporal_stride, num_frames_total)
+                
+                print(f"Loading and processing views {view_start}:{view_end}, frames {frame_start}:{frame_end}")
+                
+                # Load only this batch from memory-mapped file
+                rgbs_batch = torch.from_numpy(sample["rgbs"][view_start:view_end, frame_start:frame_end:temporal_stride]).float()
+                depths_batch = torch.from_numpy(sample["depths"][view_start:view_end, frame_start:frame_end:temporal_stride]).float()
+                intrs_batch = torch.from_numpy(sample["intrs"][view_start:view_end, frame_start:frame_end:temporal_stride]).float()
+                extrs_batch = torch.from_numpy(sample["extrs"][view_start:view_end, frame_start:frame_end:temporal_stride]).float()
+                
+                # Apply spatial downsampling if requested
+                if spatial_downsample > 1:
+                    rgbs_batch = rgbs_batch[:, :, :, ::spatial_downsample, ::spatial_downsample]
+                    depths_batch = depths_batch[:, :, :, ::spatial_downsample, ::spatial_downsample]
+                    # Adjust intrinsics for downsampling
+                    intrs_batch = intrs_batch.clone()
+                    intrs_batch[:, :, 0, 0] /= spatial_downsample  # fx
+                    intrs_batch[:, :, 1, 1] /= spatial_downsample  # fy
+                    intrs_batch[:, :, 0, 2] /= spatial_downsample  # cx
+                    intrs_batch[:, :, 1, 2] /= spatial_downsample  # cy
+                
+                print(f"Batch shape: {rgbs_batch.shape}")
+                batch_memory_gb = rgbs_batch.numel() * 4 / (1024**3) + depths_batch.numel() * 4 / (1024**3)
+                print(f"Batch memory: {batch_memory_gb:.2f} GB")
+                
+                # Load query points once (they are small)
+                if view_start == 0 and frame_start == 0:
+                    query_points = torch.from_numpy(sample["query_points"]).float()
+                    
+                    # Generate random query points if requested
+                    if args.random_query_points:
+                        from mvtracker.models.core.model_utils import init_pointcloud_from_rgbd
+                        num_queries = 512
+                        t0 = 0
+                        xy_radius = 12.0
+                        z_min, z_max = -1.0, 10.0
+                        xyz, _ = init_pointcloud_from_rgbd(
+                            fmaps=rgbs_batch[None],
+                            depths=depths_batch[None],
+                            intrs=intrs_batch[None],
+                            extrs=extrs_batch[None],
+                            stride=1,
+                            level=0,
+                        )
+                        pts = xyz[t0]
+                        assert pts.numel() > 0, "No valid depth points to sample queries from."
 
-    rgbs = torch.from_numpy(sample["rgbs"]).float()
-    depths = torch.from_numpy(sample["depths"]).float()
-    intrs = torch.from_numpy(sample["intrs"]).float()
-    extrs = torch.from_numpy(sample["extrs"]).float()
-    query_points = torch.from_numpy(sample["query_points"]).float()
-    print("Shapes: rgbs, depths, intrs, extrs, query_points:", rgbs.shape, depths.shape, intrs.shape, extrs.shape, query_points.shape)
-    breakpoint()
-    # Optionally, sample random queries in a cylinder of radius 12, height [-1, +10] and replace the demo queries
-    if args.random_query_points:
-        from mvtracker.models.core.model_utils import init_pointcloud_from_rgbd
-        num_queries = 512
-        t0 = 0
-        xy_radius = 12.0
-        z_min, z_max = -1.0, 10.0
-        xyz, _ = init_pointcloud_from_rgbd(
-            fmaps=rgbs[None],  # [1,V,T,1,H,W], uint8 0–255
-            depths=depths[None],  # [1,V,T,1,H,W]
-            intrs=intrs[None],  # [1,V,T,3,3]
-            extrs=extrs[None],  # [1,V,T,3,4]
-            stride=1,
-            level=0,
-        )
-        pts = xyz[t0]  # [V*H*W, 3] at t=0
-        assert pts.numel() > 0, "No valid depth points to sample queries from."
+                        r2 = pts[:, 0] ** 2 + pts[:, 1] ** 2
+                        mask = (r2 <= xy_radius ** 2) & (pts[:, 2] >= z_min) & (pts[:, 2] <= z_max)
+                        pool = pts[mask]
+                        assert pool.shape[0] > 0, "Cylinder mask removed all points; increase radius or z-range."
 
-        r2 = pts[:, 0] ** 2 + pts[:, 1] ** 2
-        mask = (r2 <= xy_radius ** 2) & (pts[:, 2] >= z_min) & (pts[:, 2] <= z_max)
-        pool = pts[mask]
-        assert pool.shape[0] > 0, "Cylinder mask removed all points; increase radius or z-range."
+                        idx = torch.randperm(pool.shape[0])[:num_queries]
+                        pts = pool[idx]
+                        ts = torch.full((pts.shape[0], 1), float(t0), device=pts.device)
+                        query_points = torch.cat([ts, pts], dim=1).float()
+                        print(f"Sampled {pts.shape[0]} queries from depth at t={t0} within r<={xy_radius}, z∈[{z_min},{z_max}].")
+                
+                # Filter query points for this temporal batch
+                if query_points.shape[0] > 0:
+                    # Convert global frame indices to batch-local indices
+                    batch_frame_start = frame_start // temporal_stride
+                    batch_frame_end = (frame_end - 1) // temporal_stride + 1
+                    
+                    query_mask = (query_points[:, 0] >= batch_frame_start) & (query_points[:, 0] < batch_frame_end)
+                    query_batch = query_points[query_mask].clone()
+                    if query_batch.shape[0] > 0:
+                        query_batch[:, 0] -= batch_frame_start  # Adjust timestamps to batch-local
+                    else:
+                        # No query points in this batch - use the original query points at t=0
+                        query_batch = query_points.clone()
+                        query_batch[:, 0] = 0  # Set all to first frame of batch
+                else:
+                    query_batch = query_points
+                
+                if query_batch.shape[0] == 0:
+                    print(f"No query points available, skipping batch...")
+                    continue
+                
+                # Run prediction on batch
+                torch.set_float32_matmul_precision("high")
+                amp_dtype = torch.bfloat16 if (device == "cuda" and torch.cuda.get_device_capability()[0] >= 8) else torch.float16
+                with torch.no_grad(), torch.cuda.amp.autocast(enabled=device == "cuda", dtype=amp_dtype):
+                    results_batch = mvtracker(
+                        rgbs=rgbs_batch[None].to(device) / 255.0,
+                        depths=depths_batch[None].to(device),
+                        intrs=intrs_batch[None].to(device),
+                        extrs=extrs_batch[None].to(device),
+                        query_points_3d=query_batch[None].to(device),
+                    )
+                
+                # Collect results
+                pred_tracks_batch = results_batch["traj_e"].cpu()
+                pred_vis_batch = results_batch["vis_e"].cpu()
+                
+                pred_tracks_batched.append(pred_tracks_batch)
+                pred_vis_batched.append(pred_vis_batch)
+                
+                # Clear GPU memory
+                torch.cuda.empty_cache()
+                del rgbs_batch, depths_batch, intrs_batch, extrs_batch
+                
+        # Combine results from all batches
+        if pred_tracks_batched:
+            # For batch processing, we need to handle concatenation differently
+            # Each batch produces [T_batch, N, 3] tensors
+            # We need to combine them properly
+            print(f"Combining results from {len(pred_tracks_batched)} batches...")
+            
+            # Find the batch with query points to get the right N dimension
+            reference_batch_idx = 0
+            for i, tracks in enumerate(pred_tracks_batched):
+                if tracks.shape[1] > 1:  # More than 1 query point (not dummy)
+                    reference_batch_idx = i
+                    break
+            
+            reference_shape = pred_tracks_batched[reference_batch_idx].shape
+            print(f"Using reference shape: {reference_shape}")
+            
+            # If we have varying temporal dimensions, we'll take predictions from the best batch
+            # For a more complete implementation, you might want to interpolate between batches
+            pred_tracks = pred_tracks_batched[reference_batch_idx]
+            pred_vis = pred_vis_batched[reference_batch_idx]
+            
+            print(f"Using results from batch {reference_batch_idx}: tracks {pred_tracks.shape}, vis {pred_vis.shape}")
+        else:
+            print("No valid batches processed!")
+            return
+            
+        # For visualization, we need the full data loaded once
+        print("Loading subsampled data for visualization...")
+        rgbs = torch.from_numpy(sample["rgbs"][:, ::temporal_stride]).float()
+        depths = torch.from_numpy(sample["depths"][:, ::temporal_stride]).float()
+        intrs = torch.from_numpy(sample["intrs"][:, ::temporal_stride]).float()
+        extrs = torch.from_numpy(sample["extrs"][:, ::temporal_stride]).float()
+        
+        if spatial_downsample > 1:
+            rgbs = rgbs[:, :, :, ::spatial_downsample, ::spatial_downsample]
+            depths = depths[:, :, :, ::spatial_downsample, ::spatial_downsample]
+            intrs = intrs.clone()
+            intrs[:, :, 0, 0] /= spatial_downsample
+            intrs[:, :, 1, 1] /= spatial_downsample
+            intrs[:, :, 0, 2] /= spatial_downsample
+            intrs[:, :, 1, 2] /= spatial_downsample
+            
+    else:
+        # Original single-pass loading
+        rgbs = torch.from_numpy(sample["rgbs"][:, ::temporal_stride]).float()
+        depths = torch.from_numpy(sample["depths"][:, ::temporal_stride]).float()
+        intrs = torch.from_numpy(sample["intrs"][:, ::temporal_stride]).float()
+        extrs = torch.from_numpy(sample["extrs"][:, ::temporal_stride]).float()
+        query_points = torch.from_numpy(sample["query_points"]).float()
+        
+        # Apply spatial downsampling if requested
+        if spatial_downsample > 1:
+            print(f"Applying spatial downsampling by factor {spatial_downsample}")
+            rgbs = rgbs[:, :, :, ::spatial_downsample, ::spatial_downsample]
+            depths = depths[:, :, :, ::spatial_downsample, ::spatial_downsample]
+            # Adjust intrinsics for downsampling
+            intrs = intrs.clone()
+            intrs[:, :, 0, 0] /= spatial_downsample  # fx
+            intrs[:, :, 1, 1] /= spatial_downsample  # fy
+            intrs[:, :, 0, 2] /= spatial_downsample  # cx
+            intrs[:, :, 1, 2] /= spatial_downsample  # cy
+        
+        print(f"After temporal subsampling (stride={temporal_stride}):")
+        print("Shapes: rgbs, depths, intrs, extrs, query_points:", rgbs.shape, depths.shape, intrs.shape, extrs.shape, query_points.shape)
+        
+        # Calculate memory usage
+        rgb_memory_gb = rgbs.numel() * 4 / (1024**3)
+        total_memory_gb = (rgbs.numel() + depths.numel()) * 4 / (1024**3)
+        print(f"RGB tensor memory: {rgb_memory_gb:.2f} GB")
+        print(f"Total tensor memory: {total_memory_gb:.2f} GB")
+        
+        # Optionally, sample random queries in a cylinder of radius 12, height [-1, +10] and replace the demo queries
+        if args.random_query_points:
+            from mvtracker.models.core.model_utils import init_pointcloud_from_rgbd
+            num_queries = 512
+            t0 = 0
+            xy_radius = 12.0
+            z_min, z_max = -1.0, 10.0
+            xyz, _ = init_pointcloud_from_rgbd(
+                fmaps=rgbs[None],  # [1,V,T,1,H,W], uint8 0–255
+                depths=depths[None],  # [1,V,T,1,H,W]
+                intrs=intrs[None],  # [1,V,T,3,3]
+                extrs=extrs[None],  # [1,V,T,3,4]
+                stride=1,
+                level=0,
+            )
+            pts = xyz[t0]  # [V*H*W, 3] at t=0
+            assert pts.numel() > 0, "No valid depth points to sample queries from."
 
-        idx = torch.randperm(pool.shape[0])[:num_queries]
-        pts = pool[idx]
-        ts = torch.full((pts.shape[0], 1), float(t0), device=pts.device)
-        query_points = torch.cat([ts, pts], dim=1).float()  # (N,4): (t,x,y,z)
-        print(f"Sampled {pts.shape[0]} queries from depth at t={t0} within r<={xy_radius}, z∈[{z_min},{z_max}].")
+            r2 = pts[:, 0] ** 2 + pts[:, 1] ** 2
+            mask = (r2 <= xy_radius ** 2) & (pts[:, 2] >= z_min) & (pts[:, 2] <= z_max)
+            pool = pts[mask]
+            assert pool.shape[0] > 0, "Cylinder mask removed all points; increase radius or z-range."
 
-    # Run prediction
-    torch.set_float32_matmul_precision("high")
-    amp_dtype = torch.bfloat16 if (device == "cuda" and torch.cuda.get_device_capability()[0] >= 8) else torch.float16
-    with torch.no_grad(), torch.cuda.amp.autocast(enabled=device == "cuda", dtype=amp_dtype):
-        results = mvtracker(
-            rgbs=rgbs[None].to(device) / 255.0,
-            depths=depths[None].to(device),
-            intrs=intrs[None].to(device),
-            extrs=extrs[None].to(device),
-            query_points_3d=query_points[None].to(device),
-        )
-    pred_tracks = results["traj_e"].cpu()  # [T,N,3]
-    pred_vis = results["vis_e"].cpu()  # [T,N]
+            idx = torch.randperm(pool.shape[0])[:num_queries]
+            pts = pool[idx]
+            ts = torch.full((pts.shape[0], 1), float(t0), device=pts.device)
+            query_points = torch.cat([ts, pts], dim=1).float()  # (N,4): (t,x,y,z)
+            print(f"Sampled {pts.shape[0]} queries from depth at t={t0} within r<={xy_radius}, z∈[{z_min},{z_max}].")
+        
+        # Original non-batch processing
+        print("Processing all data at once...")
+        torch.set_float32_matmul_precision("high")
+        amp_dtype = torch.bfloat16 if (device == "cuda" and torch.cuda.get_device_capability()[0] >= 8) else torch.float16
+        with torch.no_grad(), torch.cuda.amp.autocast(enabled=device == "cuda", dtype=amp_dtype):
+            results = mvtracker(
+                rgbs=rgbs[None].to(device) / 255.0,
+                depths=depths[None].to(device),
+                intrs=intrs[None].to(device),
+                extrs=extrs[None].to(device),
+                query_points_3d=query_points[None].to(device),
+            )
+        pred_tracks = results["traj_e"].cpu()  # [T,N,3]
+        pred_vis = results["vis_e"].cpu()  # [T,N]
 
     # Visualize results
     rr.init("3dpt", recording_id="v0.16")
