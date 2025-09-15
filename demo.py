@@ -178,7 +178,6 @@ def main():
                     intrs_batch[:, :, 1, 1] /= spatial_downsample  # fy
                     intrs_batch[:, :, 0, 2] /= spatial_downsample  # cx
                     intrs_batch[:, :, 1, 2] /= spatial_downsample  # cy
-                    
                 preprocess_time = time.time() - preprocess_start
                 
                 batch_memory_gb = rgbs_batch.numel() * 4 / (1024**3) + depths_batch.numel() * 4 / (1024**3)
