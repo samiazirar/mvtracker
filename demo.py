@@ -103,7 +103,7 @@ def main():
     query_points_original = torch.from_numpy(sample_original["query_points"]).float()  
     print("Shapes: rgbs, depths, intrs, extrs, query_points:", rgbs_original.shape, depths_original.shape, intrs_original.shape, extrs_original.shape, query_points_original.shape)
     # Load the RH20T dataset with memory management
-    sample_path = "/data/rh20t_api/data/RH20T/packed_npz/task_0001_user_0016_scene_0001_cfg_0003_wc_rotz180.npz"
+    sample_path = "/data/rh20t_api/data/RH20T/packed_npz/task_0022_user_0011_scene_0006_cfg_0003.npz"
     
     print("Loading large RH20T dataset - this may take a while...")
     print("Memory before loading:", torch.cuda.memory_allocated() / 1024**3 if torch.cuda.is_available() else "N/A", "GB GPU")
@@ -178,6 +178,7 @@ def main():
                     intrs_batch[:, :, 1, 1] /= spatial_downsample  # fy
                     intrs_batch[:, :, 0, 2] /= spatial_downsample  # cx
                     intrs_batch[:, :, 1, 2] /= spatial_downsample  # cy
+                    
                 preprocess_time = time.time() - preprocess_start
                 
                 batch_memory_gb = rgbs_batch.numel() * 4 / (1024**3) + depths_batch.numel() * 4 / (1024**3)
