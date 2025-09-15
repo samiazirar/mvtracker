@@ -279,14 +279,8 @@ The central challenge in multi-view 3D point tracking is 4D reconstruction: obta
 
 Our code builds upon and was inspired by many prior works, including [SpaTracker](https://github.com/henry123-boy/SpaTracker), [CoTracker](https://github.com/facebookresearch/co-tracker), and [DUSt3R](https://github.com/naver/dust3r). We thank the authors for releasing their code and pretrained models. We are also grateful to maintainers of [Rerun](https://rerun.io) for their helpful visualization toolkit.
 
-## Citation
-
-If you find our repository useful, please consider giving it a star ⭐ and citing our work:
-```bibtex
-@inproceedings{rajic2025mvtracker,
-  title     = {Multi-View 3D Point Tracking},
-  author    = {Raji{\v{c}}, Frano and Xu, Haofei and Mihajlovic, Marko and Li, Siyuan and Demir, Irem and G{\"u}ndo{\u{g}}du, Emircan and Ke, Lei and Prokudin, Sergey and Pollefeys, Marc and Tang, Siyu},
-  booktitle = {Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV)},
-  year      = {2025}
-}
-```
+## TODO
+fix rh20T adaptaion (extrinsics and intrinsics also and that some cameras need 4000mm calibration)
+add query points to demo
+add camera info
+find cood way to store
