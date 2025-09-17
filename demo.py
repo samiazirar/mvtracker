@@ -1,13 +1,177 @@
 import argparse
 import os
+import pickle
 import warnings
+from pathlib import Path
+from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 import rerun as rr  # pip install rerun-sdk==0.21.0
 import torch
+import torch.nn.functional as F
 from huggingface_hub import hf_hub_download
 
 from mvtracker.utils.visualizer_rerun import log_pointclouds_to_rerun, log_tracks_to_rerun
+
+
+"""Demo script for MVTracker with memory optimizations and optional VGGT depth estimation.
+run with
+
+python demo.py --batch_processing --optimize_performance --temporal_stride 1 --spatial_downsample 1 --depth_estimator vggt_raw --depth_cache_dir ./depth_cache --rerun save  --random_query_points
+"""
+
+def _prepare_uint8_rgbs(rgbs: torch.Tensor) -> torch.Tensor:
+    """Convert float images to uint8 safely for depth estimation models."""
+    if rgbs.dtype == torch.uint8:
+        return rgbs
+    if not torch.is_floating_point(rgbs):
+        return rgbs.to(torch.uint8)
+    rgbs_to_scale = rgbs
+    max_val = rgbs_to_scale.max().item() if rgbs_to_scale.numel() else 0.0
+    if max_val <= 1.000001:
+        rgbs_to_scale = rgbs_to_scale * 255.0
+    return rgbs_to_scale.clamp(0, 255).round().to(torch.uint8)
+
+
+def maybe_estimate_depths_from_generic(
+    rgbs: torch.Tensor,
+    intrs: torch.Tensor,
+    extrs: torch.Tensor,
+    estimator: str,
+    cache_root: Path,
+    seq_name: str,
+    skip_if_cached: bool,
+    model_id: str = "facebook/VGGT-1B",
+) -> Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]:
+    """Selectively replace GT depths/intrinsics/extrinsics using dataset utilities."""
+    if estimator == "gt":
+        return None
+
+    cache_root = cache_root.expanduser()
+    cache_root.mkdir(parents=True, exist_ok=True)
+    rgbs_uint8 = _prepare_uint8_rgbs(rgbs.cpu())
+
+    if estimator == "duster":
+        return _estimate_duster_depths(
+            rgbs_uint8=rgbs_uint8,
+            intrs=intrs,
+            extrs=extrs,
+            cache_root=cache_root,
+            seq_name=seq_name,
+            skip_if_cached=skip_if_cached,
+        )
+
+    if estimator == "vggt_raw":
+        from mvtracker.datasets.generic_scene_dataset import _ensure_vggt_raw_cache_and_load
+
+        depths_raw, confs_raw, intrs_raw, extrs_raw = _ensure_vggt_raw_cache_and_load(
+            rgbs=rgbs_uint8,
+            seq_name=seq_name,
+            dataset_root=str(cache_root),
+            skip_if_cached=skip_if_cached,
+            model_id=model_id,
+        )
+        return depths_raw.float(), intrs_raw.float(), extrs_raw.float(), confs_raw.float()
+
+    if estimator == "vggt_aligned":
+        from mvtracker.datasets.generic_scene_dataset import _ensure_vggt_aligned_cache_and_load
+
+        depths_aligned, confs_aligned, intrs_aligned, extrs_aligned = _ensure_vggt_aligned_cache_and_load(
+            rgbs=rgbs_uint8,
+            seq_name=seq_name,
+            dataset_root=str(cache_root),
+            extrs_gt=extrs.cpu().float(),
+            skip_if_cached=skip_if_cached,
+            model_id=model_id,
+        )
+        return depths_aligned.float(), intrs_aligned.float(), extrs_aligned.float(), confs_aligned.float()
+
+    raise ValueError(f"Unsupported depth estimator mode '{estimator}'.")
+
+
+def _estimate_duster_depths(
+    rgbs_uint8: torch.Tensor,
+    intrs: torch.Tensor,
+    extrs: torch.Tensor,
+    cache_root: Path,
+    seq_name: str,
+    skip_if_cached: bool,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Run (or load) DUSt3R depth estimates while keeping GT intrinsics/extrinsics."""
+    from scripts.egoexo4d_preprocessing import main_estimate_duster_depth
+            # "DUSt3R depth estimation requires the Duster repo in PYTHONPATH. "
+            # "Follow scripts/estimate_depth_with_duster.py instructions to install it."
+
+    V, T, _, H, W = rgbs_uint8.shape
+    depth_root = cache_root / f"duster_depths__{seq_name}"
+    depth_root.mkdir(parents=True, exist_ok=True)
+
+    sentinel_frame = depth_root / f"3d_model__{T - 1:05d}__scene.npz"
+    needs_run = not (skip_if_cached and sentinel_frame.exists())
+
+    if needs_run:
+        pkl_path = cache_root / f"{seq_name}.pkl"
+        if not (skip_if_cached and pkl_path.exists()):
+            scene_payload = {
+                "ego_cam_name": None,
+                "rgbs": {},
+                "intrs": {},
+                "extrs": {},
+            }
+            for v in range(V):
+                cam_name = f"cam_{v:03d}"
+                scene_payload["rgbs"][cam_name] = rgbs_uint8[v].numpy()
+                intr_v = intrs[v]
+                extr_v = extrs[v]
+                if intr_v.ndim == 3:
+                    intr0 = intr_v[0].cpu()
+                    if not torch.allclose(intr_v, intr_v[0][None], atol=1e-4):
+                        warnings.warn(
+                            f"Intrinsics for {cam_name} vary across frames; using first frame for DUSt3R."
+                        )
+                else:
+                    intr0 = intr_v.cpu()
+                if extr_v.ndim == 3:
+                    extr0 = extr_v[0].cpu()
+                    if not torch.allclose(extr_v, extr_v[0][None], atol=1e-4):
+                        warnings.warn(
+                            f"Extrinsics for {cam_name} vary across frames; using first frame for DUSt3R."
+                        )
+                else:
+                    extr0 = extr_v.cpu()
+                scene_payload["intrs"][cam_name] = intr0.numpy()
+                scene_payload["extrs"][cam_name] = extr0.numpy()
+            with open(pkl_path, "wb") as f:
+                pickle.dump(scene_payload, f)
+
+        print(f"Running DUSt3R to estimate depths for sequence '{seq_name}' (may take a while)...")
+        main_estimate_duster_depth(
+            pkl_scene_file=str(pkl_path),
+            depths_output_dir=str(depth_root),
+            save_rerun_viz=False,
+            skip_if_output_already_exists=skip_if_cached,
+        )
+
+    depth_slices = []
+    conf_slices = []
+    for t in range(T):
+        scene_file = depth_root / f"3d_model__{t:05d}__scene.npz"
+        if not scene_file.exists():
+            raise FileNotFoundError(
+                f"Expected DUSt3R output '{scene_file}' not found. "
+                "Ensure DUSt3R finished successfully."
+            )
+        data = np.load(scene_file)
+        d = torch.from_numpy(data["depths"]).float()  # [V, H', W']
+        c = torch.from_numpy(data.get("confs", np.ones_like(data["depths"], dtype=np.float32))).float()
+        d = F.interpolate(d[:, None], size=(H, W), mode="nearest")[:, 0]
+        c = F.interpolate(c[:, None], size=(H, W), mode="nearest")[:, 0]
+        depth_slices.append(d)
+        conf_slices.append(c)
+
+    depths = torch.stack(depth_slices, dim=1).unsqueeze(2)  # [V, T, 1, H, W]
+    confs = torch.stack(conf_slices, dim=1).unsqueeze(2)
+    return depths, intrs.float(), extrs.float(), confs
 
 
 def main():
@@ -58,7 +222,7 @@ def main():
     p.add_argument(
         "--batch_size_views", 
         type=int, 
-        default=4, 
+        default=8, 
         help="Number of views to process at once when batch processing is enabled."
     )
     p.add_argument(
@@ -73,6 +237,57 @@ def main():
         help="Enable performance optimizations (larger batches, reduced I/O)."
     )
     p.add_argument(
+        "--depth_estimator",
+        choices=["gt", "duster", "vggt_raw", "vggt_aligned"],
+        default="gt",
+        help="Optionally replace GT depths with DUSt3R or VGGT predictions."
+    )
+    p.add_argument(
+        "--depth_cache_dir",
+        default="./depth_cache",
+        help="Directory to store cached depth predictions."
+    )
+    p.add_argument(
+        "--force_depth_recompute",
+        action="store_true",
+        help="Re-run depth estimation even when cached outputs exist."
+    )
+    p.add_argument(
+        "--clean_pointcloud",
+        action="store_true",
+        help="Run Open3D outlier removal before logging point clouds."
+    )
+    p.add_argument(
+        "--pc_clean_method",
+        choices=["statistical", "radius"],
+        default="statistical",
+        help="Point-cloud cleaning mode when --clean_pointcloud is set."
+    )
+    p.add_argument(
+        "--pc_clean_nb_neighbors",
+        type=int,
+        default=20,
+        help="Neighbors for statistical outlier removal."
+    )
+    p.add_argument(
+        "--pc_clean_std_ratio",
+        type=float,
+        default=2.0,
+        help="Std-dev multiplier for statistical outlier removal."
+    )
+    p.add_argument(
+        "--pc_clean_radius",
+        type=float,
+        default=0.05,
+        help="Radius for radius-based outlier removal."
+    )
+    p.add_argument(
+        "--pc_clean_min_points",
+        type=int,
+        default=5,
+        help="Minimum neighbors inside the radius filter."
+    )
+    p.add_argument(
         "--rrd",
         default="mvtracker_demo.rrd",
         help=(
@@ -84,6 +299,26 @@ def main():
     np.random.seed(72)
     torch.manual_seed(72)
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    depth_cache_root = Path(args.depth_cache_dir)
+    depth_skip_if_cached = not args.force_depth_recompute
+    if args.depth_estimator != "gt":
+        print(
+            f"Depth estimator '{args.depth_estimator}' enabled; cache directory: "
+            f"{depth_cache_root.expanduser()}"
+        )
+    pc_clean_cfg: Optional[Dict[str, Any]] = None
+    if args.clean_pointcloud:
+        pc_clean_cfg = {
+            "method": args.pc_clean_method,
+            "nb_neighbors": args.pc_clean_nb_neighbors,
+            "std_ratio": args.pc_clean_std_ratio,
+            "radius": args.pc_clean_radius,
+            "min_points": args.pc_clean_min_points,
+        }
+        print(
+            "Open3D point-cloud cleaning enabled "
+            f"(method={pc_clean_cfg['method']})."
+        )
 
     # Load MVTracker predictor
     mvtracker = torch.hub.load("ethz-vlg/mvtracker", "mvtracker", pretrained=True, device=device)
@@ -103,20 +338,20 @@ def main():
     query_points_original = torch.from_numpy(sample_original["query_points"]).float()  
     print("Shapes: rgbs, depths, intrs, extrs, query_points:", rgbs_original.shape, depths_original.shape, intrs_original.shape, extrs_original.shape, query_points_original.shape)
     # Load the RH20T dataset with memory management
-    sample_path = "/data/rh20t_api/data/RH20T/packed_npz/task_0022_user_0011_scene_0006_cfg_0003.npz"
+    sample_path = "/data/rh20t_api/data/RH20T/packed_npz/task_0010_user_0011_scene_0010_cfg_0003.npz"
     
     print("Loading large RH20T dataset - this may take a while...")
     print("Memory before loading:", torch.cuda.memory_allocated() / 1024**3 if torch.cuda.is_available() else "N/A", "GB GPU")
     
     # Clean up the original demo data to free memory
-    del rgbs_original, depths_original, intrs_original, extrs_original, query_points_original, sample_original
+    # del rgbs_original, depths_original, intrs_original, extrs_original, query_points_original, sample_original
     import gc
     gc.collect()
     
     # Load with memory mapping to avoid loading entire file into RAM at once
     sample = np.load(sample_path, mmap_mode='r')
     print(f"Dataset shapes - RGB: {sample['rgbs'].shape}, Depth: {sample['depths'].shape}")
-    
+    depth_seq_name_base = Path(sample_path).stem or "demo_sequence"
     # Load data in smaller chunks or subsample to fit memory
     temporal_stride = args.temporal_stride
     spatial_downsample = args.spatial_downsample
@@ -178,18 +413,33 @@ def main():
                     intrs_batch[:, :, 1, 1] /= spatial_downsample  # fy
                     intrs_batch[:, :, 0, 2] /= spatial_downsample  # cx
                     intrs_batch[:, :, 1, 2] /= spatial_downsample  # cy
-                    intrs_batch[:, :, 0, 0] *= 0.5  # fx
-                    intrs_batch[:, :, 1, 1] *= 0.5  # fy
-                    intrs_batch[:, :, 0, 2] *= 0.5  # cx
-                    intrs_batch[:, :, 1, 2] *= 0.5  # cy
+
                 preprocess_time = time.time() - preprocess_start
-                
+
+                if args.depth_estimator != "gt":
+                    seq_name = (
+                        f"{depth_seq_name_base}_v{view_start:03d}-{view_end:03d}_"
+                        f"f{frame_start:05d}-{frame_end:05d}"
+                    )
+                    depth_estimate = maybe_estimate_depths_from_generic(
+                        rgbs=rgbs_batch,
+                        intrs=intrs_batch,
+                        extrs=extrs_batch,
+                        estimator=args.depth_estimator,
+                        cache_root=depth_cache_root,
+                        seq_name=seq_name,
+                        skip_if_cached=depth_skip_if_cached,
+                    )
+                    if depth_estimate is not None:
+                        depths_batch, intrs_batch, extrs_batch, _ = depth_estimate
+
                 batch_memory_gb = rgbs_batch.numel() * 4 / (1024**3) + depths_batch.numel() * 4 / (1024**3)
                 print(f"  Batch shape: {rgbs_batch.shape}, Memory: {batch_memory_gb:.2f} GB, Load: {load_time:.2f}s")
                 
                 # Load query points once (they are small)
                 if view_start == 0 and frame_start == 0:
-                    query_points = torch.from_numpy(sample["query_points"]).float()
+                    if "query_points" in sample:
+                        query_points = torch.from_numpy(sample["query_points"]).float()
                     
                     # Generate random query points if requested
                     if args.random_query_points:
@@ -306,6 +556,8 @@ def main():
         depths = torch.from_numpy(sample["depths"][:, ::temporal_stride]).float()
         intrs = torch.from_numpy(sample["intrs"][:, ::temporal_stride]).float()
         extrs = torch.from_numpy(sample["extrs"][:, ::temporal_stride]).float()
+
+        
         
         if spatial_downsample > 1:
             rgbs = rgbs[:, :, :, ::spatial_downsample, ::spatial_downsample]
@@ -319,10 +571,13 @@ def main():
     else:
         # Original single-pass loading
         rgbs = torch.from_numpy(sample["rgbs"][:, ::temporal_stride]).float()
-        depths = torch.from_numpy(sample["depths"][:, ::temporal_stride]).float()
+        depths = torch.from_numpy(sample["depths"][:, ::temporal_stride]).float()  # Convert mm to meters
         intrs = torch.from_numpy(sample["intrs"][:, ::temporal_stride]).float()
         extrs = torch.from_numpy(sample["extrs"][:, ::temporal_stride]).float()
-        query_points = torch.from_numpy(sample["query_points"]).float()
+        if "query_points" in sample:
+            query_points = torch.from_numpy(sample["query_points"]).float()
+        else:
+            query_points = torch.zeros((0, 4), dtype=torch.float32)  # No query points
         
         # Apply spatial downsampling if requested
         if spatial_downsample > 1:
@@ -335,7 +590,20 @@ def main():
             intrs[:, :, 1, 1] /= spatial_downsample  # fy
             intrs[:, :, 0, 2] /= spatial_downsample  # cx
             intrs[:, :, 1, 2] /= spatial_downsample  # cy
-        
+
+        if args.depth_estimator != "gt":
+            depth_estimate = maybe_estimate_depths_from_generic(
+                rgbs=rgbs,
+                intrs=intrs,
+                extrs=extrs,
+                estimator=args.depth_estimator,
+                cache_root=depth_cache_root,
+                seq_name=depth_seq_name_base,
+                skip_if_cached=depth_skip_if_cached,
+            )
+            if depth_estimate is not None:
+                depths, intrs, extrs, _ = depth_estimate
+
         print(f"After temporal subsampling (stride={temporal_stride}):")
         print("Shapes: rgbs, depths, intrs, extrs, query_points:", rgbs.shape, depths.shape, intrs.shape, extrs.shape, query_points.shape)
         
@@ -405,7 +673,7 @@ def main():
         depths_conf=None,
         conf_thrs=[5.0],
         log_only_confident_pc=False,
-        radii=-2.45,
+        radii=-1.45,#make smaller for now
         fps=12,
         bbox_crop=None,
         sphere_radius_crop=12.0,
@@ -415,6 +683,7 @@ def main():
         log_depthmap_as_image_v2=False,
         log_camera_frustrum=True,
         log_rgb_pointcloud=True,
+        pc_clean_cfg=pc_clean_cfg,
     )
     log_tracks_to_rerun(
         dataset_name="demo",

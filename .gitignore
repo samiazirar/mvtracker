@@ -21,3 +21,11 @@ logs*
 
 *.rrd
 */*.rrd
+
+duster 
+*/duster
+duster/*
+duster
+
+
+*.pkl

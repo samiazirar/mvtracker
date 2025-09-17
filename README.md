@@ -284,3 +284,5 @@ fix rh20T adaptaion (extrinsics and intrinsics also and that some cameras need 4
 add query points to demo
 add camera info
 find cood way to store
+
+they use cotracker 2 parts check if better avaialble

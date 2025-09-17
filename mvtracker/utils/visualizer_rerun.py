@@ -1,4 +1,5 @@
-from typing import Union, Optional, List, Dict, Any
+import warnings
+from typing import Union, Optional, List, Dict, Any, Tuple
 
 import matplotlib
 import numpy as np
@@ -8,6 +9,56 @@ import seaborn as sns
 import torch
 from matplotlib import pyplot as plt, colors as mcolors, cm as cm
 from sklearn.decomposition import PCA
+
+
+def _clean_point_cloud_with_open3d(
+        points: np.ndarray,
+        colors: np.ndarray,
+        cfg: Dict[str, Any],
+) -> Tuple[np.ndarray, np.ndarray]:
+    if points.size == 0:
+        return points, colors
+    try:
+        import open3d as o3d
+    except ImportError:
+        warnings.warn("Open3D not installed; skipping point cloud cleaning.")
+        return points, colors
+
+    pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(points.astype(np.float64, copy=False)))
+    if colors.size:
+        colors01 = (colors.astype(np.float64, copy=False) / 255.0).clip(0.0, 1.0)
+        pcd.colors = o3d.utility.Vector3dVector(colors01)
+
+    method = cfg.get("method", "statistical")
+    try:
+        if method == "statistical":
+            nb_neighbors = int(cfg.get("nb_neighbors", 20))
+            std_ratio = float(cfg.get("std_ratio", 2.0))
+            _, ind = pcd.remove_statistical_outlier(nb_neighbors=nb_neighbors, std_ratio=std_ratio)
+        elif method == "radius":
+            radius = float(cfg.get("radius", 0.05))
+            min_points = int(cfg.get("min_points", 5))
+            _, ind = pcd.remove_radius_outlier(nb_points=min_points, radius=radius)
+        else:
+            warnings.warn(f"Unknown point cloud cleaning method '{method}'; skipping.")
+            return points, colors
+    except Exception as exc:
+        warnings.warn(f"Open3D point cloud cleaning failed ({exc}); skipping.")
+        return points, colors
+
+    if len(ind) == 0:
+        empty_colors = np.empty((0, colors.shape[1]), dtype=colors.dtype) if colors.ndim == 2 else colors[:0]
+        return np.empty((0, 3), dtype=np.float32), empty_colors
+
+    cleaned = pcd.select_by_index(ind)
+    cleaned_points = np.asarray(cleaned.points, dtype=np.float32)
+    if colors.size:
+        cleaned_colors = np.asarray(cleaned.colors)
+        cleaned_colors = np.clip(cleaned_colors, 0.0, 1.0)
+        cleaned_colors = (cleaned_colors * 255.0).astype(colors.dtype, copy=False)
+    else:
+        cleaned_colors = colors
+    return cleaned_points, cleaned_colors
 
 
 def setup_libs(latex=False):
@@ -56,6 +107,7 @@ def log_pointclouds_to_rerun(
         log_camera_frustrum: bool = True,
         log_rgb_pointcloud: bool = True,
         timesteps_to_log: Optional[List[int]] = None,
+        pc_clean_cfg: Optional[Dict[str, Any]] = None,
 ):
     # Set the up-axis for the world
     # Log coordinate axes for reference
@@ -162,8 +214,16 @@ def log_pointclouds_to_rerun(
                             continue
                         pc_name__mask__tuples += [(name, mask)]
                 for pc_name, mask in pc_name__mask__tuples:
-                    rr.log(f"sequence-{datapoint_idx}/{dataset_name}/{pc_name}/view-{v}",
-                           rr.Points3D(world_coords[mask], colors=rgb_colors[mask], radii=radii))
+                    points = world_coords[mask]
+                    colors_subset = rgb_colors[mask]
+                    if pc_clean_cfg is not None:
+                        points, colors_subset = _clean_point_cloud_with_open3d(points, colors_subset, pc_clean_cfg)
+                    if points.shape[0] == 0:
+                        continue
+                    rr.log(
+                        f"sequence-{datapoint_idx}/{dataset_name}/{pc_name}/view-{v}",
+                        rr.Points3D(points, colors=colors_subset, radii=radii),
+                    )
 
 
 def _log_tracks_to_rerun(
