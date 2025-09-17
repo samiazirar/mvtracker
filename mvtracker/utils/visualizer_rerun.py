@@ -45,6 +45,8 @@ def _clean_point_cloud_with_open3d(
     except Exception as exc:
         warnings.warn(f"Open3D point cloud cleaning failed ({exc}); skipping.")
         return points, colors
+    except KeyboardInterrupt:
+        raise  KeyboardInterrupt
 
     if len(ind) == 0:
         empty_colors = np.empty((0, colors.shape[1]), dtype=colors.dtype) if colors.ndim == 2 else colors[:0]

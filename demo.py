@@ -3,7 +3,7 @@ import os
 import pickle
 import warnings
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import rerun as rr  # pip install rerun-sdk==0.21.0
@@ -11,6 +11,11 @@ import torch
 import torch.nn.functional as F
 from huggingface_hub import hf_hub_download
 
+from mvtracker.models.core.monocular_baselines import (
+    CoTrackerOfflineWrapper,
+    CoTrackerOnlineWrapper,
+    MonocularToMultiViewAdapter,
+)
 from mvtracker.utils.visualizer_rerun import log_pointclouds_to_rerun, log_tracks_to_rerun
 
 
@@ -42,6 +47,7 @@ def maybe_estimate_depths_from_generic(
     seq_name: str,
     skip_if_cached: bool,
     model_id: str = "facebook/VGGT-1B",
+    depths_gt: Optional[torch.Tensor] = None,
 ) -> Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]:
     """Selectively replace GT depths/intrinsics/extrinsics using dataset utilities."""
     if estimator == "gt":
@@ -85,6 +91,18 @@ def maybe_estimate_depths_from_generic(
             model_id=model_id,
         )
         return depths_aligned.float(), intrs_aligned.float(), extrs_aligned.float(), confs_aligned.float()
+
+    if estimator == "fusion":
+        return _estimate_fused_depths(
+            rgbs_uint8=rgbs_uint8,
+            intrs=intrs,
+            extrs=extrs,
+            cache_root=cache_root,
+            seq_name=seq_name,
+            skip_if_cached=skip_if_cached,
+            model_id=model_id,
+            depths_gt=depths_gt,
+        )
 
     raise ValueError(f"Unsupported depth estimator mode '{estimator}'.")
 
@@ -174,6 +192,210 @@ def _estimate_duster_depths(
     return depths, intrs.float(), extrs.float(), confs
 
 
+def _ensure_depth_channel(volume: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+    if volume is None:
+        return None
+    if volume.ndim == 4:
+        return volume.unsqueeze(2)
+    return volume
+
+
+def _resize_like(template: torch.Tensor, volume: torch.Tensor, mode: str = "bilinear") -> torch.Tensor:
+    if volume.shape[-2:] == template.shape[-2:]:
+        return volume
+    v, t = volume.shape[:2]
+    c = volume.shape[2]
+    flat = volume.reshape(v * t, c, volume.shape[-2], volume.shape[-1])
+    if mode == "nearest":
+        resized = F.interpolate(flat, size=template.shape[-2:], mode="nearest")
+    else:
+        resized = F.interpolate(flat, size=template.shape[-2:], mode=mode, align_corners=False)
+    return resized.reshape(v, t, c, template.shape[-2], template.shape[-1])
+
+
+def _detect_static_prefix_frames(
+    rgbs_uint8: torch.Tensor,
+    diff_threshold: float = 0.5,
+    max_frames: int = 10,
+) -> List[int]:
+    if rgbs_uint8.ndim != 5:
+        return []
+    _, t, _, _, _ = rgbs_uint8.shape
+    if t == 0:
+        return []
+    if t == 1:
+        return [0]
+    diffs = (
+        rgbs_uint8[:, 1:].float()
+        .sub(rgbs_uint8[:, :-1].float())
+        .abs()
+        .mean(dim=(0, 2, 3, 4))
+    )
+    frames = [0]
+    for idx, delta in enumerate(diffs):
+        if delta.item() <= diff_threshold and len(frames) < max_frames:
+            frames.append(idx + 1)
+        else:
+            break
+    return frames
+
+
+def _estimate_per_view_scale(
+    pred_depths: torch.Tensor,
+    gt_depths: torch.Tensor,
+    frame_indices: List[int],
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    v, t = pred_depths.shape[:2]
+    if not frame_indices:
+        frame_indices = list(range(min(t, 3)))
+    scales = []
+    for vid in range(v):
+        pred_slice = pred_depths[vid, frame_indices]
+        gt_slice = gt_depths[vid, frame_indices]
+        valid = (
+            (pred_slice > eps)
+            & (gt_slice > eps)
+            & torch.isfinite(pred_slice)
+            & torch.isfinite(gt_slice)
+        )
+        if valid.sum() < 16:
+            scales.append(torch.tensor(1.0, device=pred_depths.device, dtype=pred_depths.dtype))
+            continue
+        ratios = (gt_slice[valid] / pred_slice[valid]).reshape(-1)
+        if ratios.numel() == 0:
+            scales.append(torch.tensor(1.0, device=pred_depths.device, dtype=pred_depths.dtype))
+            continue
+        scale = torch.median(ratios)
+        if not torch.isfinite(scale):
+            scale = torch.tensor(1.0, device=pred_depths.device, dtype=pred_depths.dtype)
+        scales.append(scale)
+    scale_tensor = torch.stack(scales).view(v, 1, 1, 1, 1)
+    return scale_tensor
+
+
+def _confidence_from_depth(depth: torch.Tensor) -> torch.Tensor:
+    conf = torch.ones_like(depth)
+    conf[~torch.isfinite(depth)] = 0
+    conf[depth <= 0] = 0
+    return conf
+
+
+def _smooth_depth_with_weights(depth: torch.Tensor, weights: torch.Tensor, kernel_size: int = 3) -> torch.Tensor:
+    if kernel_size < 1:
+        return depth
+    padding = kernel_size // 2
+    flat_depth = depth.reshape(-1, 1, depth.shape[-2], depth.shape[-1])
+    flat_weights = weights.reshape(-1, 1, weights.shape[-2], weights.shape[-1])
+    kernel = torch.ones(1, 1, kernel_size, kernel_size, device=depth.device, dtype=depth.dtype)
+    weighted_depth = F.conv2d(flat_depth * flat_weights, kernel, padding=padding)
+    summed_weights = F.conv2d(flat_weights, kernel, padding=padding).clamp_min(1e-6)
+    smoothed = (weighted_depth / summed_weights).reshape_as(depth)
+    return smoothed
+
+
+def _estimate_fused_depths(
+    rgbs_uint8: torch.Tensor,
+    intrs: torch.Tensor,
+    extrs: torch.Tensor,
+    cache_root: Path,
+    seq_name: str,
+    skip_if_cached: bool,
+    model_id: str,
+    depths_gt: Optional[torch.Tensor],
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    if depths_gt is None:
+        raise ValueError("'fusion' depth estimator requires ground-truth depths for calibration.")
+
+    depths_gt = _ensure_depth_channel(depths_gt).float()
+
+    depths_duster, _, _, confs_duster = _estimate_duster_depths(
+        rgbs_uint8=rgbs_uint8,
+        intrs=intrs,
+        extrs=extrs,
+        cache_root=cache_root,
+        seq_name=seq_name,
+        skip_if_cached=skip_if_cached,
+    )
+
+    from mvtracker.datasets.generic_scene_dataset import _ensure_vggt_aligned_cache_and_load
+
+    depths_vggt, confs_vggt, _intrs_vggt, _extrs_vggt = _ensure_vggt_aligned_cache_and_load(
+        rgbs=rgbs_uint8,
+        seq_name=seq_name,
+        dataset_root=str(cache_root),
+        extrs_gt=extrs.cpu().float(),
+        skip_if_cached=skip_if_cached,
+        model_id=model_id,
+    )
+
+    depths_vggt = _ensure_depth_channel(depths_vggt).float()
+    confs_vggt = _ensure_depth_channel(confs_vggt).float()
+    depths_duster = _ensure_depth_channel(depths_duster).float()
+    confs_duster = _ensure_depth_channel(confs_duster).float()
+
+    depths_vggt = _resize_like(depths_gt, depths_vggt, mode="bilinear")
+    depths_duster = _resize_like(depths_gt, depths_duster, mode="bilinear")
+    confs_vggt = _resize_like(depths_gt, confs_vggt, mode="nearest")
+    confs_duster = _resize_like(depths_gt, confs_duster, mode="nearest")
+
+    static_frames = _detect_static_prefix_frames(rgbs_uint8)
+    scale_duster = _estimate_per_view_scale(depths_duster, depths_gt, static_frames)
+    scale_vggt = _estimate_per_view_scale(depths_vggt, depths_gt, static_frames)
+
+    if static_frames:
+        print(f"Fusion calibration: using {len(static_frames)} static frame(s) before motion.")
+    else:
+        print("Fusion calibration: no static prefix detected; falling back to first frames.")
+
+    depths_duster = depths_duster * scale_duster
+    depths_vggt = depths_vggt * scale_vggt
+
+    conf_gt = _confidence_from_depth(depths_gt)
+    conf_duster = confs_duster.clamp_min(0.0)
+    conf_vggt = confs_vggt.clamp_min(0.0)
+
+    conf_duster = conf_duster / (conf_duster.max().clamp_min(1e-6))
+    conf_vggt = conf_vggt / (conf_vggt.max().clamp_min(1e-6))
+
+    valid_gt = conf_gt > 0
+    if valid_gt.any():
+        median_depth = depths_gt[valid_gt].median().item()
+        sigma = max(median_depth * 0.05, 0.02)
+    else:
+        sigma = 0.1
+    sigma_tensor = torch.tensor(sigma, device=depths_gt.device, dtype=depths_gt.dtype)
+
+    residual_duster = (depths_duster - depths_gt).abs()
+    residual_vggt = (depths_vggt - depths_gt).abs()
+    joint_residual = torch.min(residual_duster, residual_vggt)
+
+    weight_gt = conf_gt * torch.exp(-joint_residual / (sigma_tensor * 1.5 + 1e-6))
+    weight_duster = conf_duster * torch.exp(-residual_duster / (sigma_tensor + 1e-6))
+    weight_vggt = conf_vggt * torch.exp(-residual_vggt / (sigma_tensor + 1e-6))
+
+    outlier_thresh = sigma_tensor * 3.0
+    weight_duster[residual_duster > outlier_thresh] *= 0.1
+    weight_vggt[residual_vggt > outlier_thresh] *= 0.1
+    weight_gt[~valid_gt] = 0
+
+    weight_sum = (weight_gt + weight_duster + weight_vggt).clamp_min(1e-6)
+    fused = (
+        weight_gt * depths_gt
+        + weight_duster * depths_duster
+        + weight_vggt * depths_vggt
+    ) / weight_sum
+
+    fused = _smooth_depth_with_weights(fused, weight_sum)
+
+    fused_conf = weight_sum.clamp(max=10.0)
+
+    fused = fused.to(torch.float32)
+    fused_conf = fused_conf.to(torch.float32)
+
+    return fused, intrs.float(), extrs.float(), fused_conf
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument(
@@ -201,6 +423,12 @@ def main():
         "--random_query_points",
         action="store_true",
         help="Use random query points instead of demo ones.",
+    )
+    p.add_argument(
+        "--tracker",
+        choices=["mvtracker", "cotracker3_online", "cotracker3_offline"],
+        default="mvtracker",
+        help="Select which tracker to run. Defaults to MVTracker; CoTracker3 wrappers are available for comparison.",
     )
     p.add_argument(
         "--temporal_stride", 
@@ -238,9 +466,9 @@ def main():
     )
     p.add_argument(
         "--depth_estimator",
-        choices=["gt", "duster", "vggt_raw", "vggt_aligned"],
+        choices=["gt", "duster", "vggt_raw", "vggt_aligned", "fusion"],
         default="gt",
-        help="Optionally replace GT depths with DUSt3R or VGGT predictions."
+        help="Optionally replace GT depths with DUSt3R or VGGT predictions or fuse all sources."
     )
     p.add_argument(
         "--depth_cache_dir",
@@ -320,8 +548,24 @@ def main():
             f"(method={pc_clean_cfg['method']})."
         )
 
-    # Load MVTracker predictor
-    mvtracker = torch.hub.load("ethz-vlg/mvtracker", "mvtracker", pretrained=True, device=device)
+    print(f"Using tracker: {args.tracker}")
+    if args.tracker == "mvtracker":
+        mvtracker = torch.hub.load(
+            "ethz-vlg/mvtracker",
+            "mvtracker",
+            pretrained=True,
+            device=device,
+        )
+        mvtracker.eval()
+    else:
+        if args.tracker == "cotracker3_online":
+            base_tracker = CoTrackerOnlineWrapper(model_name="cotracker3_online")
+        else:
+            base_tracker = CoTrackerOfflineWrapper(model_name="cotracker3_offline")
+        base_tracker = base_tracker.to(device)
+        base_tracker.eval()
+        mvtracker = MonocularToMultiViewAdapter(base_tracker).to(device)
+        mvtracker.eval()
 
     # Download demo sample from Hugging Face Hub
     sample_path = hf_hub_download(
@@ -429,6 +673,7 @@ def main():
                         cache_root=depth_cache_root,
                         seq_name=seq_name,
                         skip_if_cached=depth_skip_if_cached,
+                        depths_gt=depths_batch,
                     )
                     if depth_estimate is not None:
                         depths_batch, intrs_batch, extrs_batch, _ = depth_estimate
@@ -600,6 +845,7 @@ def main():
                 cache_root=depth_cache_root,
                 seq_name=depth_seq_name_base,
                 skip_if_cached=depth_skip_if_cached,
+                depths_gt=depths,
             )
             if depth_estimate is not None:
                 depths, intrs, extrs, _ = depth_estimate
