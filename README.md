@@ -286,3 +286,4 @@ add camera info
 find cood way to store
 
 they use cotracker 2 parts check if better avaialble
+-- it has cotracker3 somewhere so maybe just use this

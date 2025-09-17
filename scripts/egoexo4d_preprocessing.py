@@ -392,18 +392,8 @@ def main_estimate_duster_depth(
         save_rerun_viz=False,
         skip_if_output_already_exists=True,
 ):
-    checkpoint_env = os.getenv("DUSTER_CHECKPOINT")
-    default_ckpt = Path(__file__).resolve().parents[1] / "duster/checkpoints/DUSt3R_ViTLarge_BaseDecoder_512_dpt.pth"
-    checkpoint_path = Path(checkpoint_env) if checkpoint_env else default_ckpt
-    if not checkpoint_path.is_file():
-        raise FileNotFoundError(
-            "DUSt3R checkpoint not found at "
-            f"{checkpoint_path}. Download it as documented in scripts/estimate_depth_with_duster.py "
-            "or set DUSTER_CHECKPOINT to its location."
-        )
-
     duster_kwargs = {
-        "model_name_or_path": str(checkpoint_path),
+        "model_name_or_path": "/workspace/duster/checkpoints/DUSt3R_ViTLarge_BaseDecoder_512_dpt.pth",
         "silent": True,
         "output_2d_matches": False,
         "dump_exhaustive_data": False,
