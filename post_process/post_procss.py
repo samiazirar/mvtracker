@@ -2,3 +2,4 @@
 # TODO Use heuristics to have it tracked also when occluded (end when removing)
 # TODO Get the views and maskt eh hands robot etc
 # TODO Track the hans and get object masks and 3D models
+# TODO find static regions (whcih are e.g. occluded by hand) and make tem unchangeble and thenn rerun pipieline

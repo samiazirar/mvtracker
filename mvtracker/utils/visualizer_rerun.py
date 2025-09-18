@@ -1,5 +1,5 @@
 import warnings
-from typing import Union, Optional, List, Dict, Any, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import matplotlib
 import numpy as np
@@ -110,6 +110,7 @@ def log_pointclouds_to_rerun(
         log_rgb_pointcloud: bool = True,
         timesteps_to_log: Optional[List[int]] = None,
         pc_clean_cfg: Optional[Dict[str, Any]] = None,
+        camera_ids: Optional[Sequence[str]] = None,
 ):
     # Set the up-axis for the world
     # Log coordinate axes for reference
@@ -128,7 +129,20 @@ def log_pointclouds_to_rerun(
     extrs_inv = torch.inverse(extrs_square.float()).type(extrs.dtype)
     assert intrs_inv.shape == (B, V, T, 3, 3)
     assert extrs_inv.shape == (B, V, T, 4, 4)
+    camera_labels: Optional[List[str]] = None
+    if camera_ids is not None:
+        camera_labels = [str(cid) for cid in camera_ids]
+        if len(camera_labels) != V:
+            warnings.warn(
+                "`camera_ids` length does not match number of views; falling back to index-based naming."
+            )
+            camera_labels = None
+        else:
+            camera_labels = [label.strip().replace("/", "_").replace(" ", "_") for label in camera_labels]
+
     for v in range(V):  # Iterate over views
+        camera_label = camera_labels[v] if camera_labels is not None else str(v)
+        view_entity = f"view-{camera_label}"
         for t in range(T):  # Iterate over frames
 
             if timesteps_to_log is not None and t not in timesteps_to_log:
@@ -139,12 +153,12 @@ def log_pointclouds_to_rerun(
             # Log RGB image
             rgb_image = rgbs[0, v, t].permute(1, 2, 0).cpu().numpy()
             if log_rgb_image:
-                rr.log(f"sequence-{datapoint_idx}/{dataset_name}/image/view-{v}/rgb", rr.Image(rgb_image))
+                rr.log(f"sequence-{datapoint_idx}/{dataset_name}/image/{view_entity}/rgb", rr.Image(rgb_image))
 
             # Log Depth map
             depth_map = depths[0, v, t, 0].cpu().numpy()
             if log_depthmap_as_image_v1:
-                rr.log(f"sequence-{datapoint_idx}/{dataset_name}/image/view-{v}/depth",
+                rr.log(f"sequence-{datapoint_idx}/{dataset_name}/image/{view_entity}/depth",
                        rr.DepthImage(depth_map, point_fill_ratio=0.2))
 
             # Log Depth map as RGB
@@ -154,7 +168,7 @@ def log_pointclouds_to_rerun(
             depth_color_rgba = turbo_cmap(norm(depth_map))
             depth_color_rgb = (depth_color_rgba[..., :3] * 255).astype(np.uint8)
             if log_depthmap_as_image_v2:
-                rr.log(f"sequence-{datapoint_idx}/{dataset_name}/image/view-{v}/deptha-as-rgb",
+                rr.log(f"sequence-{datapoint_idx}/{dataset_name}/image/{view_entity}/deptha-as-rgb",
                        rr.Image(depth_color_rgb))
 
             # Log Camera
@@ -163,9 +177,9 @@ def log_pointclouds_to_rerun(
             world_T_cam[:3, :3] = extrs_inv[0, v, t, :3, :3].cpu().numpy()
             world_T_cam[:3, 3] = extrs_inv[0, v, t, :3, 3].cpu().numpy()
             if log_camera_frustrum:
-                rr.log(f"sequence-{datapoint_idx}/{dataset_name}/image/view-{v}",
+                rr.log(f"sequence-{datapoint_idx}/{dataset_name}/image/{view_entity}",
                        rr.Pinhole(image_from_camera=K, width=W, height=H))
-                rr.log(f"sequence-{datapoint_idx}/{dataset_name}/image/view-{v}",
+                rr.log(f"sequence-{datapoint_idx}/{dataset_name}/image/{view_entity}",
                        rr.Transform3D(translation=world_T_cam[:3, 3], mat3x3=world_T_cam[:3, :3]))
 
             # Generate and log point cloud colored by RGB values
@@ -223,7 +237,7 @@ def log_pointclouds_to_rerun(
                     if points.shape[0] == 0:
                         continue
                     rr.log(
-                        f"sequence-{datapoint_idx}/{dataset_name}/{pc_name}/view-{v}",
+                        f"sequence-{datapoint_idx}/{dataset_name}/{pc_name}/{view_entity}",
                         rr.Points3D(points, colors=colors_subset, radii=radii),
                     )
 

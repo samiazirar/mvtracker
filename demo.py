@@ -18,6 +18,19 @@ from mvtracker.models.core.monocular_baselines import (
 )
 from mvtracker.utils.visualizer_rerun import log_pointclouds_to_rerun, log_tracks_to_rerun
 
+import sys
+import types
+
+# Create a shim package `numpy._core` that mirrors 1.x `numpy.core` modules so
+# pickles produced with NumPy 2.x can still be loaded without upgrading numpy.
+if "numpy._core" not in sys.modules:
+    shim = types.ModuleType("numpy._core")
+    shim.__dict__.update(np.core.__dict__)
+    sys.modules["numpy._core"] = shim
+    for _submodule in ("multiarray", "numerictypes", "umath"):
+        full_name = f"numpy._core.{_submodule}"
+        if full_name not in sys.modules and hasattr(np.core, _submodule):
+            sys.modules[full_name] = getattr(np.core, _submodule)
 
 """Demo script for MVTracker with memory optimizations and optional VGGT depth estimation.
 run with
@@ -582,8 +595,8 @@ def main():
     query_points_original = torch.from_numpy(sample_original["query_points"]).float()  
     print("Shapes: rgbs, depths, intrs, extrs, query_points:", rgbs_original.shape, depths_original.shape, intrs_original.shape, extrs_original.shape, query_points_original.shape)
     # Load the RH20T dataset with memory management
-    sample_path = "/data/rh20t_api/data/RH20T/packed_npz/task_0010_user_0011_scene_0010_cfg_0003.npz"
-    
+    sample_path = "/data/rh20t_api/data/RH20T/packed_npz/task_0013_user_0011_scene_0007_cfg_0003_human.npz"
+    print("HUMANS NOT SUPPORTED YET") #TODO: find out why _human not work
     print("Loading large RH20T dataset - this may take a while...")
     print("Memory before loading:", torch.cuda.memory_allocated() / 1024**3 if torch.cuda.is_available() else "N/A", "GB GPU")
     
@@ -593,8 +606,41 @@ def main():
     gc.collect()
     
     # Load with memory mapping to avoid loading entire file into RAM at once
-    sample = np.load(sample_path, mmap_mode='r')
+    sample = np.load(sample_path, mmap_mode='r',allow_pickle=True)  
+
+    #only for now, remove all camera data from id "045322071843" for this copy the data
+    camera_ids = sample["camera_ids"]
+    if "045322071843" in camera_ids:
+        print("Removing camera 045322071843 for this demo")
+        mask = camera_ids != "045322071843"
+        sample = {
+            "rgbs": sample["rgbs"][mask],
+            "depths": sample["depths"][mask],
+            "intrs": sample["intrs"][mask],
+            "extrs": sample["extrs"][mask],
+            "camera_ids": sample["camera_ids"][mask],
+            #use dummy
+            "query_points": np.random.uniform(-1, 1, (10, 3)).astype(np.float32),
+        }
+
+        
     print(f"Dataset shapes - RGB: {sample['rgbs'].shape}, Depth: {sample['depths'].shape}")
+    camera_ids: Optional[List[str]] = None
+    if "camera_ids" in sample:
+        raw_camera_ids = np.array(sample["camera_ids"], copy=False)
+        flat_ids = raw_camera_ids.reshape(-1)
+        decoded_ids: List[str] = []
+        for cid in flat_ids:
+            if isinstance(cid, (bytes, bytearray, np.bytes_)):
+                decoded_ids.append(cid.decode("utf-8"))
+            else:
+                decoded_ids.append(str(cid))
+        if decoded_ids and len(decoded_ids) != sample["rgbs"].shape[0]:
+            warnings.warn(
+                "Number of camera IDs does not match number of views; falling back to index-based naming."
+            )
+        else:
+            camera_ids = decoded_ids if decoded_ids else None
     depth_seq_name_base = Path(sample_path).stem or "demo_sequence"
     # Load data in smaller chunks or subsample to fit memory
     temporal_stride = args.temporal_stride
@@ -916,6 +962,7 @@ def main():
         depths=depths[None],
         intrs=intrs[None],
         extrs=extrs[None],
+        camera_ids=camera_ids,
         depths_conf=None,
         conf_thrs=[5.0],
         log_only_confident_pc=False,
