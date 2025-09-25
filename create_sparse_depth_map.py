@@ -119,21 +119,85 @@ def load_scene_data(task_path: Path, robot_configs: List) -> Tuple[Optional[RH20
     print(f"[INFO] Found {len(valid_cam_ids)} valid external cameras in {task_path.name}.")
     return scene, valid_cam_ids, valid_cam_dirs
 
-def get_synchronized_timestamps(cam_dirs: List[Path]) -> np.ndarray:
-    """Finds timestamps for which all cameras have both a color and depth image."""
-    raise NotImplementedError("implement the time stamp alignment")
-    if not cam_dirs: return np.array([], dtype=np.int64)
-    
-    # Get the set of valid timestamps for each camera
-    ts_sets = [
-        set(list_frames(cdir / "color").keys()).intersection(list_frames(cdir / "depth").keys())
-        for cdir in cam_dirs
-    ]
-    
-    # Find the intersection of all sets to get universally available timestamps
-    common_ts = set.intersection(*ts_sets) if ts_sets else set()
-    return np.array(sorted(list(common_ts)), dtype=np.int64)
+def get_synchronized_timestamps(
+    cam_dirs: List[Path], frame_rate_hz: int = 10, min_density: float = 0.6
+) -> np.ndarray:
+    """
+    Finds a common, dense sequence of timestamps across multiple cameras.
 
+    This function determines a consensus time window where all cameras are active
+    and verifies that each camera has a sufficient frame density (e.g., >60%)
+    within that window, based on the expected frame rate. It then returns the
+    timestamps that are present for all cameras within this validated window.
+
+    Args:
+        cam_dirs: A list of Path objects, each pointing to a camera's data directory.
+        frame_rate_hz: The expected recording frame rate (e.g., 10 FPS).
+        min_density: The minimum required ratio of actual frames to expected frames
+                     for the sequence to be considered valid.
+
+    Returns:
+        A sorted NumPy array of timestamps (int64) common to all cameras in the
+        dense recording window. Returns an empty array if conditions are not met.
+    """
+    if not cam_dirs:
+        return np.array([], dtype=np.int64)
+
+    # Step 1: Load timestamps for each camera where both color and depth exist
+    ts_sets = []
+    for cdir in cam_dirs:
+        color_ts = set(list_frames(cdir / "color").keys())
+        depth_ts = set(list_frames(cdir / "depth").keys())
+        valid_ts = color_ts.intersection(depth_ts)
+        if not valid_ts:
+            print(f"[WARNING] Camera {cdir.name} has no valid color/depth frame pairs. Aborting sync.")
+            return np.array([], dtype=np.int64)
+        ts_sets.append(valid_ts)
+
+    # Step 2: Determine the consensus time window (earliest and latest common time)
+    # The window starts when the LAST camera begins and ends when the FIRST camera stops.
+    try:
+        consensus_start = max(min(s) for s in ts_sets)
+        consensus_end = min(max(s) for s in ts_sets)
+    except ValueError:  # Handles cases where a set might be unexpectedly empty
+        return np.array([], dtype=np.int64)
+
+    if consensus_start >= consensus_end:
+        print("[WARNING] No overlapping recording time found across all cameras.")
+        return np.array([], dtype=np.int64)
+
+    # Step 3: Verify frame density for each camera within the consensus window
+    duration_s = (consensus_end - consensus_start) / 1000.0
+    expected_frames = duration_s * frame_rate_hz
+
+    for i, ts_set in enumerate(ts_sets):
+        frames_in_window = sum(1 for t in ts_set if consensus_start <= t <= consensus_end)
+        density = frames_in_window / expected_frames if expected_frames > 0 else 0
+
+        print(
+            f"[INFO] Camera {cam_dirs[i].name}: "
+            f"Found {frames_in_window} frames in consensus window. "
+            f"Expected ~{expected_frames:.0f}. Density: {density:.2%}"
+        )
+
+        if density < min_density:
+            print(
+                f"[WARNING] Camera {cam_dirs[i].name} failed density check "
+                f"({density:.2%} < {min_density:.2%}). No common timestamps will be returned."
+            )
+            return np.array([], dtype=np.int64)
+
+    # Step 4: Find the intersection of timestamps within the validated, dense window
+    # Filter each set to the consensus window before finding the final intersection.
+    filtered_ts_sets = [
+        {t for t in s if consensus_start <= t <= consensus_end} for s in ts_sets
+    ]
+
+    common_ts = set.intersection(*filtered_ts_sets) if filtered_ts_sets else set()
+
+    print(f"[INFO] Found {len(common_ts)} synchronized timestamps across {len(cam_dirs)} cameras.")
+
+    return np.array(sorted(list(common_ts)), dtype=np.int64)
 def select_frames(timestamps: np.ndarray, max_frames: Optional[int], selection_method: str) -> np.ndarray:
     """Selects a subset of frames from a list of timestamps."""
     if not max_frames or max_frames <= 0 or max_frames >= len(timestamps):
