@@ -34,6 +34,8 @@ pip install -r requirements.txt || true
 # echo "Installing pointops..."
 # pip install -v --no-build-isolation --no-cache-dir --force-reinstall \
 #     'git+https://github.com/ethz-vlg/pointcept.git@2082918#subdirectory=libs/pointops'
+echo "Update safetensors"
+pip install --upgrade safetensors
 
 # Configure git
 echo "Configuring git..."

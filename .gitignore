@@ -30,3 +30,11 @@ duster
 
 *.pkl
 *.npz
+
+rh20t_api
+rh20t_api/
+rh20t_api/*
+*rh20t_api
+
+data
+data/

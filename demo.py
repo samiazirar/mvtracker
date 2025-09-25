@@ -446,7 +446,7 @@ def main():
     p.add_argument(
         "--temporal_stride", 
         type=int, 
-        default=4, 
+        default=1, 
         help="Temporal subsampling stride to reduce memory usage. Use every Nth frame."
     )
     p.add_argument(
@@ -595,7 +595,16 @@ def main():
     query_points_original = torch.from_numpy(sample_original["query_points"]).float()  
     print("Shapes: rgbs, depths, intrs, extrs, query_points:", rgbs_original.shape, depths_original.shape, intrs_original.shape, extrs_original.shape, query_points_original.shape)
     # Load the RH20T dataset with memory management
-    sample_path = "/data/rh20t_api/data/RH20T/packed_npz/task_0013_user_0011_scene_0007_cfg_0003_human.npz"
+    #sample_path = "/data/rh20t_api/data/RH20T/packed_npz/task_0015_user_0011_scene_0006_cfg_0003.npz"
+
+    #upscaled:
+    # sample_path = "/data/rh20t_api/data/test_data_full_rgb_upscaled_depth/packed_npz/task_0065_user_0010_scene_0009_cfg_0004.npz"
+    #not upscaled:
+    # sample_path = "/data/rh20t_api/data/test_data_full_rgb_upscaled_depth/uncompressed_low_res_data/packed_npz/task_0065_user_0010_scene_0009_cfg_0004.npz"
+    # sample_path = "/data/rh20t_api/data/low_res_data/packed_npz/task_0001_user_0010_scene_0005_cfg_0004.npz"
+    #with mapanythign
+    sample_path = "/data/npz_file/task_0065_user_0010_scene_0009_cfg_0004_pred.npz"
+
     print("HUMANS NOT SUPPORTED YET") #TODO: find out why _human not work
     print("Loading large RH20T dataset - this may take a while...")
     print("Memory before loading:", torch.cuda.memory_allocated() / 1024**3 if torch.cuda.is_available() else "N/A", "GB GPU")
@@ -615,7 +624,7 @@ def main():
         mask = camera_ids != "045322071843"
         sample = {
             "rgbs": sample["rgbs"][mask],
-            "depths": sample["depths"][mask],
+            "depths": sample["depths"][mask],#CHANGED
             "intrs": sample["intrs"][mask],
             "extrs": sample["extrs"][mask],
             "camera_ids": sample["camera_ids"][mask],
@@ -786,14 +795,27 @@ def main():
                 inference_start = time.time()
                 torch.set_float32_matmul_precision("high")
                 amp_dtype = torch.bfloat16 if (device == "cuda" and torch.cuda.get_device_capability()[0] >= 8) else torch.float16
-                with torch.no_grad(), torch.cuda.amp.autocast(enabled=device == "cuda", dtype=amp_dtype):
-                    results_batch = mvtracker(
-                        rgbs=rgbs_batch[None].to(device) / 255.0,
-                        depths=depths_batch[None].to(device),
-                        intrs=intrs_batch[None].to(device),
-                        extrs=extrs_batch[None].to(device),
-                        query_points_3d=query_batch[None].to(device),
-                    )
+                
+                if args.tracker == "mvtracker":
+                    # MVTracker expects query_points_3d and supports mixed precision
+                    with torch.no_grad(), torch.cuda.amp.autocast(enabled=device == "cuda", dtype=amp_dtype):
+                        results_batch = mvtracker(
+                            rgbs=rgbs_batch[None].to(device) / 255.0,
+                            depths=depths_batch[None].to(device),
+                            intrs=intrs_batch[None].to(device),
+                            extrs=extrs_batch[None].to(device),
+                            query_points_3d=query_batch[None].to(device),
+                        )
+                else:
+                    # CoTracker wrappers expect query_points and may not support mixed precision
+                    with torch.no_grad():
+                        results_batch = mvtracker(
+                            rgbs=rgbs_batch[None].to(device) / 255.0,
+                            depths=depths_batch[None].to(device),
+                            intrs=intrs_batch[None].to(device),
+                            extrs=extrs_batch[None].to(device),
+                            query_points=query_batch[None].to(device),
+                        )
                 inference_time = time.time() - inference_start
                 
                 # Collect results
@@ -938,14 +960,27 @@ def main():
         print("Processing all data at once...")
         torch.set_float32_matmul_precision("high")
         amp_dtype = torch.bfloat16 if (device == "cuda" and torch.cuda.get_device_capability()[0] >= 8) else torch.float16
-        with torch.no_grad(), torch.cuda.amp.autocast(enabled=device == "cuda", dtype=amp_dtype):
-            results = mvtracker(
-                rgbs=rgbs[None].to(device) / 255.0,
-                depths=depths[None].to(device),
-                intrs=intrs[None].to(device),
-                extrs=extrs[None].to(device),
-                query_points_3d=query_points[None].to(device),
-            )
+        
+        if args.tracker == "mvtracker":
+            # MVTracker expects query_points_3d and supports mixed precision
+            with torch.no_grad(), torch.cuda.amp.autocast(enabled=device == "cuda", dtype=amp_dtype):
+                results = mvtracker(
+                    rgbs=rgbs[None].to(device) / 255.0,
+                    depths=depths[None].to(device),
+                    intrs=intrs[None].to(device),
+                    extrs=extrs[None].to(device),
+                    query_points_3d=query_points[None].to(device),
+                )
+        else:
+            # CoTracker wrappers expect query_points and may not support mixed precision
+            with torch.no_grad():
+                results = mvtracker(
+                    rgbs=rgbs[None].to(device) / 255.0,
+                    depths=depths[None].to(device),
+                    intrs=intrs[None].to(device),
+                    extrs=extrs[None].to(device),
+                    query_points=query_points[None].to(device),
+                )
         pred_tracks = results["traj_e"].cpu()  # [T,N,3]
         pred_vis = results["vis_e"].cpu()  # [T,N]
 
@@ -966,7 +1001,7 @@ def main():
         depths_conf=None,
         conf_thrs=[5.0],
         log_only_confident_pc=False,
-        radii=-1.45,#make smaller for now
+        radii=-2.95,#make smaller for now SIZE
         fps=12,
         bbox_crop=None,
         sphere_radius_crop=12.0,
