@@ -49,12 +49,7 @@ import cv2
 import open3d as o3d
 import rerun as rr
 
-try:
-    from tqdm import tqdm
-except ImportError:
-    # Provide a fallback if tqdm is not installed
-    def tqdm(x, **kwargs):
-        return x
+from tqdm import tqdm
 
 # Project-specific imports
 from mvtracker.utils.visualizer_rerun import log_pointclouds_to_rerun
@@ -107,28 +102,26 @@ def load_scene_data(task_path: Path, robot_configs: List) -> Tuple[Optional[RH20
         A tuple containing the scene object, a list of valid camera IDs, and
         a list of their corresponding directory paths.
     """
-    try:
-        scene = RH20TScene(str(task_path), robot_configs)
-        # CHANGED: Use the public configuration property exposed by RH20TScene
-        # instead of accessing the non-existent legacy `.conf` attribute.
-        in_hand_serials = set(scene.configuration.in_hand_serial)
-        
-        valid_cam_ids, valid_cam_dirs = [], []
-        all_cam_dirs = sorted(p for p in task_path.glob("cam_*") if p.is_dir())
-        for cdir in all_cam_dirs:
-            cid = cdir.name.replace("cam_", "")
-            if cid in scene.intrinsics and cid in scene.extrinsics_base_aligned and cid not in in_hand_serials:
-                valid_cam_ids.append(cid)
-                valid_cam_dirs.append(cdir)
-        
-        print(f"[INFO] Found {len(valid_cam_ids)} valid external cameras in {task_path.name}.")
-        return scene, valid_cam_ids, valid_cam_dirs
-    except Exception as e:
-        print(f"[ERROR] Failed to load scene for {task_path.name}: {e}")
-        return None, [], []
+    scene = RH20TScene(str(task_path), robot_configs)
+    # CHANGED: Use the public configuration property exposed by RH20TScene
+    # instead of accessing the non-existent legacy `.conf` attribute.
+    # TODO: use one image of each timw window, and remove if not there son that no time lagging 
+    in_hand_serials = set(scene.configuration.in_hand_serial)
+    
+    valid_cam_ids, valid_cam_dirs = [], []
+    all_cam_dirs = sorted(p for p in task_path.glob("cam_*") if p.is_dir())
+    for cdir in all_cam_dirs:
+        cid = cdir.name.replace("cam_", "")
+        if cid in scene.intrinsics and cid in scene.extrinsics_base_aligned and cid not in in_hand_serials:
+            valid_cam_ids.append(cid)
+            valid_cam_dirs.append(cdir)
+    
+    print(f"[INFO] Found {len(valid_cam_ids)} valid external cameras in {task_path.name}.")
+    return scene, valid_cam_ids, valid_cam_dirs
 
 def get_synchronized_timestamps(cam_dirs: List[Path]) -> np.ndarray:
     """Finds timestamps for which all cameras have both a color and depth image."""
+    raise NotImplementedError("implement the time stamp alignment")
     if not cam_dirs: return np.array([], dtype=np.int64)
     
     # Get the set of valid timestamps for each camera
