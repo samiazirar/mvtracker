@@ -38,6 +38,7 @@ python create_sparse_depth_map.py   --task-folder /data/rh20t_api/data/test_data
 # Standard library imports
 import argparse
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -59,6 +60,19 @@ from rh20t_api.rh20t_api.scene import RH20TScene
 # --- File I/O & Utility Functions ---
 
 NUM_RE = re.compile(r"(\d+)")
+
+
+@dataclass
+class SyncResult:
+    """Container for synchronized timeline information."""
+
+    timeline: np.ndarray
+    per_camera_timestamps: List[np.ndarray]
+    achieved_fps: float
+    target_fps: float
+    dropped_ratio: float
+    warnings: List[str]
+    camera_indices: List[int]
 
 def _num_in_name(p: Path) -> Optional[int]:
     """Extracts the first integer from a filename's stem."""
@@ -120,92 +134,254 @@ def load_scene_data(task_path: Path, robot_configs: List) -> Tuple[Optional[RH20
     return scene, valid_cam_ids, valid_cam_dirs
 
 def get_synchronized_timestamps(
-    cam_dirs: List[Path], frame_rate_hz: int = 5, min_density: float = 0.6
-) -> np.ndarray:
-    """
-    Finds a common, dense sequence of timestamps, skipping unreliable cameras.
+    cam_dirs: List[Path],
+    frame_rate_hz: float = 5.0,
+    min_density: float = 0.6,
+    target_fps: Optional[float] = None,
+    max_fps_drift: float = 0.05,
+    jitter_tolerance_ms: Optional[float] = None,
+    require_depth: bool = True,
+) -> SyncResult:
+    """Synchronize camera streams onto a uniform timeline with tolerance-based matching."""
 
-    This function identifies a set of reliable cameras by filtering out any that
-    lack valid color/depth pairs or have insufficient frame density within a
-    common recording window. It then returns the timestamps that are strictly
-    common to all of the remaining reliable cameras.
+    desired_fps = target_fps if target_fps and target_fps > 0 else frame_rate_hz
+    warnings_local: List[str] = []
 
-    Args:
-        cam_dirs: A list of Path objects for all cameras to consider.
-        frame_rate_hz: The expected recording frame rate (e.g., 10 FPS).
-        min_density: The minimum required ratio of actual to expected frames.
-
-    Returns:
-        A sorted NumPy array of timestamps (int64) common to the reliable cameras.
-    """
     if len(cam_dirs) < 2:
-        print("[WARNING] Less than 2 camera directories provided. Synchronization not possible.")
-        return np.array([], dtype=np.int64)
+        msg = "[WARNING] Less than 2 camera directories provided. Synchronization not possible."
+        print(msg)
+        warnings_local.append(msg)
+        return SyncResult(
+            timeline=np.array([], dtype=np.int64),
+            per_camera_timestamps=[],
+            achieved_fps=0.0,
+            target_fps=float(desired_fps),
+            dropped_ratio=1.0,
+            warnings=warnings_local,
+            camera_indices=[],
+        )
 
-    # --- Step 1: First pass to filter for cameras with ANY valid color/depth pairs ---
     potentially_good_cameras = []
-    for cdir in cam_dirs:
-        #TODO this seems not right
-        color_ts = set(list_frames(cdir / "color").keys())
-        depth_ts = set(list_frames(cdir / "depth").keys())
-        valid_ts = color_ts.intersection(depth_ts)
-        if not valid_ts:
-            print(f"[INFO] Skipping camera {cdir.name}: No valid color/depth frame pairs found.")
-            continue
-        else:
-            print(f"[INFO] Camera {cdir.name}: Found {len(valid_ts)} valid color/depth frame pairs.")
-        
-        # Store camera info and its valid timestamps for the next stage
-        potentially_good_cameras.append({'dir': cdir, 'ts_set': valid_ts})
-        
-    if len(potentially_good_cameras) < 2:
-        print("[WARNING] Fewer than 2 cameras have valid data. Synchronization not possible.")
-        return np.array([], dtype=np.int64)
+    for idx, cdir in enumerate(cam_dirs):
+        color_map = list_frames(cdir / "color")
+        color_ts = list(color_map.keys())
 
-    # --- Step 2: Determine consensus window from the remaining cameras ---
-    ts_sets = [cam['ts_set'] for cam in potentially_good_cameras]
-    consensus_start = max(min(s) for s in ts_sets)
-    consensus_end = min(max(s) for s in ts_sets)
+        depth_ts: List[int]
+        if require_depth:
+            depth_map = list_frames(cdir / "depth")
+            depth_ts = list(depth_map.keys())
+            valid_ts = sorted(set(color_ts).intersection(depth_ts))
+            if not valid_ts:
+                print(f"[INFO] Skipping camera {cdir.name}: No valid color/depth frame pairs found.")
+                continue
+            print(f"[INFO] Camera {cdir.name}: Found {len(valid_ts)} valid color/depth frame pairs.")
+        else:
+            valid_ts = sorted(color_ts)
+            if not valid_ts:
+                print(f"[INFO] Skipping camera {cdir.name}: No color frames found.")
+                continue
+            print(f"[INFO] Camera {cdir.name}: Found {len(valid_ts)} color frames (depth not required).")
+
+        potentially_good_cameras.append({"dir": cdir, "timestamps": np.asarray(valid_ts, dtype=np.int64), "idx": idx})
+
+    if len(potentially_good_cameras) < 2:
+        msg = "[WARNING] Fewer than 2 cameras have valid data. Synchronization not possible."
+        print(msg)
+        warnings_local.append(msg)
+        return SyncResult(
+            timeline=np.array([], dtype=np.int64),
+            per_camera_timestamps=[],
+            achieved_fps=0.0,
+            target_fps=float(desired_fps),
+            dropped_ratio=1.0,
+            warnings=warnings_local,
+            camera_indices=[],
+        )
+
+    ts_lists = [cam["timestamps"] for cam in potentially_good_cameras]
+    consensus_start = int(max(ts_list[0] for ts_list in ts_lists))
+    consensus_end = int(min(ts_list[-1] for ts_list in ts_lists))
 
     if consensus_start >= consensus_end:
-        print("[WARNING] No overlapping recording time found among valid cameras.")
-        return np.array([], dtype=np.int64)
+        msg = "[WARNING] No overlapping recording time found among valid cameras."
+        print(msg)
+        warnings_local.append(msg)
+        return SyncResult(
+            timeline=np.array([], dtype=np.int64),
+            per_camera_timestamps=[],
+            achieved_fps=0.0,
+            target_fps=float(desired_fps),
+            dropped_ratio=1.0,
+            warnings=warnings_local,
+            camera_indices=[],
+        )
 
-    # --- Step 3: Second pass to filter for frame density ---
+    duration_ms = consensus_end - consensus_start
+    duration_s = duration_ms / 1000.0 if duration_ms > 0 else 0.0
+    expected_frames = duration_s * frame_rate_hz if duration_s > 0 else 0.0
+
     good_cameras = []
-    duration_s = (consensus_end - consensus_start) / 1000.0
-    expected_frames = duration_s * frame_rate_hz
+    for cam in potentially_good_cameras:
+        ts = cam["timestamps"]
+        mask = (ts >= consensus_start) & (ts <= consensus_end)
+        ts_window = ts[mask]
+        frames_in_window = int(ts_window.size)
+        density = frames_in_window / expected_frames if expected_frames > 0 else 0.0
 
-    for cam_data in potentially_good_cameras:
-        frames_in_window = sum(1 for t in cam_data['ts_set'] if consensus_start <= t <= consensus_end)
-        density = frames_in_window / expected_frames if expected_frames > 0 else 0
-        
         if density < min_density:
             print(
-                f"[INFO] Skipping camera {cam_data['dir'].name}: Failed density check "
+                f"[INFO] Skipping camera {cam['dir'].name}: Failed density check "
                 f"({density:.2%} < {min_density:.2%})."
             )
             continue
-        
-        # This camera is good, so we keep it for the final intersection
-        # Filter its timestamps to only those within the valid window
-        cam_data['ts_set'] = {t for t in cam_data['ts_set'] if consensus_start <= t <= consensus_end}
-        good_cameras.append(cam_data)
+
+        fps = frames_in_window / duration_s if duration_s > 0 else 0.0
+        median_gap = float(np.median(np.diff(ts_window))) if frames_in_window > 1 else float("inf")
+        good_cameras.append(
+            {
+                "dir": cam["dir"],
+                "timestamps": ts_window,
+                "fps": fps,
+                "median_gap": median_gap,
+                "idx": cam["idx"],
+            }
+        )
 
     if len(good_cameras) < 2:
-        print("[WARNING] Fewer than 2 cameras passed all checks. No final synchronization is possible.")
-        return np.array([], dtype=np.int64)
+        msg = "[WARNING] Fewer than 2 cameras passed all checks. No final synchronization is possible."
+        print(msg)
+        warnings_local.append(msg)
+        return SyncResult(
+            timeline=np.array([], dtype=np.int64),
+            per_camera_timestamps=[],
+            achieved_fps=0.0,
+            target_fps=float(desired_fps),
+            dropped_ratio=1.0,
+            warnings=warnings_local,
+            camera_indices=[],
+        )
 
-    # --- Step 4: Final intersection using only the good cameras ---
-    final_ts_sets = [cam['ts_set'] for cam in good_cameras]
-    breakpoint()
-    common_ts = set.intersection(*final_ts_sets)
-    
-    final_cam_names = [cam['dir'].name for cam in good_cameras]
-    print(f"\n[SUCCESS] Found {len(common_ts)} synchronized timestamps across "
-          f"{len(good_cameras)} reliable cameras: {final_cam_names}")
-    
-    return np.array(sorted(list(common_ts)), dtype=np.int64)
+    camera_fps_values = [cam["fps"] for cam in good_cameras if cam["fps"] > 0]
+    if (not target_fps or target_fps <= 0) and camera_fps_values:
+        desired_fps = min(frame_rate_hz, min(camera_fps_values))
+    desired_fps = max(desired_fps, 1e-6)
+
+    step_ms = max(int(round(1000.0 / desired_fps)), 1)
+    tolerance_ms = int(jitter_tolerance_ms) if jitter_tolerance_ms else max(int(step_ms * 0.5), 1)
+
+    if duration_ms <= 0:
+        grid = np.array([consensus_start], dtype=np.int64)
+    else:
+        grid = np.arange(consensus_start, consensus_end + step_ms, step_ms, dtype=np.int64)
+
+    per_camera_arrays = [cam["timestamps"] for cam in good_cameras]
+    aligned = [[] for _ in per_camera_arrays]
+    last_indices = [-1 for _ in per_camera_arrays]
+    accepted_grid: List[int] = []
+    dropped_slots = 0
+    exhausted = False
+
+    for g in grid:
+        slot_matches = []
+        for ci, arr in enumerate(per_camera_arrays):
+            start_idx = last_indices[ci] + 1
+            if start_idx >= arr.size:
+                exhausted = True
+                slot_matches = None
+                break
+
+            arr_sub = arr[start_idx:]
+            idx = int(np.searchsorted(arr_sub, g))
+
+            candidate_indices = []
+            if idx < arr_sub.size:
+                candidate_indices.append(start_idx + idx)
+            if idx > 0:
+                candidate_indices.append(start_idx + idx - 1)
+
+            if not candidate_indices:
+                slot_matches = None
+                break
+
+            best_idx = min(candidate_indices, key=lambda j: abs(int(arr[j]) - int(g)))
+            best_val = int(arr[best_idx])
+
+            if abs(best_val - int(g)) > tolerance_ms:
+                slot_matches = None
+                break
+
+            slot_matches.append((ci, best_idx, best_val))
+
+        if slot_matches is None:
+            if exhausted:
+                break
+            dropped_slots += 1
+            continue
+
+        accepted_grid.append(int(g))
+        for ci, best_idx, best_val in slot_matches:
+            aligned[ci].append(best_val)
+            last_indices[ci] = best_idx
+
+    timeline = np.asarray(accepted_grid, dtype=np.int64)
+    per_camera_timestamps = [np.asarray(vals, dtype=np.int64) for vals in aligned]
+
+    if timeline.size == 0:
+        msg = "[ERROR] No synchronized timestamps found after tolerance-based matching."
+        print(msg)
+        warnings_local.append(msg)
+        return SyncResult(
+            timeline=np.array([], dtype=np.int64),
+            per_camera_timestamps=[],
+            achieved_fps=0.0,
+            target_fps=float(desired_fps),
+            dropped_ratio=1.0,
+            warnings=warnings_local,
+            camera_indices=[],
+        )
+
+    if any(len(vals) != timeline.size for vals in per_camera_timestamps):
+        raise RuntimeError("Internal synchronization error: camera alignment mismatch.")
+
+    achieved_fps = (timeline.size / duration_s) if duration_s > 0 else 0.0
+    dropped_ratio = dropped_slots / grid.size if grid.size > 0 else 0.0
+
+    for cam, aligned_vals in zip(good_cameras, per_camera_timestamps):
+        print(
+            f"[INFO] Camera {cam['dir'].name}: Aligned {aligned_vals.size} frames "
+            f"(median gap {cam['median_gap']:.1f} ms)."
+        )
+
+    summary = (
+        f"\n[SUCCESS] Synchronized {timeline.size} frames at ~{achieved_fps:.2f} FPS "
+        f"(target {desired_fps:.2f} FPS, tolerance {tolerance_ms} ms)."
+    )
+    print(summary)
+
+    if desired_fps > 0 and achieved_fps < desired_fps * (1 - max_fps_drift):
+        msg = (
+            f"[WARNING] Achieved FPS ({achieved_fps:.2f}) is more than {max_fps_drift:.0%} "
+            f"below target ({desired_fps:.2f})."
+        )
+        print(msg)
+        warnings_local.append(msg)
+
+    if dropped_ratio > max_fps_drift:
+        msg = (
+            f"[WARNING] Dropped {dropped_ratio:.2%} of timeline slots due to missing frames."
+        )
+        print(msg)
+        warnings_local.append(msg)
+
+    return SyncResult(
+        timeline=timeline,
+        per_camera_timestamps=per_camera_timestamps,
+        achieved_fps=achieved_fps,
+        target_fps=float(desired_fps),
+        dropped_ratio=float(dropped_ratio),
+        warnings=warnings_local,
+        camera_indices=[cam['idx'] for cam in good_cameras],
+    )
 
 def select_frames(timestamps: np.ndarray, max_frames: Optional[int], selection_method: str) -> np.ndarray:
     """Selects a subset of frames from a list of timestamps."""
@@ -325,20 +501,57 @@ def reproject_to_sparse_depth_cv2(
 
 # --- Main Workflow & Orchestration ---
 
-def process_frames(args, scene_low, scene_high, final_cam_ids, cam_dirs_low, cam_dirs_high, timestamps):
+def process_frames(
+    args,
+    scene_low,
+    scene_high,
+    final_cam_ids,
+    cam_dirs_low,
+    cam_dirs_high,
+    timeline: np.ndarray,
+    per_cam_low_ts: List[np.ndarray],
+    per_cam_high_ts: Optional[List[np.ndarray]],
+):
     """
     Iterates through timestamps to process frames, generate point clouds,
     and create the final data arrays (RGB, depth, intrinsics, extrinsics).
     """
-    C, T = len(final_cam_ids), len(timestamps)
+    C, T = len(final_cam_ids), len(timeline)
     is_l515_flags = [cid.startswith('f') for cid in final_cam_ids]
+
+    color_lookup_low = [list_frames(cdir / 'color') for cdir in cam_dirs_low]
+    depth_lookup_low = [list_frames(cdir / 'depth') for cdir in cam_dirs_low]
+
+    if args.high_res_folder and cam_dirs_high:
+        color_lookup_high = [list_frames(cdir / 'color') for cdir in cam_dirs_high]
+    else:
+        color_lookup_high = None
+
+    def _resolve_frame(frame_map: Dict[int, Path], ts: int, cam_name: str, label: str) -> Path:
+        path = frame_map.get(ts)
+        if path is not None:
+            return path
+
+        if not frame_map:
+            raise KeyError(f"No frames available for {cam_name} ({label}).")
+
+        closest_ts = min(frame_map.keys(), key=lambda k: abs(k - ts))
+        delta = abs(closest_ts - ts)
+        print(
+            f"[WARN] Timestamp {ts} not found for {cam_name} ({label}); using closest {closest_ts} (|Δ|={delta} ms)."
+        )
+        return frame_map[closest_ts]
 
     # Determine output resolution and initialize data containers
     if args.high_res_folder:
-        H_out, W_out, _ = read_rgb(list_frames(cam_dirs_high[0] / 'color')[timestamps[0]]).shape
+        first_high_ts = int(per_cam_high_ts[0][0]) if per_cam_high_ts else int(per_cam_low_ts[0][0])
+        first_path = _resolve_frame(color_lookup_high[0], first_high_ts, final_cam_ids[0], "high-res color")
+        H_out, W_out, _ = read_rgb(first_path).shape
         print(f"[INFO] Outputting high-resolution data ({H_out}x{W_out}) with reprojected depth.")
     else:
-        H_out, W_out, _ = read_rgb(list_frames(cam_dirs_low[0] / 'color')[timestamps[0]]).shape
+        first_low_ts = int(per_cam_low_ts[0][0])
+        first_path = _resolve_frame(color_lookup_low[0], first_low_ts, final_cam_ids[0], "low-res color")
+        H_out, W_out, _ = read_rgb(first_path).shape
         print(f"[INFO] Outputting low-resolution data ({H_out}x{W_out}).")
 
     rgbs_out = np.zeros((C, T, H_out, W_out, 3), dtype=np.uint8)
@@ -347,8 +560,6 @@ def process_frames(args, scene_low, scene_high, final_cam_ids, cam_dirs_low, cam
     extrs_out = np.zeros((C, T, 3, 4), dtype=np.float32)
 
     for ti in tqdm(range(T), desc="Processing Frames"):
-        t = timestamps[ti]
-        
         # Step 1: Create a combined point cloud for the current frame from all low-res views
         combined_pcd = o3d.geometry.PointCloud()
         if args.high_res_folder:
@@ -356,9 +567,11 @@ def process_frames(args, scene_low, scene_high, final_cam_ids, cam_dirs_low, cam
             for ci in range(C):
                 cid = final_cam_ids[ci]
                 # Load low-res data for point cloud generation
-                depth_low = read_depth(list_frames(cam_dirs_low[ci] / "depth")[t], is_l515_flags[ci])
-                rgb_low = read_rgb(list_frames(cam_dirs_low[ci] / "color")[t])
+                t_low = int(per_cam_low_ts[ci][ti])
+                depth_low = read_depth(_resolve_frame(depth_lookup_low[ci], t_low, cid, "low-res depth"), is_l515_flags[ci])
+                rgb_low = read_rgb(_resolve_frame(color_lookup_low[ci], t_low, cid, "low-res color"))
                 K_low = scene_low.intrinsics[cid][:, :3]
+                breakpoint()
                 E_inv = np.linalg.inv(np.vstack([scene_low.extrinsics_base_aligned[cid], [0, 0, 0, 1]]))
                 
                 # Create and add the point cloud for this view
@@ -376,7 +589,8 @@ def process_frames(args, scene_low, scene_high, final_cam_ids, cam_dirs_low, cam
             
             if args.high_res_folder:
                 # Reprojection workflow
-                high_res_rgb = read_rgb(list_frames(cam_dirs_high[ci] / "color")[t])
+                t_high = int(per_cam_high_ts[ci][ti]) if per_cam_high_ts else int(per_cam_low_ts[ci][ti])
+                high_res_rgb = read_rgb(_resolve_frame(color_lookup_high[ci], t_high, cid, "high-res color"))
                 K_high = scene_high.intrinsics[cid][:, :3]
                 rgbs_out[ci, ti] = high_res_rgb
                 intrs_out[ci, ti] = K_high
@@ -388,24 +602,28 @@ def process_frames(args, scene_low, scene_high, final_cam_ids, cam_dirs_low, cam
                 )
             else:
                 # Standard low-resolution workflow
-                rgbs_out[ci, ti] = read_rgb(list_frames(cam_dirs_low[ci] / "color")[t])
-                depths_out[ci, ti] = read_depth(list_frames(cam_dirs_low[ci] / "depth")[t], is_l515_flags[ci])
+                t_low = int(per_cam_low_ts[ci][ti])
+                rgbs_out[ci, ti] = read_rgb(_resolve_frame(color_lookup_low[ci], t_low, cid, "low-res color"))
+                depths_out[ci, ti] = read_depth(_resolve_frame(depth_lookup_low[ci], t_low, cid, "low-res depth"), is_l515_flags[ci])
                 intrs_out[ci, ti] = scene_low.intrinsics[cid][:, :3]
 
     return rgbs_out, depths_out, intrs_out, extrs_out
 
-def save_and_visualize(args, rgbs, depths, intrs, extrs, final_cam_ids, timestamps):
+def save_and_visualize(args, rgbs, depths, intrs, extrs, final_cam_ids, timestamps, per_camera_timestamps):
     """Saves the processed data to an NPZ file and generates a Rerun visualization."""
     # Convert to channels-first format for NPZ
     rgbs_final = np.moveaxis(rgbs, -1, 2)
     depths_final = depths[:, :, None, :, :]
     
+    per_cam_ts_arr = np.stack(per_camera_timestamps, axis=0).astype(np.int64)
+
     npz_payload = {
         'rgbs': rgbs_final,
         'depths': depths_final,
         'intrs': intrs,
         'extrs': extrs,
         'timestamps': timestamps,
+        'per_camera_timestamps': per_cam_ts_arr,
         'camera_ids': np.array(final_cam_ids, dtype=object),
     }
 
@@ -443,6 +661,10 @@ def main():
     parser.add_argument("--color-alignment-check", action="store_true", help="Enable color-based filtering of reprojected points.")
     parser.add_argument("--color-threshold", type=float, default=40.0, help="Max average color difference (0-255) for a point to be aligned.")
     parser.add_argument("--no-pointcloud", action="store_true", help="Only generate the .npz file, skip visualization.")
+    parser.add_argument("--sync-fps", type=float, default=5.0, help="Target FPS for synchronization output timeline.")
+    parser.add_argument("--sync-min-density", type=float, default=0.6, help="Minimum density ratio required per camera during synchronization.")
+    parser.add_argument("--sync-max-drift", type=float, default=0.05, help="Maximum tolerated fractional FPS shortfall before warning.")
+    parser.add_argument("--sync-tolerance-ms", type=float, default=None, help="Maximum timestamp deviation (ms) when matching frames; defaults to half frame period.")
     args = parser.parse_args()
 
     if not args.config.exists():
@@ -457,28 +679,110 @@ def main():
     if not scene_low or not cam_ids_low: return
 
     scene_high, cam_ids_high, cam_dirs_high = (load_scene_data(args.high_res_folder, robot_configs) if args.high_res_folder else (None, None, None))
-    
-    if args.high_res_folder:
-        final_cam_ids = sorted(list(set(cam_ids_low) & set(cam_ids_high)))
-        cam_dirs_low = [d for d, i in zip(cam_dirs_low, cam_ids_low) if i in final_cam_ids]
-        cam_dirs_high = [d for d, i in zip(cam_dirs_high, cam_ids_high) if i in final_cam_ids]
-        ts = np.intersect1d(get_synchronized_timestamps(cam_dirs_low), get_synchronized_timestamps(cam_dirs_high))
-    else:
-        final_cam_ids = cam_ids_low
-        ts = get_synchronized_timestamps(cam_dirs_low)
 
-    if len(final_cam_ids) < 2: print("[ERROR] Fewer than 2 synchronized cameras found."); return
-    if len(ts) == 0: print("[ERROR] No common timestamps found."); return
-    
-    timestamps = select_frames(ts, args.max_frames, args.frame_selection)
-    if len(timestamps) == 0: print("[ERROR] No frames remaining after selection."); return
+    sync_kwargs = dict(
+        frame_rate_hz=args.sync_fps,
+        min_density=args.sync_min_density,
+        target_fps=args.sync_fps,
+        max_fps_drift=args.sync_max_drift,
+        jitter_tolerance_ms=args.sync_tolerance_ms,
+    )
+
+    if args.high_res_folder:
+        shared_ids = sorted(set(cam_ids_low) & set(cam_ids_high))
+
+        id_to_dir_low = {cid: d for cid, d in zip(cam_ids_low, cam_dirs_low)}
+        id_to_dir_high = {cid: d for cid, d in zip(cam_ids_high, cam_dirs_high)}
+
+        final_cam_ids = [cid for cid in shared_ids if cid in id_to_dir_low and cid in id_to_dir_high]
+        cam_dirs_low = [id_to_dir_low[cid] for cid in final_cam_ids]
+        cam_dirs_high = [id_to_dir_high[cid] for cid in final_cam_ids]
+
+        if len(final_cam_ids) < 2:
+            print("[ERROR] Fewer than 2 common cameras between low and high resolution data.")
+            return
+
+        sync_low = get_synchronized_timestamps(cam_dirs_low, **sync_kwargs)
+        sync_high = get_synchronized_timestamps(cam_dirs_high, require_depth=False, **sync_kwargs)
+
+        valid_low = set(sync_low.camera_indices)
+        valid_high = set(sync_high.camera_indices)
+        keep_indices = sorted(valid_low & valid_high)
+
+        if len(keep_indices) < 2:
+            print("[ERROR] Synchronization rejected too many cameras; fewer than 2 remain aligned across resolutions.")
+            return
+
+        index_map_low = {idx: arr for idx, arr in zip(sync_low.camera_indices, sync_low.per_camera_timestamps)}
+        index_map_high = {idx: arr for idx, arr in zip(sync_high.camera_indices, sync_high.per_camera_timestamps)}
+
+        final_cam_ids = [final_cam_ids[i] for i in keep_indices]
+        cam_dirs_low = [cam_dirs_low[i] for i in keep_indices]
+        cam_dirs_high = [cam_dirs_high[i] for i in keep_indices]
+        per_cam_low_full = [index_map_low[i] for i in keep_indices]
+        per_cam_high_full = [index_map_high[i] for i in keep_indices]
+
+        timeline_common = np.intersect1d(sync_low.timeline, sync_high.timeline)
+        if timeline_common.size == 0:
+            print("[ERROR] No overlapping synchronized timeline between low and high resolution data.")
+            return
+
+        timeline_common = np.asarray(timeline_common, dtype=np.int64)
+        idx_map_low = {int(t): idx for idx, t in enumerate(sync_low.timeline)}
+        idx_map_high = {int(t): idx for idx, t in enumerate(sync_high.timeline)}
+        idx_low = [idx_map_low[int(t)] for t in timeline_common]
+        idx_high = [idx_map_high[int(t)] for t in timeline_common]
+        per_cam_low = [arr[idx_low] for arr in per_cam_low_full]
+        per_cam_high = [arr[idx_high] for arr in per_cam_high_full]
+    else:
+        id_to_dir_low = {cid: d for cid, d in zip(cam_ids_low, cam_dirs_low)}
+        final_cam_ids = [cid for cid in sorted(set(cam_ids_low)) if cid in id_to_dir_low]
+        cam_dirs_low = [id_to_dir_low[cid] for cid in final_cam_ids]
+
+        sync_low = get_synchronized_timestamps(cam_dirs_low, **sync_kwargs)
+        valid_low = sorted(sync_low.camera_indices)
+        if len(valid_low) < 2:
+            print("[ERROR] Fewer than 2 cameras available for processing.")
+            return
+        final_cam_ids = [final_cam_ids[i] for i in valid_low]
+        cam_dirs_low = [cam_dirs_low[i] for i in valid_low]
+        index_map_low = {idx: arr for idx, arr in zip(sync_low.camera_indices, sync_low.per_camera_timestamps)}
+        per_cam_low_full = [index_map_low[i] for i in valid_low]
+        per_cam_low = per_cam_low_full
+        per_cam_high = None
+        timeline_common = np.asarray(sync_low.timeline, dtype=np.int64)
+
+    if timeline_common.size == 0:
+        print("[ERROR] Synchronization returned no frames.")
+        return
+
+    timestamps = select_frames(timeline_common, args.max_frames, args.frame_selection)
+    if timestamps.size == 0:
+        print("[ERROR] No frames remaining after selection.")
+        return
+
+    idx_map_common = {int(t): idx for idx, t in enumerate(timeline_common)}
+    selected_idx = [idx_map_common[int(t)] for t in timestamps]
+    per_cam_low_sel = [arr[selected_idx] for arr in per_cam_low]
+    per_cam_high_sel = [arr[selected_idx] for arr in per_cam_high] if per_cam_high is not None else None
 
     # --- Step 2: Process Frames ---
-    rgbs, depths, intrs, extrs = process_frames(args, scene_low, scene_high, final_cam_ids, cam_dirs_low, cam_dirs_high, timestamps)
+    rgbs, depths, intrs, extrs = process_frames(
+        args,
+        scene_low,
+        scene_high,
+        final_cam_ids,
+        cam_dirs_low,
+        cam_dirs_high if args.high_res_folder else None,
+        timestamps,
+        per_cam_low_sel,
+        per_cam_high_sel,
+    )
 
     # --- Step 3: Save and Visualize ---
     rr.init("RH20T_Reprojection_Frameworks", spawn=False)
-    save_and_visualize(args, rgbs, depths, intrs, extrs, final_cam_ids, timestamps)
+    per_cam_for_npz = per_cam_high_sel if per_cam_high_sel is not None else per_cam_low_sel
+    save_and_visualize(args, rgbs, depths, intrs, extrs, final_cam_ids, timestamps, per_cam_for_npz)
 
     if not args.no_pointcloud:
         rrd_path = args.out_dir / f"{args.task_folder.name}_reprojected.rrd"
