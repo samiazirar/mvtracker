@@ -572,7 +572,7 @@ def process_frames(
                 rgb_low = read_rgb(_resolve_frame(color_lookup_low[ci], t_low, cid, "low-res color"))
                 K_low = scene_low.intrinsics[cid][:, :3]
                 breakpoint()
-                E_inv = np.linalg.inv(np.vstack([scene_low.extrinsics_base_aligned[cid], [0, 0, 0, 1]]))
+                E_inv = np.linalg.inv(scene_low.extrinsics_base_aligned[cid], [0, 0, 0, 1])
                 
                 # Create and add the point cloud for this view
                 pcds_per_cam.append(unproject_to_world_o3d(depth_low, rgb_low, K_low, E_inv))
