@@ -481,6 +481,8 @@ def reproject_to_sparse_depth_cv2(
     valid_mask = np.where(in_front_mask)[0][bounds_mask]
     u_idx = np.round(u[bounds_mask]).astype(int)
     v_idx = np.round(v[bounds_mask]).astype(int)
+    np.clip(u_idx, 0, W - 1, out=u_idx)
+    np.clip(v_idx, 0, H - 1, out=v_idx)
     depth_final = depths[valid_mask]
     orig_colors_final = orig_colors[valid_mask]
 
@@ -571,8 +573,7 @@ def process_frames(
                 depth_low = read_depth(_resolve_frame(depth_lookup_low[ci], t_low, cid, "low-res depth"), is_l515_flags[ci])
                 rgb_low = read_rgb(_resolve_frame(color_lookup_low[ci], t_low, cid, "low-res color"))
                 K_low = scene_low.intrinsics[cid][:, :3]
-                breakpoint()
-                E_inv = np.linalg.inv(scene_low.extrinsics_base_aligned[cid], [0, 0, 0, 1])
+                E_inv = np.linalg.inv(scene_low.extrinsics_base_aligned[cid])
                 
                 # Create and add the point cloud for this view
                 pcds_per_cam.append(unproject_to_world_o3d(depth_low, rgb_low, K_low, E_inv))
@@ -634,13 +635,17 @@ def save_and_visualize(args, rgbs, depths, intrs, extrs, final_cam_ids, timestam
     # Generate Rerun Visualization
     if not args.no_pointcloud:
         print("[INFO] Logging data to Rerun...")
+        rgbs_tensor = torch.from_numpy(rgbs_final).float().unsqueeze(0)
+        depths_tensor = torch.from_numpy(depths_final).float().unsqueeze(0)
+        intrs_tensor = torch.from_numpy(intrs).float().unsqueeze(0)
+        extrs_tensor = torch.from_numpy(extrs).float().unsqueeze(0)
         log_pointclouds_to_rerun(
             dataset_name="rh20t_reprojection",
             datapoint_idx=0,
-            rgbs=torch.from_numpy(rgbs_final).float(),
-            depths=torch.from_numpy(depths_final).float(),
-            intrs=torch.from_numpy(intrs).float(),
-            extrs=torch.from_numpy(extrs).float(),
+            rgbs=rgbs_tensor,
+            depths=depths_tensor,
+            intrs=intrs_tensor,
+            extrs=extrs_tensor,
             camera_ids=final_cam_ids,
             log_rgb_pointcloud=True,
             log_camera_frustrum=True,
