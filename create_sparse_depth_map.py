@@ -99,22 +99,14 @@ def read_rgb(path: Path) -> np.ndarray:
     """Reads an image file into a NumPy array (H, W, 3) in RGB format."""
     return np.asarray(Image.open(path).convert("RGB"), dtype=np.uint8)
 
-def read_depth(
-    path: Path,
-    is_l515: bool,
-    min_d: Optional[float] = None,
-    max_d: Optional[float] = None,
-) -> np.ndarray:
-    """Reads a 16-bit depth image, converts it to meters, and optionally clamps the range."""
+def read_depth(path: Path, is_l515: bool, min_d: float = 0.1, max_d: float = 1.8) -> np.ndarray:
+    """Reads a 16-bit depth image, converts it to meters, and clamps the range."""
     arr = np.asarray(Image.open(path)).astype(np.uint16)
     # L515 cameras have a different depth scale factor
     scale = 4000.0 if is_l515 else 1000.0
     depth_m = arr.astype(np.float32) / scale
-    # Invalidate depth values outside the specified operational range when provided
-    if min_d is not None:
-        depth_m[depth_m < min_d] = 0.0
-    if max_d is not None:
-        depth_m[depth_m > max_d] = 0.0
+    # Invalidate depth values outside the specified operational range
+    depth_m[(depth_m < min_d) | (depth_m > max_d)] = 0.0
     return depth_m
 
 def list_frames(folder: Path) -> Dict[int, Path]:
@@ -620,6 +612,38 @@ def _smooth_depth_with_weights(depth: np.ndarray, weights: np.ndarray, kernel_si
     
     return smoothed
 
+
+def create_dense_point_cloud_demo(depth: np.ndarray, rgb: np.ndarray, K: np.ndarray, E_inv: np.ndarray) -> o3d.geometry.PointCloud:
+    """Replicate demo.py's dense point cloud generation without extra filtering."""
+    if depth.size == 0:
+        return o3d.geometry.PointCloud()
+
+    H, W = depth.shape
+    valid_mask = depth > 0
+    if not np.any(valid_mask):
+        return o3d.geometry.PointCloud()
+
+    ys, xs = np.indices((H, W))
+    pixel_coords = np.stack(
+        [xs[valid_mask], ys[valid_mask], np.ones(np.count_nonzero(valid_mask))],
+        axis=0,
+    ).astype(np.float32)
+
+    K_inv = np.linalg.inv(K)
+    depths = depth[valid_mask].astype(np.float32)
+    cam_points = (K_inv @ pixel_coords) * depths
+
+    cam_points_h = np.vstack((cam_points, np.ones(cam_points.shape[1], dtype=np.float32)))
+    world_points = (E_inv @ cam_points_h)[:3].T.astype(np.float64)
+
+    colors = rgb[valid_mask].astype(np.float32) / 255.0
+
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(world_points)
+    pcd.colors = o3d.utility.Vector3dVector(colors.astype(np.float64))
+    return pcd
+
+
 def create_confidence_filtered_point_cloud(
     depth: np.ndarray, 
     rgb: np.ndarray, 
@@ -751,6 +775,42 @@ def reconstruct_mesh_from_pointcloud(pcd: o3d.geometry.PointCloud, depth: int) -
     return mesh
 
 
+def depth_to_world_point_cloud(
+    depth_map: np.ndarray,
+    rgb: np.ndarray,
+    K: np.ndarray,
+    E_world_to_cam: np.ndarray,
+) -> o3d.geometry.PointCloud:
+    """Convert a depth map and RGB image into a world-space point cloud."""
+    if depth_map.size == 0 or not np.any(depth_map > 0):
+        return o3d.geometry.PointCloud()
+
+    depth_image = o3d.geometry.Image(depth_map.astype(np.float32, copy=False))
+    color_image = o3d.geometry.Image(rgb.astype(np.uint8, copy=False))
+    H, W = depth_map.shape
+    intrinsic = o3d.camera.PinholeCameraIntrinsic(
+        int(W), int(H), float(K[0, 0]), float(K[1, 1]), float(K[0, 2]), float(K[1, 2])
+    )
+    rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
+        color_image,
+        depth_image,
+        depth_scale=1.0,
+        depth_trunc=10.0,
+        convert_rgb_to_intensity=False,
+    )
+
+    pcd_cam = o3d.geometry.PointCloud.create_from_rgbd_image(rgbd, intrinsic)
+
+    # Extend 3x4 extrinsic to 4x4 and invert to obtain camera-to-world transform
+    if E_world_to_cam.shape == (4, 4):
+        E = E_world_to_cam.astype(np.float64, copy=True)
+    else:
+        E = np.eye(4, dtype=np.float64)
+        E[:3, :4] = E_world_to_cam.astype(np.float64, copy=False)
+    cam_to_world = np.linalg.inv(E)
+    return pcd_cam.transform(cam_to_world)
+
+
 def reproject_to_sparse_depth_cv2(
     pcd: o3d.geometry.PointCloud, high_res_rgb: np.ndarray, K: np.ndarray, E: np.ndarray, color_threshold: float
 ) -> np.ndarray:
@@ -842,8 +902,6 @@ def process_frames(
     """
     C, T = len(final_cam_ids), len(timeline)
     is_l515_flags = [cid.startswith('f') for cid in final_cam_ids]
-    depth_min = args.depth_min
-    depth_max = args.depth_max
 
     color_lookup_low = [list_frames(cdir / 'color') for cdir in cam_dirs_low]
     depth_lookup_low = [list_frames(cdir / 'depth') for cdir in cam_dirs_low]
@@ -924,6 +982,17 @@ def process_frames(
     intrs_out = np.zeros((C, T, 3, 3), dtype=np.float32)
     extrs_out = np.zeros((C, T, 3, 4), dtype=np.float32)
 
+    # Prepare directories for saving point clouds
+    low_pcd_dir = args.out_dir / "pointcloud_low_res"
+    high_pcd_root = args.out_dir / "pointcloud_high_res"
+    low_pcd_dir.mkdir(parents=True, exist_ok=True)
+    if args.high_res_folder:
+        for cid in final_cam_ids:
+            (high_pcd_root / f"cam_{cid}").mkdir(parents=True, exist_ok=True)
+
+    before_pcd_entries: List[Tuple[int, int, str, o3d.geometry.PointCloud]] = []
+    after_pcd_entries: List[Tuple[int, int, str, o3d.geometry.PointCloud]] = []
+
     for ti in tqdm(range(T), desc="Processing Frames"):
         # Step 1: Create a high-quality point cloud using demo.py approach (single best camera)
         combined_pcd = o3d.geometry.PointCloud()
@@ -935,12 +1004,7 @@ def process_frames(
             for ci in range(C):
                 cid = final_cam_ids[ci]
                 t_low = int(per_cam_low_ts[ci][ti])
-                depth_low = read_depth(
-                    _resolve_frame(depth_lookup_low[ci], t_low, cid, "low-res depth"),
-                    is_l515_flags[ci],
-                    depth_min,
-                    depth_max,
-                )
+                depth_low = read_depth(_resolve_frame(depth_lookup_low[ci], t_low, cid, "low-res depth"), is_l515_flags[ci])
                 
                 # Calculate depth coverage (how much valid depth we have)
                 valid_depth_ratio = np.sum(depth_low > 0) / depth_low.size
@@ -952,27 +1016,44 @@ def process_frames(
             # Create point cloud from the best camera view only (like demo.py)
             cid = final_cam_ids[best_ci]
             t_low = int(per_cam_low_ts[best_ci][ti])
-            depth_low = read_depth(
-                _resolve_frame(depth_lookup_low[best_ci], t_low, cid, "low-res depth"),
-                is_l515_flags[best_ci],
-                depth_min,
-                depth_max,
-            )
+            depth_low = read_depth(_resolve_frame(depth_lookup_low[best_ci], t_low, cid, "low-res depth"), is_l515_flags[best_ci])
             rgb_low = read_rgb(_resolve_frame(color_lookup_low[best_ci], t_low, cid, "low-res color"))
             K_low = scaled_low_intrinsics[best_ci]
             E_inv = np.linalg.inv(scene_low.extrinsics_base_aligned[cid])
-            
-            # Use confidence-filtered point cloud creation (like demo.py)
-            combined_pcd = create_confidence_filtered_point_cloud(
-                depth_low, rgb_low, K_low, E_inv, 
-                confidence_threshold=args.confidence_threshold,
-                edge_margin=args.edge_margin,
-                gradient_threshold=args.gradient_threshold,
-                smooth_kernel=args.smooth_kernel
-            )
-            
+
+            # Part 1: Build dense point cloud exactly like demo.py
+            dense_pcd = create_dense_point_cloud_demo(depth_low, rgb_low, K_low, E_inv)
+
             print(f"[INFO] Frame {ti}: Using camera {cid} with {best_depth_coverage:.1%} depth coverage")
-            print(f"[INFO] Created confidence-filtered point cloud with {len(combined_pcd.points)} points")
+            print(f"[INFO] Created dense demo-style point cloud with {len(dense_pcd.points)} points")
+
+            combined_pcd = dense_pcd
+
+            # Persist the dense low-resolution point cloud
+            timestamp = int(timeline[ti])
+            if dense_pcd.has_points():
+                low_pcd_path = low_pcd_dir / f"frame_{ti:04d}_ts_{timestamp}_cam_{cid}.ply"
+                o3d.io.write_point_cloud(str(low_pcd_path), dense_pcd, write_ascii=False)
+                before_pcd_entries.append((ti, timestamp, cid, o3d.geometry.PointCloud(dense_pcd)))
+
+            # Optional Part 1b: Apply confidence-based filtering enhancements
+            if args.use_confidence_filtering:
+                filtered_pcd = create_confidence_filtered_point_cloud(
+                    depth_low,
+                    rgb_low,
+                    K_low,
+                    E_inv,
+                    confidence_threshold=args.confidence_threshold,
+                    edge_margin=args.edge_margin,
+                    gradient_threshold=args.gradient_threshold,
+                    smooth_kernel=args.smooth_kernel,
+                )
+                print(
+                    f"[INFO] Confidence filtering kept {len(filtered_pcd.points)} / {len(dense_pcd.points)} points"
+                )
+                combined_pcd = filtered_pcd
+            else:
+                print("[INFO] Confidence filtering disabled; using dense point cloud directly")
 
             # Apply additional cleaning using demo.py-style approach
             if combined_pcd.has_points():
@@ -1010,6 +1091,8 @@ def process_frames(
                 high_res_rgb = read_rgb(_resolve_frame(color_lookup_high[ci], t_high, cid, "high-res color"))
                 K_high = scaled_high_intrinsics[ci] if scaled_high_intrinsics is not None else scaled_low_intrinsics[ci]
                 intrs_out[ci, ti] = K_high
+                current_depth_map: Optional[np.ndarray] = None
+                rgb_for_high_pcd = high_res_rgb
                 
                 if args.use_splatting:
                     # Use PyTorch3D point splatting instead of sparse depth reprojection
@@ -1029,6 +1112,9 @@ def process_frames(
                     
                     # Save the depth map from splatting
                     depths_out[ci, ti] = splatted_depth
+                    current_depth_map = splatted_depth
+                    if args.splat_mode == "recolor":
+                        rgb_for_high_pcd = splatted_result
                     
                     if args.splat_mode == "recolor":
                         # Use splatted colors as RGB output
@@ -1044,24 +1130,54 @@ def process_frames(
                     rgbs_out[ci, ti] = high_res_rgb
                     # If color check is disabled, use a threshold that allows all points to pass
                     threshold = args.color_threshold if args.color_alignment_check else 256.0
-                    depths_out[ci, ti] = reproject_to_sparse_depth_cv2(
+                    depth_reprojected = reproject_to_sparse_depth_cv2(
                         combined_pcd, high_res_rgb, K_high, E_world_to_cam, threshold
                     )
+                    depths_out[ci, ti] = depth_reprojected
+                    current_depth_map = depth_reprojected
+
+                # Persist the high-resolution sparse point cloud
+                if current_depth_map is not None:
+                    high_pcd = depth_to_world_point_cloud(current_depth_map, rgb_for_high_pcd, K_high, E_world_to_cam)
+                    if high_pcd.has_points():
+                        timestamp = int(timeline[ti])
+                        high_pcd_path = high_pcd_root / f"cam_{cid}" / f"frame_{ti:04d}_ts_{timestamp}.ply"
+                        o3d.io.write_point_cloud(str(high_pcd_path), high_pcd, write_ascii=False)
+                        after_pcd_entries.append((ti, timestamp, cid, o3d.geometry.PointCloud(high_pcd)))
             else:
                 # Standard low-resolution workflow
                 t_low = int(per_cam_low_ts[ci][ti])
                 rgbs_out[ci, ti] = read_rgb(_resolve_frame(color_lookup_low[ci], t_low, cid, "low-res color"))
-                depths_out[ci, ti] = read_depth(
-                    _resolve_frame(depth_lookup_low[ci], t_low, cid, "low-res depth"),
-                    is_l515_flags[ci],
-                    depth_min,
-                    depth_max,
-                )
+                depths_out[ci, ti] = read_depth(_resolve_frame(depth_lookup_low[ci], t_low, cid, "low-res depth"), is_l515_flags[ci])
                 intrs_out[ci, ti] = scaled_low_intrinsics[ci]
 
-    return rgbs_out, depths_out, intrs_out, extrs_out
+    return rgbs_out, depths_out, intrs_out, extrs_out, before_pcd_entries, after_pcd_entries
 
-def save_and_visualize(args, rgbs, depths, intrs, extrs, final_cam_ids, timestamps, per_camera_timestamps):
+def _log_pointcloud_entries(entries: List[Tuple[int, int, str, o3d.geometry.PointCloud]], root: str) -> None:
+    for frame_idx, timestamp, cid, pcd in entries:
+        pts = np.asarray(pcd.points, dtype=np.float32)
+        if pts.size == 0:
+            continue
+        entity = f"{root}/frame_{frame_idx:04d}_ts_{timestamp}/cam_{cid}"
+        cols = np.asarray(pcd.colors, dtype=np.float32)
+        if cols.shape[0] == pts.shape[0]:
+            rr.log(entity, rr.Points3D(pts, colors=cols))
+        else:
+            rr.log(entity, rr.Points3D(pts))
+
+
+def save_and_visualize(
+    args,
+    rgbs,
+    depths,
+    intrs,
+    extrs,
+    final_cam_ids,
+    timestamps,
+    per_camera_timestamps,
+    before_pcd_entries: List[Tuple[int, int, str, o3d.geometry.PointCloud]],
+    after_pcd_entries: List[Tuple[int, int, str, o3d.geometry.PointCloud]],
+):
     """Saves the processed data to an NPZ file and generates a Rerun visualization."""
     # Convert to channels-first format for NPZ
     rgbs_final = np.moveaxis(rgbs, -1, 2)
@@ -1085,7 +1201,22 @@ def save_and_visualize(args, rgbs, depths, intrs, extrs, final_cam_ids, timestam
 
     # Generate Rerun Visualization
     if not args.no_pointcloud:
-        print("[INFO] Logging data to Rerun...")
+        # Save "before" RRD with dense point clouds
+        if before_pcd_entries:
+            print("[INFO] Saving dense pre-reprojection point clouds to Rerun...")
+            rr.init("rh20t_before", spawn=False)
+            _log_pointcloud_entries(before_pcd_entries, "before")
+            before_rrd_path = args.out_dir / f"{args.task_folder.name}_before.rrd"
+            rr.save(str(before_rrd_path))
+            print(f"✅ [OK] Saved Rerun visualization to: {before_rrd_path}")
+            rr.disconnect()
+
+        # Save "after" RRD with final sparse point clouds & camera frustums
+        print("[INFO] Saving reprojected point clouds to Rerun...")
+        rr.init("rh20t_after", spawn=False)
+        if after_pcd_entries:
+            _log_pointcloud_entries(after_pcd_entries, "after")
+
         rgbs_tensor = torch.from_numpy(rgbs_final).float().unsqueeze(0)
         depths_tensor = torch.from_numpy(depths_final).float().unsqueeze(0)
         intrs_tensor = torch.from_numpy(intrs).float().unsqueeze(0)
@@ -1101,6 +1232,10 @@ def save_and_visualize(args, rgbs, depths, intrs, extrs, final_cam_ids, timestam
             log_rgb_pointcloud=True,
             log_camera_frustrum=True,
         )
+        after_rrd_path = args.out_dir / f"{args.task_folder.name}_after.rrd"
+        rr.save(str(after_rrd_path))
+        print(f"✅ [OK] Saved Rerun visualization to: {after_rrd_path}")
+        rr.disconnect()
 
 def main():
     """Parses arguments and orchestrates the entire data processing workflow."""
@@ -1162,22 +1297,16 @@ def main():
     parser.add_argument("--splat-radius", type=float, default=0.005, help="Radius of splats in world units (meters).")
     
     # Confidence filtering arguments (demo.py style)
+    parser.add_argument(
+        "--use-confidence-filtering",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Apply confidence/edge filtering before reprojection (disable to use raw dense point cloud)."
+    )
     parser.add_argument("--confidence-threshold", type=float, default=0.2, help="Minimum confidence threshold for depth pixels (demo.py style).")
     parser.add_argument("--edge-margin", type=int, default=10, help="Pixels to remove from image borders (unreliable edges).")
     parser.add_argument("--gradient-threshold", type=float, default=0.1, help="Maximum depth gradient to keep (meters, for edge detection).")
     parser.add_argument("--smooth-kernel", type=int, default=3, help="Kernel size for confidence-weighted depth smoothing.")
-    parser.add_argument(
-        "--depth-min",
-        type=float,
-        default=None,
-        help="Optional minimum valid depth in meters; values below are set to zero."
-    )
-    parser.add_argument(
-        "--depth-max",
-        type=float,
-        default=None,
-        help="Optional maximum valid depth in meters; values above are set to zero."
-    )
     
     args = parser.parse_args()
 
@@ -1287,7 +1416,7 @@ def main():
     per_cam_high_sel = [arr[selected_idx] for arr in per_cam_high] if per_cam_high is not None else None
 
     # --- Step 2: Process Frames ---
-    rgbs, depths, intrs, extrs = process_frames(
+    rgbs, depths, intrs, extrs, before_pcd_entries, after_pcd_entries = process_frames(
         args,
         scene_low,
         scene_high,
@@ -1302,12 +1431,18 @@ def main():
     # --- Step 3: Save and Visualize ---
     rr.init("RH20T_Reprojection_Frameworks", spawn=False)
     per_cam_for_npz = per_cam_high_sel if per_cam_high_sel is not None else per_cam_low_sel
-    save_and_visualize(args, rgbs, depths, intrs, extrs, final_cam_ids, timestamps, per_cam_for_npz)
-
-    if not args.no_pointcloud:
-        rrd_path = args.out_dir / f"{args.task_folder.name}_reprojected.rrd"
-        rr.save(str(rrd_path))
-        print(f"✅ [OK] Saved Rerun visualization to: {rrd_path}")
+    save_and_visualize(
+        args,
+        rgbs,
+        depths,
+        intrs,
+        extrs,
+        final_cam_ids,
+        timestamps,
+        per_cam_for_npz,
+        before_pcd_entries,
+        after_pcd_entries,
+    )
 
 if __name__ == "__main__":
     main()
