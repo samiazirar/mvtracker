@@ -57,14 +57,14 @@ from tqdm import tqdm
 from pytorch3d.structures import Pointclouds
 from pytorch3d.renderer import (
     look_at_view_transform,
-    FoVPerspectiveCameras,
+    PerspectiveCameras,  # Changed from FoVPerspectiveCameras
     PointsRasterizationSettings,
     PointsRenderer,
     PointsRasterizer,
     AlphaCompositor,
     NormWeightedCompositor,
 )
-from pytorch3d.renderer.points.pulsar import PulsarPointsRenderer
+from pytorch3d.renderer.points.pulsar.unified import PulsarPointsRenderer
 PYTORCH3D_AVAILABLE = True
 
 # Project-specific imports
@@ -135,12 +135,11 @@ def scale_intrinsics_matrix(raw_K: np.ndarray, width: int, height: int, base_wid
 
 def infer_calibration_resolution(scene: RH20TScene, camera_id: str) -> Optional[Tuple[int, int]]:
     """Reads the calibration image resolution for a given camera if available."""
-    try:
-        calib_dir = Path(scene.calib_folder) / "imgs"
-    except AttributeError:
+    calib_dir = Path(scene.calib_folder) if hasattr(scene, 'calib_folder') else None
+    if calib_dir is None:
         return None
 
-    calib_path = calib_dir / f"cam_{camera_id}_c.png"
+    calib_path = calib_dir / "imgs" / f"cam_{camera_id}_c.png"
     if not calib_path.exists():
         return None
 
@@ -517,22 +516,19 @@ def splat_point_cloud(
     point_cloud = Pointclouds(points=points_batch, features=colors_batch)
     
     # Set up camera parameters for PyTorch3D
-    # PyTorch3D uses a different camera convention, so we need to convert intrinsics
     fx, fy = K[0, 0], K[1, 1]
     cx, cy = K[0, 2], K[1, 2]
     
-    # Convert to PyTorch3D's NDC coordinate system
-    # PyTorch3D expects camera parameters in a specific format
-    focal_length = torch.tensor([[fx / (image_width / 2), fy / (image_height / 2)]], 
-                                dtype=torch.float32, device=device)
-    principal_point = torch.tensor([[(cx - image_width / 2) / (image_width / 2), 
-                                     (cy - image_height / 2) / (image_height / 2)]], 
-                                   dtype=torch.float32, device=device)
+    # Convert to PyTorch3D format - use PerspectiveCameras instead of FoVPerspectiveCameras
+    focal_length = torch.tensor([[fx, fy]], dtype=torch.float32, device=device)
+    principal_point = torch.tensor([[cx, cy]], dtype=torch.float32, device=device)
+    image_size = torch.tensor([[image_height, image_width]], dtype=torch.float32, device=device)
     
     # Create camera object (identity transformation since points are already in camera space)
-    cameras = FoVPerspectiveCameras(
+    cameras = PerspectiveCameras(
         focal_length=focal_length,
         principal_point=principal_point,
+        image_size=image_size,
         device=device
     )
     
@@ -611,11 +607,7 @@ def clean_point_cloud_radius(pcd: o3d.geometry.PointCloud, radius: float, min_po
     if not pcd.has_points():
         return pcd
 
-    try:
-        _, ind = pcd.remove_radius_outlier(nb_points=max(1, int(min_points)), radius=float(radius))
-    except Exception as exc:  # pragma: no cover - Open3D failures are best-effort
-        print(f"[WARN] Radius-based point cloud cleaning failed ({exc}); skipping filter.")
-        return pcd
+    _, ind = pcd.remove_radius_outlier(nb_points=max(1, int(min_points)), radius=float(radius))
 
     if len(ind) == 0:
         print("[WARN] Radius-based point cloud cleaning removed all points; keeping original cloud.")
@@ -630,17 +622,9 @@ def reconstruct_mesh_from_pointcloud(pcd: o3d.geometry.PointCloud, depth: int) -
         return None
 
     pcd_for_mesh = o3d.geometry.PointCloud(pcd)
-    try:
-        pcd_for_mesh.estimate_normals()
-    except Exception as exc:  # pragma: no cover - best-effort
-        print(f"[WARN] Normal estimation failed ({exc}); skipping mesh reconstruction.")
-        return None
+    pcd_for_mesh.estimate_normals()
 
-    try:
-        mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(pcd_for_mesh, depth=int(depth))
-    except Exception as exc:  # pragma: no cover - Poisson may fail on sparse clouds
-        print(f"[WARN] Mesh reconstruction failed ({exc}); skipping Poisson meshing.")
-        return None
+    mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(pcd_for_mesh, depth=int(depth))
 
     densities_arr = np.asarray(densities)
     if densities_arr.size:
@@ -913,42 +897,31 @@ def process_frames(
                     H_out, W_out = high_res_rgb.shape[:2]
                     device = "cuda" if torch.cuda.is_available() else "cpu"
                     
-                    try:
-                        splatted_result = splat_point_cloud(
-                            combined_pcd,
-                            K_high,
-                            E_world_to_cam,
-                            H_out,
-                            W_out,
-                            splat_mode=args.splat_mode,
-                            splat_radius=args.splat_radius,
-                            device=device
-                        )
-                        
-                        if args.splat_mode == "recolor":
-                            # Use splatted colors as RGB output
-                            rgbs_out[ci, ti] = splatted_result
-                            # For depth, we still need to generate it - use the original method as fallback
-                            # or set to zero (indicating we don't have dense depth from splatting)
-                            depths_out[ci, ti] = np.zeros((H_out, W_out), dtype=np.float32)
-                        else:  # mask mode
-                            # Apply mask to original high-res RGB
-                            masked_rgb = high_res_rgb.copy()
-                            mask_bool = splatted_result > 0  # Convert to boolean mask
-                            masked_rgb[~mask_bool] = 0  # Set masked pixels to black
-                            rgbs_out[ci, ti] = masked_rgb
-                            # Set depth to zero for masked areas, could be enhanced to include actual depth
-                            depths_out[ci, ti] = np.zeros((H_out, W_out), dtype=np.float32)
-                            
-                    except Exception as e:
-                        print(f"[WARN] Splatting failed for camera {cid} at frame {ti}: {e}")
-                        print("[WARN] Falling back to traditional sparse depth reprojection.")
-                        # Fallback to original method
-                        rgbs_out[ci, ti] = high_res_rgb
-                        threshold = args.color_threshold if args.color_alignment_check else 256.0
-                        depths_out[ci, ti] = reproject_to_sparse_depth_cv2(
-                            combined_pcd, high_res_rgb, K_high, E_world_to_cam, threshold
-                        )
+                    splatted_result = splat_point_cloud(
+                        combined_pcd,
+                        K_high,
+                        E_world_to_cam,
+                        H_out,
+                        W_out,
+                        splat_mode=args.splat_mode,
+                        splat_radius=args.splat_radius,
+                        device=device
+                    )
+                    
+                    if args.splat_mode == "recolor":
+                        # Use splatted colors as RGB output
+                        rgbs_out[ci, ti] = splatted_result
+                        # For depth, we still need to generate it - use the original method as fallback
+                        # or set to zero (indicating we don't have dense depth from splatting)
+                        depths_out[ci, ti] = np.zeros((H_out, W_out), dtype=np.float32)
+                    else:  # mask mode
+                        # Apply mask to original high-res RGB
+                        masked_rgb = high_res_rgb.copy()
+                        mask_bool = splatted_result > 0  # Convert to boolean mask
+                        masked_rgb[~mask_bool] = 0  # Set masked pixels to black
+                        rgbs_out[ci, ti] = masked_rgb
+                        # Set depth to zero for masked areas, could be enhanced to include actual depth
+                        depths_out[ci, ti] = np.zeros((H_out, W_out), dtype=np.float32)
                 else:
                     # Original sparse depth reprojection method
                     rgbs_out[ci, ti] = high_res_rgb
@@ -1173,6 +1146,30 @@ def main():
     per_cam_high_sel = [arr[selected_idx] for arr in per_cam_high] if per_cam_high is not None else None
 
     # --- Step 2: Process Frames ---
+    rgbs, depths, intrs, extrs = process_frames(
+        args,
+        scene_low,
+        scene_high,
+        final_cam_ids,
+        cam_dirs_low,
+        cam_dirs_high if args.high_res_folder else None,
+        timestamps,
+        per_cam_low_sel,
+        per_cam_high_sel,
+    )
+
+    # --- Step 3: Save and Visualize ---
+    rr.init("RH20T_Reprojection_Frameworks", spawn=False)
+    per_cam_for_npz = per_cam_high_sel if per_cam_high_sel is not None else per_cam_low_sel
+    save_and_visualize(args, rgbs, depths, intrs, extrs, final_cam_ids, timestamps, per_cam_for_npz)
+
+    if not args.no_pointcloud:
+        rrd_path = args.out_dir / f"{args.task_folder.name}_reprojected.rrd"
+        rr.save(str(rrd_path))
+        print(f"✅ [OK] Saved Rerun visualization to: {rrd_path}")
+
+if __name__ == "__main__":
+    main()
     rgbs, depths, intrs, extrs = process_frames(
         args,
         scene_low,
