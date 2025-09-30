@@ -44,10 +44,10 @@ git config --global core.sshCommand 'ssh -o StrictHostKeyChecking=accept-new'
 git config --global credential.helper store || true
 
 echo "Post-create setup completed successfully!"
-unset TORCH_CUDA_ARCH_LIST
-#clone if does not exist
-if [ ! -d "pytorch3d" ]; then
-    echo "Cloning PyTorch3D repository..."
-    git clone https://github.com/facebookresearch/pytorch3d.git
-cd pytorch3d && pip install -e .
-echo "if errors invoke unset TORCH_CUDA_ARCH_LIST"
+# unset TORCH_CUDA_ARCH_LIST
+# #clone if does not exist
+# if [ ! -d "pytorch3d" ]; then
+#     echo "Cloning PyTorch3D repository..."
+#     git clone https://github.com/facebookresearch/pytorch3d.git
+# cd pytorch3d && pip install -e .
+# echo "if errors invoke unset TORCH_CUDA_ARCH_LIST"
