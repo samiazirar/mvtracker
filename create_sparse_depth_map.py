@@ -102,6 +102,37 @@ def list_frames(folder: Path) -> Dict[int, Path]:
         if (t := _num_in_name(p)) is not None
     }.items()))
 
+
+def scale_intrinsics_matrix(raw_K: np.ndarray, width: int, height: int, base_width: int, base_height: int) -> np.ndarray:
+    """Rescales a 3x4 intrinsic matrix to match an image resolution."""
+    if base_width <= 0 or base_height <= 0:
+        raise ValueError("Base calibration resolution must be positive.")
+
+    K = raw_K[:, :3].astype(np.float32, copy=True)
+    scale_x = width / float(base_width)
+    scale_y = height / float(base_height)
+    K[0, 0] *= scale_x
+    K[0, 2] *= scale_x
+    K[1, 1] *= scale_y
+    K[1, 2] *= scale_y
+    return K
+
+
+def infer_calibration_resolution(scene: RH20TScene, camera_id: str) -> Optional[Tuple[int, int]]:
+    """Reads the calibration image resolution for a given camera if available."""
+    try:
+        calib_dir = Path(scene.calib_folder) / "imgs"
+    except AttributeError:
+        return None
+
+    calib_path = calib_dir / f"cam_{camera_id}_c.png"
+    if not calib_path.exists():
+        return None
+
+    with Image.open(calib_path) as img:
+        width, height = img.size
+    return width, height
+
 # --- Data Loading & Synchronization ---
 
 def load_scene_data(task_path: Path, robot_configs: List) -> Tuple[Optional[RH20TScene], List[str], List[Path]]:
@@ -135,7 +166,7 @@ def load_scene_data(task_path: Path, robot_configs: List) -> Tuple[Optional[RH20
 
 def get_synchronized_timestamps(
     cam_dirs: List[Path],
-    frame_rate_hz: float = 5.0,
+    frame_rate_hz: float = 10.0,
     min_density: float = 0.6,
     target_fps: Optional[float] = None,
     max_fps_drift: float = 0.05,
@@ -430,6 +461,57 @@ def unproject_to_world_o3d(depth: np.ndarray, rgb: np.ndarray, K: np.ndarray, E_
     # Transform it to the global world coordinate system.
     return pcd_cam.transform(E_inv)
 
+
+def clean_point_cloud_radius(pcd: o3d.geometry.PointCloud, radius: float, min_points: int) -> o3d.geometry.PointCloud:
+    """Radius-based outlier removal leveraging Open3D's built-in filter."""
+    if not pcd.has_points():
+        return pcd
+
+    try:
+        _, ind = pcd.remove_radius_outlier(nb_points=max(1, int(min_points)), radius=float(radius))
+    except Exception as exc:  # pragma: no cover - Open3D failures are best-effort
+        print(f"[WARN] Radius-based point cloud cleaning failed ({exc}); skipping filter.")
+        return pcd
+
+    if len(ind) == 0:
+        print("[WARN] Radius-based point cloud cleaning removed all points; keeping original cloud.")
+        return pcd
+
+    return pcd.select_by_index(ind)
+
+
+def reconstruct_mesh_from_pointcloud(pcd: o3d.geometry.PointCloud, depth: int) -> Optional[o3d.geometry.TriangleMesh]:
+    """Reconstructs a mesh via Poisson surface reconstruction to sharpen geometry."""
+    if not pcd.has_points():
+        return None
+
+    pcd_for_mesh = o3d.geometry.PointCloud(pcd)
+    try:
+        pcd_for_mesh.estimate_normals()
+    except Exception as exc:  # pragma: no cover - best-effort
+        print(f"[WARN] Normal estimation failed ({exc}); skipping mesh reconstruction.")
+        return None
+
+    try:
+        mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(pcd_for_mesh, depth=int(depth))
+    except Exception as exc:  # pragma: no cover - Poisson may fail on sparse clouds
+        print(f"[WARN] Mesh reconstruction failed ({exc}); skipping Poisson meshing.")
+        return None
+
+    densities_arr = np.asarray(densities)
+    if densities_arr.size:
+        density_thresh = np.quantile(densities_arr, 0.01)
+        mask = densities_arr < density_thresh
+        mesh.remove_vertices_by_mask(mask)
+
+    if len(mesh.vertices) == 0:
+        return None
+
+    mesh.remove_unreferenced_vertices()
+    mesh.compute_vertex_normals()
+    return mesh
+
+
 def reproject_to_sparse_depth_cv2(
     pcd: o3d.geometry.PointCloud, high_res_rgb: np.ndarray, K: np.ndarray, E: np.ndarray, color_threshold: float
 ) -> np.ndarray:
@@ -544,16 +626,55 @@ def process_frames(
         )
         return frame_map[closest_ts]
 
+    scaled_low_intrinsics: List[np.ndarray] = []
+    low_shapes: List[Tuple[int, int]] = []
+    for ci in range(C):
+        cid = final_cam_ids[ci]
+        first_low_ts = int(per_cam_low_ts[ci][0])
+        low_path = _resolve_frame(color_lookup_low[ci], first_low_ts, cid, "low-res color")
+        low_img = read_rgb(low_path)
+        h_low, w_low = low_img.shape[:2]
+        low_shapes.append((h_low, w_low))
+        base_res = infer_calibration_resolution(scene_low, cid)
+        if base_res is None:
+            base_res = (max(1, int(round(scene_low.intrinsics[cid][0, 2] * 2))),
+                        max(1, int(round(scene_low.intrinsics[cid][1, 2] * 2))))
+            print(
+                f"[WARN] Calibration image for camera {cid} not found; "
+                f"estimating base resolution as {base_res[0]}x{base_res[1]} using intrinsics."
+            )
+        base_w, base_h = base_res
+        scaled_low_intrinsics.append(scale_intrinsics_matrix(scene_low.intrinsics[cid], w_low, h_low, base_w, base_h))
+
+    scaled_high_intrinsics: Optional[List[np.ndarray]] = None
+    high_shapes: Optional[List[Tuple[int, int]]] = None
+    if args.high_res_folder and color_lookup_high:
+        scaled_high_intrinsics = []
+        high_shapes = []
+        for ci in range(C):
+            cid = final_cam_ids[ci]
+            first_high_ts = int(per_cam_high_ts[ci][0]) if per_cam_high_ts else int(per_cam_low_ts[ci][0])
+            high_path = _resolve_frame(color_lookup_high[ci], first_high_ts, cid, "high-res color")
+            high_img = read_rgb(high_path)
+            h_high, w_high = high_img.shape[:2]
+            high_shapes.append((h_high, w_high))
+            base_res = infer_calibration_resolution(scene_high, cid) or infer_calibration_resolution(scene_low, cid)
+            if base_res is None:
+                base_res = (max(1, int(round(scene_high.intrinsics[cid][0, 2] * 2))),
+                            max(1, int(round(scene_high.intrinsics[cid][1, 2] * 2))))
+                print(
+                    f"[WARN] Calibration image for camera {cid} not found in high-res scene; "
+                    f"estimating base resolution as {base_res[0]}x{base_res[1]} using intrinsics."
+                )
+            base_w, base_h = base_res
+            scaled_high_intrinsics.append(scale_intrinsics_matrix(scene_high.intrinsics[cid], w_high, h_high, base_w, base_h))
+
     # Determine output resolution and initialize data containers
-    if args.high_res_folder:
-        first_high_ts = int(per_cam_high_ts[0][0]) if per_cam_high_ts else int(per_cam_low_ts[0][0])
-        first_path = _resolve_frame(color_lookup_high[0], first_high_ts, final_cam_ids[0], "high-res color")
-        H_out, W_out, _ = read_rgb(first_path).shape
+    if args.high_res_folder and high_shapes:
+        H_out, W_out = high_shapes[0]
         print(f"[INFO] Outputting high-resolution data ({H_out}x{W_out}) with reprojected depth.")
     else:
-        first_low_ts = int(per_cam_low_ts[0][0])
-        first_path = _resolve_frame(color_lookup_low[0], first_low_ts, final_cam_ids[0], "low-res color")
-        H_out, W_out, _ = read_rgb(first_path).shape
+        H_out, W_out = low_shapes[0]
         print(f"[INFO] Outputting low-resolution data ({H_out}x{W_out}).")
 
     rgbs_out = np.zeros((C, T, H_out, W_out, 3), dtype=np.uint8)
@@ -572,7 +693,7 @@ def process_frames(
                 t_low = int(per_cam_low_ts[ci][ti])
                 depth_low = read_depth(_resolve_frame(depth_lookup_low[ci], t_low, cid, "low-res depth"), is_l515_flags[ci])
                 rgb_low = read_rgb(_resolve_frame(color_lookup_low[ci], t_low, cid, "low-res color"))
-                K_low = scene_low.intrinsics[cid][:, :3]
+                K_low = scaled_low_intrinsics[ci]
                 E_inv = np.linalg.inv(scene_low.extrinsics_base_aligned[cid])
                 
                 # Create and add the point cloud for this view
@@ -582,17 +703,64 @@ def process_frames(
             for pcd in pcds_per_cam:
                 combined_pcd += pcd
 
+            if combined_pcd.has_points():
+                if args.clean_pointcloud:
+                    before_count = len(combined_pcd.points)
+                    cleaned = clean_point_cloud_radius(
+                        combined_pcd,
+                        radius=args.pc_clean_radius,
+                        min_points=args.pc_clean_min_points,
+                    )
+                    after_count = len(cleaned.points)
+                    if after_count == 0:
+                        print(
+                            f"[WARN] Radius filter removed all points at frame index {ti}; "
+                            "using raw combined point cloud instead."
+                        )
+                    else:
+                        if ti == 0 or after_count != before_count:
+                            print(
+                                f"[INFO] Radius filter kept {after_count}/{before_count} points "
+                                f"(radius={args.pc_clean_radius}, min_pts={args.pc_clean_min_points})."
+                            )
+                        combined_pcd = cleaned
+
+                if args.sharpen_edges_with_mesh:
+                    mesh = reconstruct_mesh_from_pointcloud(combined_pcd, depth=args.mesh_depth)
+                    if mesh is not None and len(mesh.vertices) > 0:
+                        mesh_pcd = o3d.geometry.PointCloud()
+                        mesh_pcd.points = mesh.vertices
+                        if mesh.has_vertex_colors() and len(mesh.vertex_colors) == len(mesh.vertices):
+                            mesh_pcd.colors = mesh.vertex_colors
+                        elif combined_pcd.has_colors():
+                            combined_colors = np.asarray(combined_pcd.colors)
+                            if combined_colors.size:
+                                kdtree = o3d.geometry.KDTreeFlann(combined_pcd)
+                                mesh_vertices = np.asarray(mesh.vertices)
+                                remap_colors = np.zeros_like(mesh_vertices)
+                                for vidx, vertex in enumerate(mesh_vertices):
+                                    _, idx, _ = kdtree.search_knn_vector_3d(vertex, 1)
+                                    remap_colors[vidx] = combined_colors[idx[0]]
+                                mesh_pcd.colors = o3d.utility.Vector3dVector(remap_colors)
+                        combined_pcd = mesh_pcd
+
         # Step 2: Generate the final output data for each camera view
         for ci in range(C):
             cid = final_cam_ids[ci]
-            E_world_to_cam = scene_low.extrinsics_base_aligned[cid]
+
+            if args.high_res_folder and scene_high is not None:
+                # Use high-res calibration when available; low-res version is only for point-cloud generation.
+                E_world_to_cam = scene_high.extrinsics_base_aligned[cid]
+            else:
+                E_world_to_cam = scene_low.extrinsics_base_aligned[cid]
+
             extrs_out[ci, ti] = E_world_to_cam[:3, :4]
             
             if args.high_res_folder:
                 # Reprojection workflow
                 t_high = int(per_cam_high_ts[ci][ti]) if per_cam_high_ts else int(per_cam_low_ts[ci][ti])
                 high_res_rgb = read_rgb(_resolve_frame(color_lookup_high[ci], t_high, cid, "high-res color"))
-                K_high = scene_high.intrinsics[cid][:, :3]
+                K_high = scaled_high_intrinsics[ci] if scaled_high_intrinsics is not None else scaled_low_intrinsics[ci]
                 rgbs_out[ci, ti] = high_res_rgb
                 intrs_out[ci, ti] = K_high
                 
@@ -606,7 +774,7 @@ def process_frames(
                 t_low = int(per_cam_low_ts[ci][ti])
                 rgbs_out[ci, ti] = read_rgb(_resolve_frame(color_lookup_low[ci], t_low, cid, "low-res color"))
                 depths_out[ci, ti] = read_depth(_resolve_frame(depth_lookup_low[ci], t_low, cid, "low-res depth"), is_l515_flags[ci])
-                intrs_out[ci, ti] = scene_low.intrinsics[cid][:, :3]
+                intrs_out[ci, ti] = scaled_low_intrinsics[ci]
 
     return rgbs_out, depths_out, intrs_out, extrs_out
 
@@ -663,13 +831,48 @@ def main():
     parser.add_argument("--config", default="rh20t_api/configs/configs.json", type=Path, help="Path to RH20T robot configs JSON.")
     parser.add_argument("--max-frames", type=int, default=50, help="Limit frames to process (0 for all).")
     parser.add_argument("--frame-selection", choices=["first", "last", "middle"], default="middle", help="Method for selecting frames.")
-    parser.add_argument("--color-alignment-check", action="store_true", help="Enable color-based filtering of reprojected points.")
-    parser.add_argument("--color-threshold", type=float, default=40.0, help="Max average color difference (0-255) for a point to be aligned.")
+    parser.add_argument(
+        "--color-alignment-check",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable color-based filtering of reprojected points (disable with --no-color-alignment-check)."
+    )
+    parser.add_argument("--color-threshold", type=float, default=25.0, help="Max average color difference (0-255) for a point to be aligned.")
+    parser.add_argument(
+        "--sharpen-edges-with-mesh",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Densify geometry via Poisson meshing for sharper edges (disable with --no-sharpen-edges-with-mesh)."
+    )
+    parser.add_argument(
+        "--mesh-depth",
+        type=int,
+        default=9,
+        help="Poisson reconstruction depth controlling mesh resolution."
+    )
+    parser.add_argument(
+        "--clean-pointcloud",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Apply radius-based cleaning to the fused point cloud before reprojection (disable with --no-clean-pointcloud)."
+    )
+    parser.add_argument(
+        "--pc-clean-radius",
+        type=float,
+        default=0.02,
+        help="Radius (meters) for the Open3D radius outlier removal filter."
+    )
+    parser.add_argument(
+        "--pc-clean-min-points",
+        type=int,
+        default=10,
+        help="Minimum number of neighbors within radius to keep a point during cleaning."
+    )
     parser.add_argument("--no-pointcloud", action="store_true", help="Only generate the .npz file, skip visualization.")
-    parser.add_argument("--sync-fps", type=float, default=5.0, help="Target FPS for synchronization output timeline.")
+    parser.add_argument("--sync-fps", type=float, default=10.0, help="Target FPS for synchronization output timeline.")
     parser.add_argument("--sync-min-density", type=float, default=0.6, help="Minimum density ratio required per camera during synchronization.")
     parser.add_argument("--sync-max-drift", type=float, default=0.05, help="Maximum tolerated fractional FPS shortfall before warning.")
-    parser.add_argument("--sync-tolerance-ms", type=float, default=None, help="Maximum timestamp deviation (ms) when matching frames; defaults to half frame period.")
+    parser.add_argument("--sync-tolerance-ms", type=float, default=50.0, help="Maximum timestamp deviation (ms) when matching frames; defaults to half frame period.")
     args = parser.parse_args()
 
     if not args.config.exists():
