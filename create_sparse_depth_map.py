@@ -26,12 +26,13 @@ python create_sparse_depth_map.py \\
   --out-dir ./output/high_res_reprojected \\
   --max-frames 100
 
+
 # 3. Advanced Reprojection with Color Alignment Check
 # This produces the cleanest, most reliable sparse depth map by filtering out
 # points where the original color (from low-res) doesn't match the target
 # color (in high-res), indicating a potential calibration misalignment.
 
-python create_sparse_depth_map.py   --task-folder /data/rh20t_api/data/test_data_full_rgb_upscaled_depth/uncompressed_low_res_data/task_0065_user_0010_scene_0009_cfg_0004   --high-res-folder /data/rh20t_api/data/test_data_full_rgb_upscaled_depth/rgb_data/RH20T_cfg4/task_0065_user_0010_scene_0009_cfg_0004  --out-dir ./data/high_res_filtered   --max-frames 100   --color-alignment-check   --color-threshold 35
+python create_sparse_depth_map.py   --task-folder /data/rh20t_api/data/test_data_full_rgb_upscaled_depth/uncompressed_low_res_data/task_0065_user_0010_scene_0009_cfg_0004   --high-res-folder /data/rh20t_api/data/test_data_full_rgb_upscaled_depth/rgb_data/RH20T_cfg4/task_0065_user_0010_scene_0009_cfg_0004  --out-dir ./data/high_res_filtered   --max-frames 100   --color-alignment-check   --color-threshold 35 --use-splatting --splat-mode recolor --splat-radius 0.01
 """
 
 
@@ -51,6 +52,20 @@ import open3d as o3d
 import rerun as rr
 
 from tqdm import tqdm
+
+# PyTorch3D imports for point splatting
+from pytorch3d.structures import Pointclouds
+from pytorch3d.renderer import (
+    look_at_view_transform,
+    FoVPerspectiveCameras,
+    PointsRasterizationSettings,
+    PointsRenderer,
+    PointsRasterizer,
+    AlphaCompositor,
+    NormWeightedCompositor,
+)
+from pytorch3d.renderer.points.pulsar import PulsarPointsRenderer
+PYTORCH3D_AVAILABLE = True
 
 # Project-specific imports
 from mvtracker.utils.visualizer_rerun import log_pointclouds_to_rerun
@@ -433,6 +448,135 @@ def select_frames(timestamps: np.ndarray, max_frames: Optional[int], selection_m
 
 # --- 3D Geometry & Reprojection Functions ---
 
+def splat_point_cloud(
+    pcd: o3d.geometry.PointCloud,
+    K: np.ndarray,
+    E: np.ndarray,
+    image_height: int,
+    image_width: int,
+    splat_mode: str = "mask",
+    splat_radius: float = 0.005,
+    device: str = "cuda"
+) -> np.ndarray:
+    """
+    Splat a 3D point cloud onto a 2D image using PyTorch3D's efficient point rendering.
+    
+    Args:
+        pcd: Open3D PointCloud in world coordinates
+        K: 3x3 camera intrinsic matrix
+        E: 3x4 camera extrinsic matrix (world-to-camera)
+        image_height: Output image height
+        image_width: Output image width
+        splat_mode: 'recolor' for RGB rendering, 'mask' for binary mask
+        splat_radius: Radius of splats in world units (meters)
+        device: PyTorch device ('cuda' or 'cpu')
+        
+    Returns:
+        For 'recolor' mode: RGB image (H, W, 3) as uint8
+        For 'mask' mode: Binary mask (H, W) as uint8 (0 or 255)
+    """
+    if not PYTORCH3D_AVAILABLE:
+        raise ImportError("PyTorch3D is required for point splatting but is not available.")
+    
+    if not pcd.has_points():
+        # Return empty image/mask if no points
+        if splat_mode == "recolor":
+            return np.zeros((image_height, image_width, 3), dtype=np.uint8)
+        else:
+            return np.zeros((image_height, image_width), dtype=np.uint8)
+    
+    # Convert Open3D point cloud to PyTorch tensors
+    points_world = torch.tensor(np.asarray(pcd.points), dtype=torch.float32, device=device)
+    if pcd.has_colors():
+        colors = torch.tensor(np.asarray(pcd.colors), dtype=torch.float32, device=device)
+    else:
+        # Default to white points if no colors
+        colors = torch.ones_like(points_world, dtype=torch.float32, device=device)
+    
+    # Transform points to camera coordinate system
+    R = torch.tensor(E[:3, :3], dtype=torch.float32, device=device)
+    t = torch.tensor(E[:3, 3], dtype=torch.float32, device=device)
+    points_cam = (R @ points_world.T + t.unsqueeze(1)).T
+    
+    # Filter points behind the camera
+    valid_mask = points_cam[:, 2] > 1e-6
+    points_cam = points_cam[valid_mask]
+    colors = colors[valid_mask]
+    
+    if points_cam.shape[0] == 0:
+        # No valid points
+        if splat_mode == "recolor":
+            return np.zeros((image_height, image_width, 3), dtype=np.uint8)
+        else:
+            return np.zeros((image_height, image_width), dtype=np.uint8)
+    
+    # Create PyTorch3D Pointclouds structure
+    # Add batch dimension (batch_size=1)
+    points_batch = points_cam.unsqueeze(0)  # (1, N, 3)
+    colors_batch = colors.unsqueeze(0)      # (1, N, 3)
+    point_cloud = Pointclouds(points=points_batch, features=colors_batch)
+    
+    # Set up camera parameters for PyTorch3D
+    # PyTorch3D uses a different camera convention, so we need to convert intrinsics
+    fx, fy = K[0, 0], K[1, 1]
+    cx, cy = K[0, 2], K[1, 2]
+    
+    # Convert to PyTorch3D's NDC coordinate system
+    # PyTorch3D expects camera parameters in a specific format
+    focal_length = torch.tensor([[fx / (image_width / 2), fy / (image_height / 2)]], 
+                                dtype=torch.float32, device=device)
+    principal_point = torch.tensor([[(cx - image_width / 2) / (image_width / 2), 
+                                     (cy - image_height / 2) / (image_height / 2)]], 
+                                   dtype=torch.float32, device=device)
+    
+    # Create camera object (identity transformation since points are already in camera space)
+    cameras = FoVPerspectiveCameras(
+        focal_length=focal_length,
+        principal_point=principal_point,
+        device=device
+    )
+    
+    # Configure rasterization settings
+    # The radius should be converted to screen space for rendering
+    # A rough conversion: splat_radius in world units to pixel radius
+    pixel_radius = max(1.0, splat_radius * fx / torch.mean(points_cam[:, 2]).item())
+    
+    raster_settings = PointsRasterizationSettings(
+        image_size=(image_height, image_width),
+        radius=pixel_radius,
+        points_per_pixel=10,  # Allow multiple points per pixel for proper z-buffering
+    )
+    
+    # Create rasterizer
+    rasterizer = PointsRasterizer(cameras=cameras, raster_settings=raster_settings)
+    
+    # Choose compositor based on mode
+    if splat_mode == "recolor":
+        # Use alpha compositor for color blending with proper depth testing
+        compositor = AlphaCompositor(background_color=(0.0, 0.0, 0.0))
+    else:  # mask mode
+        # Use norm-weighted compositor to create coverage mask
+        compositor = NormWeightedCompositor(background_color=(0.0, 0.0, 0.0))
+    
+    # Create renderer
+    renderer = PointsRenderer(rasterizer=rasterizer, compositor=compositor)
+    
+    # Render the point cloud
+    with torch.no_grad():
+        rendered_image = renderer(point_cloud, cameras=cameras)
+    
+    # Convert output to numpy
+    rendered_np = rendered_image[0].cpu().numpy()  # Remove batch dimension
+    
+    if splat_mode == "recolor":
+        # Convert to uint8 RGB image
+        rgb_output = (rendered_np[..., :3] * 255).astype(np.uint8)
+        return rgb_output
+    else:  # mask mode
+        # Create binary mask: any pixel with non-zero values becomes 1
+        mask = (rendered_np[..., :3].sum(axis=-1) > 1e-6).astype(np.uint8) * 255
+        return mask
+
 def unproject_to_world_o3d(depth: np.ndarray, rgb: np.ndarray, K: np.ndarray, E_inv: np.ndarray) -> o3d.geometry.PointCloud:
     """
     Creates a colored point cloud in world coordinates from a single view using Open3D.
@@ -534,6 +678,7 @@ def reproject_to_sparse_depth_cv2(
     sparse_depth = np.zeros((H, W), dtype=np.float32)
     
     if not pcd.has_points():
+        raise ValueError("Point cloud has no points; cannot reproject to depth map.")
         return sparse_depth
 
     pts_world = np.asarray(pcd.points)
@@ -561,8 +706,8 @@ def reproject_to_sparse_depth_cv2(
     
     # Apply combined filters
     valid_mask = np.where(in_front_mask)[0][bounds_mask]
-    u_idx = np.round(u[bounds_mask]).astype(int)
-    v_idx = np.round(v[bounds_mask]).astype(int)
+    u_idx = np.round(u[bounds_mask]).astype(np.int32)
+    v_idx = np.round(v[bounds_mask]).astype(np.int32)
     np.clip(u_idx, 0, W - 1, out=u_idx)
     np.clip(v_idx, 0, H - 1, out=v_idx)
     depth_final = depths[valid_mask]
@@ -761,14 +906,57 @@ def process_frames(
                 t_high = int(per_cam_high_ts[ci][ti]) if per_cam_high_ts else int(per_cam_low_ts[ci][ti])
                 high_res_rgb = read_rgb(_resolve_frame(color_lookup_high[ci], t_high, cid, "high-res color"))
                 K_high = scaled_high_intrinsics[ci] if scaled_high_intrinsics is not None else scaled_low_intrinsics[ci]
-                rgbs_out[ci, ti] = high_res_rgb
                 intrs_out[ci, ti] = K_high
                 
-                # If color check is disabled, use a threshold that allows all points to pass
-                threshold = args.color_threshold if args.color_alignment_check else 256.0
-                depths_out[ci, ti] = reproject_to_sparse_depth_cv2(
-                    combined_pcd, high_res_rgb, K_high, E_world_to_cam, threshold
-                )
+                if args.use_splatting:
+                    # Use PyTorch3D point splatting instead of sparse depth reprojection
+                    H_out, W_out = high_res_rgb.shape[:2]
+                    device = "cuda" if torch.cuda.is_available() else "cpu"
+                    
+                    try:
+                        splatted_result = splat_point_cloud(
+                            combined_pcd,
+                            K_high,
+                            E_world_to_cam,
+                            H_out,
+                            W_out,
+                            splat_mode=args.splat_mode,
+                            splat_radius=args.splat_radius,
+                            device=device
+                        )
+                        
+                        if args.splat_mode == "recolor":
+                            # Use splatted colors as RGB output
+                            rgbs_out[ci, ti] = splatted_result
+                            # For depth, we still need to generate it - use the original method as fallback
+                            # or set to zero (indicating we don't have dense depth from splatting)
+                            depths_out[ci, ti] = np.zeros((H_out, W_out), dtype=np.float32)
+                        else:  # mask mode
+                            # Apply mask to original high-res RGB
+                            masked_rgb = high_res_rgb.copy()
+                            mask_bool = splatted_result > 0  # Convert to boolean mask
+                            masked_rgb[~mask_bool] = 0  # Set masked pixels to black
+                            rgbs_out[ci, ti] = masked_rgb
+                            # Set depth to zero for masked areas, could be enhanced to include actual depth
+                            depths_out[ci, ti] = np.zeros((H_out, W_out), dtype=np.float32)
+                            
+                    except Exception as e:
+                        print(f"[WARN] Splatting failed for camera {cid} at frame {ti}: {e}")
+                        print("[WARN] Falling back to traditional sparse depth reprojection.")
+                        # Fallback to original method
+                        rgbs_out[ci, ti] = high_res_rgb
+                        threshold = args.color_threshold if args.color_alignment_check else 256.0
+                        depths_out[ci, ti] = reproject_to_sparse_depth_cv2(
+                            combined_pcd, high_res_rgb, K_high, E_world_to_cam, threshold
+                        )
+                else:
+                    # Original sparse depth reprojection method
+                    rgbs_out[ci, ti] = high_res_rgb
+                    # If color check is disabled, use a threshold that allows all points to pass
+                    threshold = args.color_threshold if args.color_alignment_check else 256.0
+                    depths_out[ci, ti] = reproject_to_sparse_depth_cv2(
+                        combined_pcd, high_res_rgb, K_high, E_world_to_cam, threshold
+                    )
             else:
                 # Standard low-resolution workflow
                 t_low = int(per_cam_low_ts[ci][ti])
@@ -873,7 +1061,17 @@ def main():
     parser.add_argument("--sync-min-density", type=float, default=0.6, help="Minimum density ratio required per camera during synchronization.")
     parser.add_argument("--sync-max-drift", type=float, default=0.05, help="Maximum tolerated fractional FPS shortfall before warning.")
     parser.add_argument("--sync-tolerance-ms", type=float, default=50.0, help="Maximum timestamp deviation (ms) when matching frames; defaults to half frame period.")
+    # Point splatting arguments
+    parser.add_argument("--use-splatting", action="store_true", help="Enable point splatting using PyTorch3D instead of sparse depth reprojection.")
+    parser.add_argument("--splat-mode", choices=["recolor", "mask"], default="mask", help="Splatting mode: 'recolor' renders point colors, 'mask' creates a binary mask.")
+    parser.add_argument("--splat-radius", type=float, default=0.005, help="Radius of splats in world units (meters).")
     args = parser.parse_args()
+
+    # Validate PyTorch3D availability for splatting
+    if args.use_splatting and not PYTORCH3D_AVAILABLE:
+        print("[ERROR] Point splatting requires PyTorch3D, but it is not available.")
+        print("[ERROR] Please install PyTorch3D or disable splatting with --no-use-splatting.")
+        return
 
     if not args.config.exists():
         print(f"[ERROR] RH20T config file not found at: {args.config}")

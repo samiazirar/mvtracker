@@ -94,52 +94,316 @@ def infer_calibration_resolution(scene: RH20TScene, camera_id: str) -> Optional[
     with Image.open(calib_path) as img:
         return img.size
 
+def get_distortion_coefficients(scene: RH20TScene, camera_id: str) -> Optional[np.ndarray]:
+    """
+    Attempts to load distortion coefficients for a camera.
+    
+    RH20T doesn't currently expose distortion coefficients in the standard API,
+    but this function provides infrastructure for when they become available.
+    """
+    try:
+        calib_dir = Path(scene.calib_folder)
+        
+        # Try to load from a hypothetical distortion.npy file
+        distortion_file = calib_dir / "distortion.npy"
+        if distortion_file.exists():
+            distortion_dict = np.load(distortion_file, allow_pickle=True).item()
+            if camera_id in distortion_dict:
+                return distortion_dict[camera_id]
+        
+        # Try to load from individual camera distortion files
+        cam_distortion_file = calib_dir / f"distortion_{camera_id}.npy"
+        if cam_distortion_file.exists():
+            return np.load(cam_distortion_file)
+            
+    except (AttributeError, FileNotFoundError, KeyError):
+        pass
+    
+    # Default: no distortion (4 coefficients for OpenCV)
+    return np.zeros(4, dtype=np.float32)
+
 # --- 3D Geometry & Reprojection Functions ---
 
-def unproject_to_world_o3d(depth: np.ndarray, rgb: np.ndarray, K: np.ndarray, E_inv: np.ndarray) -> o3d.geometry.PointCloud:
-    """Creates a colored point cloud in world coordinates from a SINGLE view."""
-    o3d_depth = o3d.geometry.Image(depth)
-    o3d_rgb = o3d.geometry.Image(rgb)
-    rgbd_image = o3d.geometry.RGBDImage.create_from_color_and_depth(
-        o3d_rgb, o3d_depth, depth_scale=1.0, depth_trunc=10.0, convert_rgb_to_intensity=False
-    )
+def apply_edge_aware_mask(depth: np.ndarray, rgb: np.ndarray, edge_dilation: int = 3) -> np.ndarray:
+    """Apply edge-aware mask to remove mixed pixels near edges."""
+    # Convert RGB to grayscale for edge detection
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    
+    # Detect edges in both RGB and depth
+    rgb_edges = cv2.Canny(gray, 100, 200)
+    
+    # Compute depth gradients
+    depth_grad_x = cv2.Sobel(depth, cv2.CV_64F, 1, 0, ksize=3)
+    depth_grad_y = cv2.Sobel(depth, cv2.CV_64F, 0, 1, ksize=3)
+    depth_grad_mag = np.sqrt(depth_grad_x**2 + depth_grad_y**2)
+    
+    # Find depth discontinuities (large gradients)
+    valid_depth_mask = depth > 0
+    if np.sum(valid_depth_mask) > 100:  # Only compute if we have enough valid depth points
+        depth_grad_median = np.median(depth_grad_mag[valid_depth_mask])
+        depth_edges = (depth_grad_mag > 5 * depth_grad_median).astype(np.uint8) * 255
+    else:
+        depth_edges = np.zeros_like(depth, dtype=np.uint8)
+    
+    # Combine edge maps
+    combined_edges = cv2.bitwise_or(rgb_edges, depth_edges)
+    
+    # Dilate edges to create exclusion zones
+    kernel = np.ones((edge_dilation, edge_dilation), np.uint8)
+    edge_mask = cv2.dilate(combined_edges, kernel, iterations=1).astype(bool)
+    
+    # Apply mask to depth
+    masked_depth = depth.copy()
+    masked_depth[edge_mask] = 0.0
+    
+    return masked_depth
+
+def unproject_depth_only(depth: np.ndarray, K: np.ndarray, E_inv: np.ndarray) -> o3d.geometry.PointCloud:
+    """Unprojection using depth intrinsics only (no colors yet)."""
     H, W = depth.shape
+    
+    # Create point cloud from depth only
+    o3d_depth = o3d.geometry.Image(depth)
     intrinsics = o3d.camera.PinholeCameraIntrinsic(W, H, K[0, 0], K[1, 1], K[0, 2], K[1, 2])
-    pcd_cam = o3d.geometry.PointCloud.create_from_rgbd_image(rgbd_image, intrinsics)
+    
+    # Create point cloud without color
+    pcd_cam = o3d.geometry.PointCloud.create_from_depth_image(
+        o3d_depth, intrinsics, depth_scale=1.0, depth_trunc=10.0
+    )
+    
+    # Transform to world coordinates
     return pcd_cam.transform(E_inv)
 
-def reproject_to_sparse_depth_cv2(pcd: o3d.geometry.PointCloud, high_res_shape: Tuple[int, int], K: np.ndarray, E: np.ndarray) -> np.ndarray:
-    """Projects a point cloud to a sparse depth map using OpenCV's Z-buffering."""
-    H, W = high_res_shape
-    sparse_depth = np.zeros((H, W), dtype=np.float32)
-    if not pcd.has_points():
-        return sparse_depth
+def sample_colors_bilinear(rgb: np.ndarray, u: np.ndarray, v: np.ndarray) -> np.ndarray:
+    """Sample colors from RGB image using bilinear interpolation."""
+    H, W = rgb.shape[:2]
+    
+    # Clamp coordinates to image bounds
+    u_clamped = np.clip(u, 0, W - 1)
+    v_clamped = np.clip(v, 0, H - 1)
+    
+    # Bilinear sampling using cv2.remap
+    map_x = u_clamped.astype(np.float32)
+    map_y = v_clamped.astype(np.float32)
+    
+    # Sample each channel separately
+    colors = np.zeros((len(u), 3), dtype=np.uint8)
+    for c in range(3):
+        colors[:, c] = cv2.remap(
+            rgb[:, :, c], map_x, map_y, 
+            interpolation=cv2.INTER_LINEAR, 
+            borderMode=cv2.BORDER_REFLECT_101
+        ).astype(np.uint8)
+    
+    return colors
 
-    pts_world = np.asarray(pcd.points)
+def project_world_points(points_world: np.ndarray, K: np.ndarray, E: np.ndarray, dist_coeffs: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Project world points to camera using proper distortion handling."""
     R, t = E[:3, :3], E[:3, 3]
     rvec, _ = cv2.Rodrigues(R)
     tvec = t.reshape(3, 1)
-
-    projected_pts, _ = cv2.projectPoints(pts_world, rvec, tvec, K, distCoeffs=None)
-    projected_pts = projected_pts.squeeze(1)
     
-    pts_cam = (R @ pts_world.T + tvec).T
+    # Use distortion coefficients if provided
+    if dist_coeffs is None:
+        dist_coeffs = np.zeros(4)  # No distortion
+    
+    projected_pts, _ = cv2.projectPoints(
+        points_world, rvec, tvec, K, distCoeffs=dist_coeffs
+    )
+    projected_pts = projected_pts.squeeze(1)  # Shape: (N, 2)
+    
+    # Compute depths in camera coordinates
+    pts_cam = (R @ points_world.T + tvec).T
     depths = pts_cam[:, 2]
-
-    in_front_mask = depths > 1e-6
-    u, v = projected_pts[in_front_mask, 0], projected_pts[in_front_mask, 1]
-    bounds_mask = (u >= 0) & (u < W) & (v >= 0) & (v < H)
     
-    valid_mask = np.where(in_front_mask)[0][bounds_mask]
-    u_idx = np.round(u[bounds_mask]).astype(int)
-    v_idx = np.round(v[bounds_mask]).astype(int)
-    depth_final = depths[valid_mask]
+    # Check which points are in front of camera
+    in_front = depths > 1e-6
+    
+    return projected_pts[:, 0], projected_pts[:, 1], in_front
 
-    # Z-Buffering: Handle occlusions by keeping only the closest point for each pixel.
-    sorted_indices = np.argsort(depth_final)[::-1]
-    sparse_depth[v_idx[sorted_indices], u_idx[sorted_indices]] = depth_final[sorted_indices]
+def unproject_to_world_improved(
+    depth: np.ndarray, 
+    rgb: np.ndarray, 
+    K_depth: np.ndarray, 
+    E_depth_inv: np.ndarray,
+    K_color: np.ndarray,
+    E_color: np.ndarray,
+    dist_coeffs: Optional[np.ndarray] = None,
+    apply_edge_mask: bool = True
+) -> o3d.geometry.PointCloud:
+    """
+    Improved unprojection that handles depth/color intrinsics separately.
+    
+    Since RH20T doesn't expose separate depth/color intrinsics, this function
+    provides the infrastructure for when they become available, but currently
+    uses the same intrinsics for both.
+    """
+    # Apply edge-aware masking to remove mixed pixels
+    if apply_edge_mask:
+        depth_clean = apply_edge_aware_mask(depth, rgb)
+    else:
+        depth_clean = depth
+    
+    # 1. Unproject using depth intrinsics (no color yet)
+    pcd_world = unproject_depth_only(depth_clean, K_depth, E_depth_inv)
+    
+    if not pcd_world.has_points():
+        return pcd_world
+    
+    # 2. Color each 3D point by projecting to color camera
+    points_world = np.asarray(pcd_world.points)
+    
+    # Project to color camera coordinates  
+    u_color, v_color, in_front = project_world_points(
+        points_world, K_color, E_color, dist_coeffs
+    )
+    
+    # Sample colors using bilinear interpolation
+    H_color, W_color = rgb.shape[:2]
+    in_bounds = (u_color >= 0) & (u_color < W_color) & (v_color >= 0) & (v_color < H_color)
+    valid_mask = in_front & in_bounds
+    
+    if np.any(valid_mask):
+        colors = sample_colors_bilinear(rgb, u_color[valid_mask], v_color[valid_mask])
+        
+        # Create colored point cloud
+        all_colors = np.zeros((len(points_world), 3), dtype=np.uint8)
+        all_colors[valid_mask] = colors
+        
+        # Filter to only keep points with valid colors
+        pcd_colored = o3d.geometry.PointCloud()
+        pcd_colored.points = o3d.utility.Vector3dVector(points_world[valid_mask])
+        pcd_colored.colors = o3d.utility.Vector3dVector(all_colors[valid_mask] / 255.0)
+        
+        return pcd_colored
+    
+    return o3d.geometry.PointCloud()
+
+def unproject_to_world_o3d(depth: np.ndarray, rgb: np.ndarray, K: np.ndarray, E_inv: np.ndarray) -> o3d.geometry.PointCloud:
+    """Legacy function - creates a colored point cloud in world coordinates from a SINGLE view."""
+    # For now, use the same intrinsics for depth and color since RH20T doesn't separate them
+    # Apply edge masking to reduce mixed pixel artifacts
+    return unproject_to_world_improved(
+        depth, rgb, K, E_inv, K, np.linalg.inv(E_inv), 
+        dist_coeffs=None, apply_edge_mask=True
+    )
+
+def reproject_to_sparse_depth_improved(
+    pcd: o3d.geometry.PointCloud, 
+    high_res_shape: Tuple[int, int], 
+    K: np.ndarray, 
+    E: np.ndarray,
+    dist_coeffs: Optional[np.ndarray] = None,
+    supersample_factor: int = 1,
+    depth_epsilon: float = 0.005
+) -> np.ndarray:
+    """
+    Projects a point cloud to a sparse depth map with improved sub-pixel handling.
+    
+    Args:
+        pcd: Point cloud to project
+        high_res_shape: Target image shape (H, W)
+        K: Camera intrinsics matrix
+        E: Camera extrinsics matrix (world to camera)
+        dist_coeffs: Distortion coefficients (if None, assumes no distortion)
+        supersample_factor: Render at higher resolution then downsample (1 = no supersampling)
+        depth_epsilon: Minimum depth difference for z-buffer updates (meters)
+    """
+    H, W = high_res_shape
+    if supersample_factor > 1:
+        H_render, W_render = H * supersample_factor, W * supersample_factor
+        K_render = K.copy()
+        K_render[0, 0] *= supersample_factor  # fx
+        K_render[1, 1] *= supersample_factor  # fy  
+        K_render[0, 2] *= supersample_factor  # cx
+        K_render[1, 2] *= supersample_factor  # cy
+    else:
+        H_render, W_render = H, W
+        K_render = K
+        
+    sparse_depth = np.zeros((H_render, W_render), dtype=np.float32)
+    
+    if not pcd.has_points():
+        if supersample_factor > 1:
+            return cv2.resize(sparse_depth, (W, H), interpolation=cv2.INTER_AREA)
+        return sparse_depth
+
+    pts_world = np.asarray(pcd.points)
+    
+    # Project points with proper distortion handling
+    u, v, in_front = project_world_points(pts_world, K_render, E, dist_coeffs)
+    
+    # Keep sub-pixel coordinates for better accuracy
+    depths = (E[:3, :3] @ pts_world.T + E[:3, 3:4]).T[:, 2]
+    
+    # Filter for points in front of camera
+    valid_front = in_front & (depths > 1e-6)
+    if not np.any(valid_front):
+        if supersample_factor > 1:
+            return cv2.resize(sparse_depth, (W, H), interpolation=cv2.INTER_AREA)
+        return sparse_depth
+    
+    u_valid = u[valid_front]
+    v_valid = v[valid_front] 
+    depths_valid = depths[valid_front]
+    
+    # Check bounds with sub-pixel precision
+    in_bounds = (u_valid >= 0) & (u_valid <= W_render - 1) & (v_valid >= 0) & (v_valid <= H_render - 1)
+    
+    if not np.any(in_bounds):
+        if supersample_factor > 1:
+            return cv2.resize(sparse_depth, (W, H), interpolation=cv2.INTER_AREA)
+        return sparse_depth
+    
+    u_final = u_valid[in_bounds]
+    v_final = v_valid[in_bounds]
+    depths_final = depths_valid[in_bounds]
+    
+    # Convert to integer pixel coordinates using floor (more stable than round)
+    u_int = np.floor(u_final).astype(np.int32)
+    v_int = np.floor(v_final).astype(np.int32)
+    
+    # Ensure we're still in bounds after flooring
+    pixel_bounds = (u_int >= 0) & (u_int < W_render) & (v_int >= 0) & (v_int < H_render)
+    u_int = u_int[pixel_bounds]
+    v_int = v_int[pixel_bounds]
+    depths_final = depths_final[pixel_bounds]
+    
+    if len(depths_final) == 0:
+        if supersample_factor > 1:
+            return cv2.resize(sparse_depth, (W, H), interpolation=cv2.INTER_AREA)
+        return sparse_depth
+    
+    # Improved Z-buffering with epsilon-based depth comparison
+    for i in range(len(depths_final)):
+        y, x, d = v_int[i], u_int[i], depths_final[i]
+        current_depth = sparse_depth[y, x]
+        
+        # Update if pixel is empty or new depth is significantly closer
+        if current_depth == 0 or d < (current_depth - depth_epsilon):
+            sparse_depth[y, x] = d
+    
+    # Downsample if we rendered at higher resolution
+    if supersample_factor > 1:
+        # Use min pooling to preserve closest depths when downsampling
+        sparse_depth_downsampled = np.zeros((H, W), dtype=np.float32)
+        for y in range(H):
+            for x in range(W):
+                y_start, y_end = y * supersample_factor, (y + 1) * supersample_factor
+                x_start, x_end = x * supersample_factor, (x + 1) * supersample_factor
+                patch = sparse_depth[y_start:y_end, x_start:x_end]
+                nonzero_patch = patch[patch > 0]
+                if len(nonzero_patch) > 0:
+                    sparse_depth_downsampled[y, x] = np.min(nonzero_patch)
+        return sparse_depth_downsampled
     
     return sparse_depth
+
+def reproject_to_sparse_depth_cv2(pcd: o3d.geometry.PointCloud, high_res_shape: Tuple[int, int], K: np.ndarray, E: np.ndarray) -> np.ndarray:
+    """Legacy function - projects a point cloud to a sparse depth map using OpenCV's Z-buffering."""
+    return reproject_to_sparse_depth_improved(
+        pcd, high_res_shape, K, E, dist_coeffs=None, supersample_factor=1, depth_epsilon=0.005
+    )
 
 # --- Main Workflow & Orchestration ---
 
@@ -176,23 +440,27 @@ def process_frames(
         )
         return frame_map[closest_ts]
 
-    # Pre-calculate scaled intrinsics and output shapes
+    # Pre-calculate scaled intrinsics, distortion coefficients, and output shapes
     scaled_low_intrinsics, scaled_high_intrinsics = [], []
+    low_distortion_coeffs, high_distortion_coeffs = [], []
     H_out, W_out = 0, 0
+    
     for ci, cid in enumerate(final_cam_ids):
-        # Low-res intrinsics
+        # Low-res intrinsics and distortion
         first_low_ts = int(per_cam_low_ts[ci][0])
         low_img = read_rgb(_resolve_frame(color_lookup_low[ci], first_low_ts, cid, "low-res color"))
         h_low, w_low = low_img.shape[:2]
         base_res_low = infer_calibration_resolution(scene_low, cid) or (w_low, h_low)
         scaled_low_intrinsics.append(scale_intrinsics_matrix(scene_low.intrinsics[cid], w_low, h_low, *base_res_low))
+        low_distortion_coeffs.append(get_distortion_coefficients(scene_low, cid))
 
-        # High-res intrinsics and output shape
+        # High-res intrinsics, distortion, and output shape
         first_high_ts = int(per_cam_high_ts[ci][0])
         high_img = read_rgb(_resolve_frame(color_lookup_high[ci], first_high_ts, cid, "high-res color"))
         h_high, w_high = high_img.shape[:2]
         base_res_high = infer_calibration_resolution(scene_high, cid) or base_res_low
         scaled_high_intrinsics.append(scale_intrinsics_matrix(scene_high.intrinsics[cid], w_high, h_high, *base_res_high))
+        high_distortion_coeffs.append(get_distortion_coefficients(scene_high, cid))
         
         if ci == 0: H_out, W_out = h_high, w_high
 
@@ -204,27 +472,45 @@ def process_frames(
 
     for ti in tqdm(range(T), desc="Processing Frames"):
         for ci, cid in enumerate(final_cam_ids):
-            # --- Independent Per-Camera Reprojection Logic ---
+            # --- Independent Per-Camera Reprojection Logic with Improved Edge Handling ---
             
             # 1. Create a sparse point cloud from this camera's LOW-RES view
             t_low = int(per_cam_low_ts[ci][ti])
             depth_low = read_depth(_resolve_frame(depth_lookup_low[ci], t_low, cid, "low-res depth"), is_l515_flags[ci])
             rgb_low = read_rgb(_resolve_frame(color_lookup_low[ci], t_low, cid, "low-res color"))
+            
+            # Get camera parameters for low-res view
             K_low = scaled_low_intrinsics[ci]
             E_world_to_cam_low = scene_low.extrinsics_base_aligned[cid]
             E_inv_low = np.linalg.inv(E_world_to_cam_low)
+            distortion_low = low_distortion_coeffs[ci]
 
-            pcd_this_view = unproject_to_world_o3d(depth_low, rgb_low, K_low, E_inv_low)
+            # Create improved point cloud with edge-aware masking
+            # Since RH20T doesn't separate depth/color intrinsics, use same K for both
+            pcd_this_view = unproject_to_world_improved(
+                depth_low, rgb_low, 
+                K_depth=K_low, E_depth_inv=E_inv_low,
+                K_color=K_low, E_color=E_world_to_cam_low,
+                dist_coeffs=distortion_low,
+                apply_edge_mask=True
+            )
 
             # 2. Load the corresponding HIGH-RES view and parameters
             t_high = int(per_cam_high_ts[ci][ti])
             high_res_rgb = read_rgb(_resolve_frame(color_lookup_high[ci], t_high, cid, "high-res color"))
             K_high = scaled_high_intrinsics[ci]
             E_world_to_cam_high = scene_high.extrinsics_base_aligned[cid]
+            distortion_high = high_distortion_coeffs[ci]
 
-            # 3. Reproject the single-view point cloud into the high-res frame
-            sparse_depth_high_res = reproject_to_sparse_depth_cv2(
-                pcd_this_view, high_res_rgb.shape[:2], K_high, E_world_to_cam_high
+            # 3. Reproject the single-view point cloud into the high-res frame with improved z-buffering
+            sparse_depth_high_res = reproject_to_sparse_depth_improved(
+                pcd_this_view, 
+                high_res_rgb.shape[:2], 
+                K_high, 
+                E_world_to_cam_high,
+                dist_coeffs=distortion_high,
+                supersample_factor=2,  # Render at 2x resolution for better edge quality
+                depth_epsilon=0.005    # 5mm depth comparison tolerance
             )
 
             # 4. Store the results

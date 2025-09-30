@@ -38,3 +38,7 @@ rh20t_api/*
 
 data
 data/
+
+pytorch3d
+pytorch3d/
+pytorch3d/*
