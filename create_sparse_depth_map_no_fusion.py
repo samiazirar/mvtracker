@@ -161,8 +161,20 @@ def process_frames(
     depth_lookup_low = [list_frames(cdir / 'depth') for cdir in cam_dirs_low]
     color_lookup_high = [list_frames(cdir / 'color') for cdir in cam_dirs_high]
 
-    def _resolve_frame(frame_map: Dict[int, Path], ts: int) -> Path:
-        return frame_map.get(ts) or min(frame_map.keys(), key=lambda k: abs(k - ts))
+    def _resolve_frame(frame_map: Dict[int, Path], ts: int, cam_name: str, label: str) -> Path:
+        path = frame_map.get(ts)
+        if path is not None:
+            return path
+
+        if not frame_map:
+            raise KeyError(f"No frames available for {cam_name} ({label}).")
+
+        closest_ts = min(frame_map.keys(), key=lambda k: abs(k - ts))
+        delta = abs(closest_ts - ts)
+        print(
+            f"[WARN] Timestamp {ts} not found for {cam_name} ({label}); using closest {closest_ts} (|Δ|={delta} ms)."
+        )
+        return frame_map[closest_ts]
 
     # Pre-calculate scaled intrinsics and output shapes
     scaled_low_intrinsics, scaled_high_intrinsics = [], []
@@ -170,14 +182,14 @@ def process_frames(
     for ci, cid in enumerate(final_cam_ids):
         # Low-res intrinsics
         first_low_ts = int(per_cam_low_ts[ci][0])
-        low_img = read_rgb(_resolve_frame(color_lookup_low[ci], first_low_ts))
+        low_img = read_rgb(_resolve_frame(color_lookup_low[ci], first_low_ts, cid, "low-res color"))
         h_low, w_low = low_img.shape[:2]
         base_res_low = infer_calibration_resolution(scene_low, cid) or (w_low, h_low)
         scaled_low_intrinsics.append(scale_intrinsics_matrix(scene_low.intrinsics[cid], w_low, h_low, *base_res_low))
 
         # High-res intrinsics and output shape
         first_high_ts = int(per_cam_high_ts[ci][0])
-        high_img = read_rgb(_resolve_frame(color_lookup_high[ci], first_high_ts))
+        high_img = read_rgb(_resolve_frame(color_lookup_high[ci], first_high_ts, cid, "high-res color"))
         h_high, w_high = high_img.shape[:2]
         base_res_high = infer_calibration_resolution(scene_high, cid) or base_res_low
         scaled_high_intrinsics.append(scale_intrinsics_matrix(scene_high.intrinsics[cid], w_high, h_high, *base_res_high))
@@ -196,8 +208,8 @@ def process_frames(
             
             # 1. Create a sparse point cloud from this camera's LOW-RES view
             t_low = int(per_cam_low_ts[ci][ti])
-            depth_low = read_depth(_resolve_frame(depth_lookup_low[ci], t_low), is_l515_flags[ci])
-            rgb_low = read_rgb(_resolve_frame(color_lookup_low[ci], t_low))
+            depth_low = read_depth(_resolve_frame(depth_lookup_low[ci], t_low, cid, "low-res depth"), is_l515_flags[ci])
+            rgb_low = read_rgb(_resolve_frame(color_lookup_low[ci], t_low, cid, "low-res color"))
             K_low = scaled_low_intrinsics[ci]
             E_world_to_cam_low = scene_low.extrinsics_base_aligned[cid]
             E_inv_low = np.linalg.inv(E_world_to_cam_low)
@@ -206,7 +218,7 @@ def process_frames(
 
             # 2. Load the corresponding HIGH-RES view and parameters
             t_high = int(per_cam_high_ts[ci][ti])
-            high_res_rgb = read_rgb(_resolve_frame(color_lookup_high[ci], t_high))
+            high_res_rgb = read_rgb(_resolve_frame(color_lookup_high[ci], t_high, cid, "high-res color"))
             K_high = scaled_high_intrinsics[ci]
             E_world_to_cam_high = scene_high.extrinsics_base_aligned[cid]
 
@@ -291,6 +303,10 @@ def main():
         print("[ERROR] No common calibrated cameras found between the two folders.")
         return
     
+    if len(final_cam_ids) < 2:
+        print("[ERROR] Fewer than 2 common cameras between low and high resolution data.")
+        return
+    
     final_cam_dirs_low = [id_to_dir_low[cid] for cid in final_cam_ids]
     final_cam_dirs_high = [id_to_dir_high[cid] for cid in final_cam_ids]
     print(f"[INFO] Found {len(final_cam_ids)} common cameras: {final_cam_ids}")
@@ -298,19 +314,48 @@ def main():
     # Step 2: Synchronize Timestamps
     sync_low = get_synchronized_timestamps(final_cam_dirs_low)
     sync_high = get_synchronized_timestamps(final_cam_dirs_high, require_depth=False)
+    
+    if sync_low.timeline.size == 0:
+        print("[ERROR] Low-resolution synchronization returned no frames.")
+        return
+    
+    if sync_high.timeline.size == 0:
+        print("[ERROR] High-resolution synchronization returned no frames.")
+        return
+
+    # Filter cameras that actually passed synchronization
+    valid_low_indices = set(sync_low.camera_indices)
+    valid_high_indices = set(sync_high.camera_indices)
+    keep_indices = sorted(valid_low_indices & valid_high_indices)
+    
+    if len(keep_indices) < 1:
+        print("[ERROR] No cameras passed synchronization in both low and high resolution data.")
+        return
+    
+    # Map camera indices to synchronized timestamps
+    index_map_low = {idx: arr for idx, arr in zip(sync_low.camera_indices, sync_low.per_camera_timestamps)}
+    index_map_high = {idx: arr for idx, arr in zip(sync_high.camera_indices, sync_high.per_camera_timestamps)}
+    
+    # Update camera lists to only include cameras that passed synchronization
+    final_cam_ids = [final_cam_ids[i] for i in keep_indices]
+    final_cam_dirs_low = [final_cam_dirs_low[i] for i in keep_indices]
+    final_cam_dirs_high = [final_cam_dirs_high[i] for i in keep_indices]
+    
+    print(f"[INFO] {len(final_cam_ids)} cameras passed synchronization: {final_cam_ids}")
 
     timeline_common = np.intersect1d(sync_low.timeline, sync_high.timeline)
     if timeline_common.size == 0:
         print("[ERROR] No overlapping synchronized timeline found.")
         return
     
-    idx_map_low = {t: i for i, t in enumerate(sync_low.timeline)}
-    idx_map_high = {t: i for i, t in enumerate(sync_high.timeline)}
-    indices_low = [idx_map_low[t] for t in timeline_common]
-    indices_high = [idx_map_high[t] for t in timeline_common]
+    timeline_common = np.asarray(timeline_common, dtype=np.int64)
+    idx_map_low = {int(t): idx for idx, t in enumerate(sync_low.timeline)}
+    idx_map_high = {int(t): idx for idx, t in enumerate(sync_high.timeline)}
+    indices_low = [idx_map_low[int(t)] for t in timeline_common]
+    indices_high = [idx_map_high[int(t)] for t in timeline_common]
 
-    per_cam_low = [ts[indices_low] for ts in sync_low.per_camera_timestamps]
-    per_cam_high = [ts[indices_high] for ts in sync_high.per_camera_timestamps]
+    per_cam_low = [index_map_low[i][indices_low] for i in keep_indices]
+    per_cam_high = [index_map_high[i][indices_high] for i in keep_indices]
 
     # Step 3: Select Frames
     num_frames = len(timeline_common)
@@ -329,6 +374,13 @@ def main():
     if timestamps.size == 0:
         print("[ERROR] No frames remaining after selection.")
         return
+    
+    # Validate that we have enough data for processing
+    if len(per_cam_low_sel) != len(final_cam_ids) or len(per_cam_high_sel) != len(final_cam_ids):
+        print("[ERROR] Mismatch between number of cameras and synchronized timestamp arrays.")
+        return
+    
+    print(f"[INFO] Processing {len(timestamps)} frames across {len(final_cam_ids)} cameras.")
 
     # Step 4: Process Frames with the clean, independent method
     rgbs, depths, intrs, extrs = process_frames(
