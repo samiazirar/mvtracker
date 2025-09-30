@@ -99,14 +99,22 @@ def read_rgb(path: Path) -> np.ndarray:
     """Reads an image file into a NumPy array (H, W, 3) in RGB format."""
     return np.asarray(Image.open(path).convert("RGB"), dtype=np.uint8)
 
-def read_depth(path: Path, is_l515: bool, min_d: float = 0.3, max_d: float = 0.8) -> np.ndarray:
-    """Reads a 16-bit depth image, converts it to meters, and clamps the range."""
+def read_depth(
+    path: Path,
+    is_l515: bool,
+    min_d: Optional[float] = None,
+    max_d: Optional[float] = None,
+) -> np.ndarray:
+    """Reads a 16-bit depth image, converts it to meters, and optionally clamps the range."""
     arr = np.asarray(Image.open(path)).astype(np.uint16)
     # L515 cameras have a different depth scale factor
     scale = 4000.0 if is_l515 else 1000.0
     depth_m = arr.astype(np.float32) / scale
-    # Invalidate depth values outside the specified operational range
-    depth_m[(depth_m < min_d) | (depth_m > max_d)] = 0.0
+    # Invalidate depth values outside the specified operational range when provided
+    if min_d is not None:
+        depth_m[depth_m < min_d] = 0.0
+    if max_d is not None:
+        depth_m[depth_m > max_d] = 0.0
     return depth_m
 
 def list_frames(folder: Path) -> Dict[int, Path]:
@@ -834,6 +842,8 @@ def process_frames(
     """
     C, T = len(final_cam_ids), len(timeline)
     is_l515_flags = [cid.startswith('f') for cid in final_cam_ids]
+    depth_min = args.depth_min
+    depth_max = args.depth_max
 
     color_lookup_low = [list_frames(cdir / 'color') for cdir in cam_dirs_low]
     depth_lookup_low = [list_frames(cdir / 'depth') for cdir in cam_dirs_low]
@@ -925,7 +935,12 @@ def process_frames(
             for ci in range(C):
                 cid = final_cam_ids[ci]
                 t_low = int(per_cam_low_ts[ci][ti])
-                depth_low = read_depth(_resolve_frame(depth_lookup_low[ci], t_low, cid, "low-res depth"), is_l515_flags[ci])
+                depth_low = read_depth(
+                    _resolve_frame(depth_lookup_low[ci], t_low, cid, "low-res depth"),
+                    is_l515_flags[ci],
+                    depth_min,
+                    depth_max,
+                )
                 
                 # Calculate depth coverage (how much valid depth we have)
                 valid_depth_ratio = np.sum(depth_low > 0) / depth_low.size
@@ -937,7 +952,12 @@ def process_frames(
             # Create point cloud from the best camera view only (like demo.py)
             cid = final_cam_ids[best_ci]
             t_low = int(per_cam_low_ts[best_ci][ti])
-            depth_low = read_depth(_resolve_frame(depth_lookup_low[best_ci], t_low, cid, "low-res depth"), is_l515_flags[best_ci])
+            depth_low = read_depth(
+                _resolve_frame(depth_lookup_low[best_ci], t_low, cid, "low-res depth"),
+                is_l515_flags[best_ci],
+                depth_min,
+                depth_max,
+            )
             rgb_low = read_rgb(_resolve_frame(color_lookup_low[best_ci], t_low, cid, "low-res color"))
             K_low = scaled_low_intrinsics[best_ci]
             E_inv = np.linalg.inv(scene_low.extrinsics_base_aligned[cid])
@@ -1031,7 +1051,12 @@ def process_frames(
                 # Standard low-resolution workflow
                 t_low = int(per_cam_low_ts[ci][ti])
                 rgbs_out[ci, ti] = read_rgb(_resolve_frame(color_lookup_low[ci], t_low, cid, "low-res color"))
-                depths_out[ci, ti] = read_depth(_resolve_frame(depth_lookup_low[ci], t_low, cid, "low-res depth"), is_l515_flags[ci])
+                depths_out[ci, ti] = read_depth(
+                    _resolve_frame(depth_lookup_low[ci], t_low, cid, "low-res depth"),
+                    is_l515_flags[ci],
+                    depth_min,
+                    depth_max,
+                )
                 intrs_out[ci, ti] = scaled_low_intrinsics[ci]
 
     return rgbs_out, depths_out, intrs_out, extrs_out
@@ -1141,6 +1166,18 @@ def main():
     parser.add_argument("--edge-margin", type=int, default=10, help="Pixels to remove from image borders (unreliable edges).")
     parser.add_argument("--gradient-threshold", type=float, default=0.1, help="Maximum depth gradient to keep (meters, for edge detection).")
     parser.add_argument("--smooth-kernel", type=int, default=3, help="Kernel size for confidence-weighted depth smoothing.")
+    parser.add_argument(
+        "--depth-min",
+        type=float,
+        default=None,
+        help="Optional minimum valid depth in meters; values below are set to zero."
+    )
+    parser.add_argument(
+        "--depth-max",
+        type=float,
+        default=None,
+        help="Optional maximum valid depth in meters; values above are set to zero."
+    )
     
     args = parser.parse_args()
 
