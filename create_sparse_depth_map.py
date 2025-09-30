@@ -46,6 +46,7 @@ from typing import Dict, List, Optional, Tuple
 # Third-party imports
 import numpy as np
 import torch
+import torch.nn.functional as F
 from PIL import Image
 import cv2
 import open3d as o3d
@@ -456,7 +457,7 @@ def splat_point_cloud(
     splat_mode: str = "mask",
     splat_radius: float = 0.005,
     device: str = "cuda"
-) -> np.ndarray:
+) -> Tuple[np.ndarray, np.ndarray]:
     """
     Splat a 3D point cloud onto a 2D image using PyTorch3D's efficient point rendering.
     
@@ -471,18 +472,21 @@ def splat_point_cloud(
         device: PyTorch device ('cuda' or 'cpu')
         
     Returns:
-        For 'recolor' mode: RGB image (H, W, 3) as uint8
-        For 'mask' mode: Binary mask (H, W) as uint8 (0 or 255)
+        Tuple of:
+        - For 'recolor' mode: RGB image (H, W, 3) as uint8
+        - For 'mask' mode: Binary mask (H, W) as uint8 (0 or 255)
+        - Depth map (H, W) as float32 (0 for background)
     """
     if not PYTORCH3D_AVAILABLE:
         raise ImportError("PyTorch3D is required for point splatting but is not available.")
     
     if not pcd.has_points():
-        # Return empty image/mask if no points
+        # Return empty image/mask and depth if no points
+        empty_depth = np.zeros((image_height, image_width), dtype=np.float32)
         if splat_mode == "recolor":
-            return np.zeros((image_height, image_width, 3), dtype=np.uint8)
+            return np.zeros((image_height, image_width, 3), dtype=np.uint8), empty_depth
         else:
-            return np.zeros((image_height, image_width), dtype=np.uint8)
+            return np.zeros((image_height, image_width), dtype=np.uint8), empty_depth
     
     # Convert Open3D point cloud to PyTorch tensors
     points_world = torch.tensor(np.asarray(pcd.points), dtype=torch.float32, device=device)
@@ -504,10 +508,11 @@ def splat_point_cloud(
     
     if points_cam.shape[0] == 0:
         # No valid points
+        empty_depth = np.zeros((image_height, image_width), dtype=np.float32)
         if splat_mode == "recolor":
-            return np.zeros((image_height, image_width, 3), dtype=np.uint8)
+            return np.zeros((image_height, image_width, 3), dtype=np.uint8), empty_depth
         else:
-            return np.zeros((image_height, image_width), dtype=np.uint8)
+            return np.zeros((image_height, image_width), dtype=np.uint8), empty_depth
     
     # Create PyTorch3D Pointclouds structure
     # Add batch dimension (batch_size=1)
@@ -546,6 +551,15 @@ def splat_point_cloud(
     # Create rasterizer
     rasterizer = PointsRasterizer(cameras=cameras, raster_settings=raster_settings)
     
+    # Get fragments from rasterizer to extract Z-buffer
+    with torch.no_grad():
+        fragments = rasterizer(point_cloud, cameras=cameras)
+    
+    # Extract depth map from Z-buffer
+    zbuf = fragments.zbuf[0, ..., 0].cpu().numpy()  # Remove batch dimension and get first layer
+    depth_map = zbuf.copy().astype(np.float32)
+    depth_map[depth_map < 0] = 0.0  # Set background pixels (marked as -1) to 0
+    
     # Choose compositor based on mode
     if splat_mode == "recolor":
         # Use alpha compositor for color blending with proper depth testing
@@ -567,15 +581,117 @@ def splat_point_cloud(
     if splat_mode == "recolor":
         # Convert to uint8 RGB image
         rgb_output = (rendered_np[..., :3] * 255).astype(np.uint8)
-        return rgb_output
+        return rgb_output, depth_map
     else:  # mask mode
         # Create binary mask: any pixel with non-zero values becomes 1
         mask = (rendered_np[..., :3].sum(axis=-1) > 1e-6).astype(np.uint8) * 255
-        return mask
+        return mask, depth_map
+
+def _confidence_from_depth(depth: np.ndarray) -> np.ndarray:
+    """Create confidence mask from depth (like demo.py)."""
+    conf = np.ones_like(depth, dtype=np.float32)
+    conf[~np.isfinite(depth)] = 0
+    conf[depth <= 0] = 0
+    return conf
+
+def _smooth_depth_with_weights(depth: np.ndarray, weights: np.ndarray, kernel_size: int = 3) -> np.ndarray:
+    """Smooth depth with confidence weights (like demo.py)."""
+    if kernel_size < 1:
+        return depth
+    
+    # Convert to torch tensors for processing
+    depth_torch = torch.tensor(depth, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
+    weights_torch = torch.tensor(weights, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
+    
+    padding = kernel_size // 2
+    kernel = torch.ones(1, 1, kernel_size, kernel_size, dtype=torch.float32)
+    
+    weighted_depth = F.conv2d(depth_torch * weights_torch, kernel, padding=padding)
+    summed_weights = F.conv2d(weights_torch, kernel, padding=padding).clamp_min(1e-6)
+    smoothed = (weighted_depth / summed_weights).squeeze().numpy()
+    
+    return smoothed
+
+def create_confidence_filtered_point_cloud(
+    depth: np.ndarray, 
+    rgb: np.ndarray, 
+    K: np.ndarray, 
+    E_inv: np.ndarray,
+    confidence_threshold: float = 0.1,
+    edge_margin: int = 10,
+    gradient_threshold: float = 0.1,
+    smooth_kernel: int = 3
+) -> o3d.geometry.PointCloud:
+    """
+    Create point cloud with confidence filtering like demo.py.
+    
+    This matches the depth preprocessing approach used in demo.py for high-quality
+    point cloud generation.
+    
+    Args:
+        depth: The depth map (H, W).
+        rgb: The color image (H, W, 3).
+        K: The 3x3 intrinsic camera matrix.
+        E_inv: The 4x4 inverse extrinsic matrix (camera-to-world transformation).
+        confidence_threshold: Minimum confidence to keep a point
+        edge_margin: Pixels to remove from image borders
+        gradient_threshold: Maximum depth gradient to keep (meters)
+        smooth_kernel: Kernel size for depth smoothing
+        
+    Returns:
+        An Open3D PointCloud object in world coordinates with confidence filtering.
+    """
+    H, W = depth.shape
+    
+    # Step 1: Create confidence mask (like demo.py)
+    confidence = _confidence_from_depth(depth)
+    
+    # Step 2: Edge filtering - remove boundary pixels (often unreliable)
+    if edge_margin > 0:
+        confidence[:edge_margin, :] = 0
+        confidence[-edge_margin:, :] = 0  
+        confidence[:, :edge_margin] = 0
+        confidence[:, -edge_margin:] = 0
+    
+    # Step 3: Gradient-based edge detection (high depth gradients = unreliable)
+    depth_grad_x = np.abs(np.gradient(depth, axis=1))
+    depth_grad_y = np.abs(np.gradient(depth, axis=0))
+    depth_gradient = np.sqrt(depth_grad_x**2 + depth_grad_y**2)
+    
+    # Remove high-gradient pixels (depth discontinuities)
+    confidence[depth_gradient > gradient_threshold] = 0
+    
+    # Step 4: Apply confidence threshold
+    valid_mask = confidence > confidence_threshold
+    
+    # Step 5: Create filtered depth map
+    filtered_depth = depth.copy()
+    filtered_depth[~valid_mask] = 0
+    
+    # Step 6: Smooth depth with confidence weights (like demo.py)
+    if smooth_kernel > 1:
+        filtered_depth = _smooth_depth_with_weights(filtered_depth, confidence, smooth_kernel)
+        # Re-apply the mask after smoothing
+        filtered_depth[~valid_mask] = 0
+    
+    # Step 7: Create point cloud with filtered data
+    o3d_depth = o3d.geometry.Image(filtered_depth)
+    o3d_rgb = o3d.geometry.Image(rgb)
+    rgbd_image = o3d.geometry.RGBDImage.create_from_color_and_depth(
+        o3d_rgb, o3d_depth, depth_scale=1.0, depth_trunc=10.0, convert_rgb_to_intensity=False
+    )
+    
+    intrinsics = o3d.camera.PinholeCameraIntrinsic(W, H, K[0, 0], K[1, 1], K[0, 2], K[1, 2])
+    pcd_cam = o3d.geometry.PointCloud.create_from_rgbd_image(rgbd_image, intrinsics)
+    
+    # Transform to world coordinates
+    return pcd_cam.transform(E_inv)
 
 def unproject_to_world_o3d(depth: np.ndarray, rgb: np.ndarray, K: np.ndarray, E_inv: np.ndarray) -> o3d.geometry.PointCloud:
     """
     Creates a colored point cloud in world coordinates from a single view using Open3D.
+    
+    This is the legacy function - use create_confidence_filtered_point_cloud for demo.py-style processing.
 
     Args:
         depth: The depth map (H, W).
@@ -586,20 +702,7 @@ def unproject_to_world_o3d(depth: np.ndarray, rgb: np.ndarray, K: np.ndarray, E_
     Returns:
         An Open3D PointCloud object in world coordinates.
     """
-    o3d_depth = o3d.geometry.Image(depth)
-    o3d_rgb = o3d.geometry.Image(rgb)
-    rgbd_image = o3d.geometry.RGBDImage.create_from_color_and_depth(
-        o3d_rgb, o3d_depth, depth_scale=1.0, depth_trunc=10.0, convert_rgb_to_intensity=False
-    )
-    
-    H, W = depth.shape
-    intrinsics = o3d.camera.PinholeCameraIntrinsic(W, H, K[0, 0], K[1, 1], K[0, 2], K[1, 2])
-    
-    pcd_cam = o3d.geometry.PointCloud.create_from_rgbd_image(rgbd_image, intrinsics)
-    
-    # The point cloud is created in the camera's local coordinate system.
-    # Transform it to the global world coordinate system.
-    return pcd_cam.transform(E_inv)
+    return create_confidence_filtered_point_cloud(depth, rgb, K, E_inv)
 
 
 def clean_point_cloud_radius(pcd: o3d.geometry.PointCloud, radius: float, min_points: int) -> o3d.geometry.PointCloud:
@@ -812,66 +915,62 @@ def process_frames(
     extrs_out = np.zeros((C, T, 3, 4), dtype=np.float32)
 
     for ti in tqdm(range(T), desc="Processing Frames"):
-        # Step 1: Create a combined point cloud for the current frame from all low-res views
+        # Step 1: Create a high-quality point cloud using demo.py approach (single best camera)
         combined_pcd = o3d.geometry.PointCloud()
         if args.high_res_folder:
-            pcds_per_cam = []
+            # Find the camera with the most reliable depth for this frame (like demo.py)
+            best_ci = 0  # Start with first camera
+            best_depth_coverage = 0
+            
             for ci in range(C):
                 cid = final_cam_ids[ci]
-                # Load low-res data for point cloud generation
                 t_low = int(per_cam_low_ts[ci][ti])
                 depth_low = read_depth(_resolve_frame(depth_lookup_low[ci], t_low, cid, "low-res depth"), is_l515_flags[ci])
-                rgb_low = read_rgb(_resolve_frame(color_lookup_low[ci], t_low, cid, "low-res color"))
-                K_low = scaled_low_intrinsics[ci]
-                E_inv = np.linalg.inv(scene_low.extrinsics_base_aligned[cid])
                 
-                # Create and add the point cloud for this view
-                pcds_per_cam.append(unproject_to_world_o3d(depth_low, rgb_low, K_low, E_inv))
+                # Calculate depth coverage (how much valid depth we have)
+                valid_depth_ratio = np.sum(depth_low > 0) / depth_low.size
+                
+                if valid_depth_ratio > best_depth_coverage:
+                    best_depth_coverage = valid_depth_ratio
+                    best_ci = ci
             
-            # Merge all individual point clouds into a single scene representation
-            for pcd in pcds_per_cam:
-                combined_pcd += pcd
+            # Create point cloud from the best camera view only (like demo.py)
+            cid = final_cam_ids[best_ci]
+            t_low = int(per_cam_low_ts[best_ci][ti])
+            depth_low = read_depth(_resolve_frame(depth_lookup_low[best_ci], t_low, cid, "low-res depth"), is_l515_flags[best_ci])
+            rgb_low = read_rgb(_resolve_frame(color_lookup_low[best_ci], t_low, cid, "low-res color"))
+            K_low = scaled_low_intrinsics[best_ci]
+            E_inv = np.linalg.inv(scene_low.extrinsics_base_aligned[cid])
+            
+            # Use confidence-filtered point cloud creation (like demo.py)
+            combined_pcd = create_confidence_filtered_point_cloud(
+                depth_low, rgb_low, K_low, E_inv, 
+                confidence_threshold=args.confidence_threshold,
+                edge_margin=args.edge_margin,
+                gradient_threshold=args.gradient_threshold,
+                smooth_kernel=args.smooth_kernel
+            )
+            
+            print(f"[INFO] Frame {ti}: Using camera {cid} with {best_depth_coverage:.1%} depth coverage")
+            print(f"[INFO] Created confidence-filtered point cloud with {len(combined_pcd.points)} points")
 
+            # Apply additional cleaning using demo.py-style approach
             if combined_pcd.has_points():
+                initial_count = len(combined_pcd.points)
+                
+                # Statistical outlier removal (like demo.py uses)
                 if args.clean_pointcloud:
-                    before_count = len(combined_pcd.points)
-                    cleaned = clean_point_cloud_radius(
-                        combined_pcd,
-                        radius=args.pc_clean_radius,
-                        min_points=args.pc_clean_min_points,
+                    print(f"[INFO] Applying statistical outlier removal (demo.py style)...")
+                    cleaned_pcd, outlier_indices = combined_pcd.remove_statistical_outlier(
+                        nb_neighbors=20, std_ratio=2.0
                     )
-                    after_count = len(cleaned.points)
-                    if after_count == 0:
-                        print(
-                            f"[WARN] Radius filter removed all points at frame index {ti}; "
-                            "using raw combined point cloud instead."
-                        )
+                    if len(cleaned_pcd.points) > initial_count * 0.3:  # Keep at least 30%
+                        combined_pcd = cleaned_pcd
+                        print(f"[INFO] Statistical cleaning: {initial_count} → {len(combined_pcd.points)} points")
                     else:
-                        if ti == 0 or after_count != before_count:
-                            print(
-                                f"[INFO] Radius filter kept {after_count}/{before_count} points "
-                                f"(radius={args.pc_clean_radius}, min_pts={args.pc_clean_min_points})."
-                            )
-                        combined_pcd = cleaned
-
-                if args.sharpen_edges_with_mesh:
-                    mesh = reconstruct_mesh_from_pointcloud(combined_pcd, depth=args.mesh_depth)
-                    if mesh is not None and len(mesh.vertices) > 0:
-                        mesh_pcd = o3d.geometry.PointCloud()
-                        mesh_pcd.points = mesh.vertices
-                        if mesh.has_vertex_colors() and len(mesh.vertex_colors) == len(mesh.vertices):
-                            mesh_pcd.colors = mesh.vertex_colors
-                        elif combined_pcd.has_colors():
-                            combined_colors = np.asarray(combined_pcd.colors)
-                            if combined_colors.size:
-                                kdtree = o3d.geometry.KDTreeFlann(combined_pcd)
-                                mesh_vertices = np.asarray(mesh.vertices)
-                                remap_colors = np.zeros_like(mesh_vertices)
-                                for vidx, vertex in enumerate(mesh_vertices):
-                                    _, idx, _ = kdtree.search_knn_vector_3d(vertex, 1)
-                                    remap_colors[vidx] = combined_colors[idx[0]]
-                                mesh_pcd.colors = o3d.utility.Vector3dVector(remap_colors)
-                        combined_pcd = mesh_pcd
+                        print(f"[WARN] Statistical cleaning would remove too many points, keeping original")
+                
+                print(f"[INFO] Final high-quality point cloud has {len(combined_pcd.points)} points for reprojection")
 
         # Step 2: Generate the final output data for each camera view
         for ci in range(C):
@@ -897,7 +996,7 @@ def process_frames(
                     H_out, W_out = high_res_rgb.shape[:2]
                     device = "cuda" if torch.cuda.is_available() else "cpu"
                     
-                    splatted_result = splat_point_cloud(
+                    splatted_result, splatted_depth = splat_point_cloud(
                         combined_pcd,
                         K_high,
                         E_world_to_cam,
@@ -908,20 +1007,18 @@ def process_frames(
                         device=device
                     )
                     
+                    # Save the depth map from splatting
+                    depths_out[ci, ti] = splatted_depth
+                    
                     if args.splat_mode == "recolor":
                         # Use splatted colors as RGB output
                         rgbs_out[ci, ti] = splatted_result
-                        # For depth, we still need to generate it - use the original method as fallback
-                        # or set to zero (indicating we don't have dense depth from splatting)
-                        depths_out[ci, ti] = np.zeros((H_out, W_out), dtype=np.float32)
                     else:  # mask mode
                         # Apply mask to original high-res RGB
                         masked_rgb = high_res_rgb.copy()
                         mask_bool = splatted_result > 0  # Convert to boolean mask
                         masked_rgb[~mask_bool] = 0  # Set masked pixels to black
                         rgbs_out[ci, ti] = masked_rgb
-                        # Set depth to zero for masked areas, could be enhanced to include actual depth
-                        depths_out[ci, ti] = np.zeros((H_out, W_out), dtype=np.float32)
                 else:
                     # Original sparse depth reprojection method
                     rgbs_out[ci, ti] = high_res_rgb
@@ -1038,6 +1135,13 @@ def main():
     parser.add_argument("--use-splatting", action="store_true", help="Enable point splatting using PyTorch3D instead of sparse depth reprojection.")
     parser.add_argument("--splat-mode", choices=["recolor", "mask"], default="mask", help="Splatting mode: 'recolor' renders point colors, 'mask' creates a binary mask.")
     parser.add_argument("--splat-radius", type=float, default=0.005, help="Radius of splats in world units (meters).")
+    
+    # Confidence filtering arguments (demo.py style)
+    parser.add_argument("--confidence-threshold", type=float, default=0.2, help="Minimum confidence threshold for depth pixels (demo.py style).")
+    parser.add_argument("--edge-margin", type=int, default=10, help="Pixels to remove from image borders (unreliable edges).")
+    parser.add_argument("--gradient-threshold", type=float, default=0.1, help="Maximum depth gradient to keep (meters, for edge detection).")
+    parser.add_argument("--smooth-kernel", type=int, default=3, help="Kernel size for confidence-weighted depth smoothing.")
+    
     args = parser.parse_args()
 
     # Validate PyTorch3D availability for splatting
@@ -1146,30 +1250,6 @@ def main():
     per_cam_high_sel = [arr[selected_idx] for arr in per_cam_high] if per_cam_high is not None else None
 
     # --- Step 2: Process Frames ---
-    rgbs, depths, intrs, extrs = process_frames(
-        args,
-        scene_low,
-        scene_high,
-        final_cam_ids,
-        cam_dirs_low,
-        cam_dirs_high if args.high_res_folder else None,
-        timestamps,
-        per_cam_low_sel,
-        per_cam_high_sel,
-    )
-
-    # --- Step 3: Save and Visualize ---
-    rr.init("RH20T_Reprojection_Frameworks", spawn=False)
-    per_cam_for_npz = per_cam_high_sel if per_cam_high_sel is not None else per_cam_low_sel
-    save_and_visualize(args, rgbs, depths, intrs, extrs, final_cam_ids, timestamps, per_cam_for_npz)
-
-    if not args.no_pointcloud:
-        rrd_path = args.out_dir / f"{args.task_folder.name}_reprojected.rrd"
-        rr.save(str(rrd_path))
-        print(f"✅ [OK] Saved Rerun visualization to: {rrd_path}")
-
-if __name__ == "__main__":
-    main()
     rgbs, depths, intrs, extrs = process_frames(
         args,
         scene_low,
