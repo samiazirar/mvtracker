@@ -32,6 +32,7 @@ python create_sparse_depth_map.py \\
 # color (in high-res), indicating a potential calibration misalignment.
 
 python create_sparse_depth_map.py   --task-folder /data/rh20t_api/data/test_data_full_rgb_upscaled_depth/uncompressed_low_res_data/task_0065_user_0010_scene_0009_cfg_0004   --high-res-folder /data/rh20t_api/data/test_data_full_rgb_upscaled_depth/rgb_data/RH20T_cfg4/task_0065_user_0010_scene_0009_cfg_0004  --out-dir ./data/high_res_filtered   --max-frames 100   --color-alignment-check   --color-threshold 35
+
 """
 
 
@@ -865,7 +866,7 @@ def main():
     parser.add_argument(
         "--pc-clean-min-points",
         type=int,
-        default=40,
+        default=20,
         help="Minimum number of neighbors within radius to keep a point during cleaning."
     )
     parser.add_argument("--no-pointcloud", action="store_true", help="Only generate the .npz file, skip visualization.")

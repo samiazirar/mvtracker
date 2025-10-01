@@ -128,6 +128,7 @@ def _estimate_duster_depths(
     seq_name: str,
     skip_if_cached: bool,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    raise DeprecationWarning("DUSt3R is deprecated; use GT .")
     """Run (or load) DUSt3R depth estimates while keeping GT intrinsics/extrinsics."""
     from scripts.egoexo4d_preprocessing import main_estimate_duster_depth
             # "DUSt3R depth estimation requires the Duster repo in PYTHONPATH. "
@@ -600,10 +601,12 @@ def main():
     #upscaled:
     # sample_path = "/data/rh20t_api/data/test_data_full_rgb_upscaled_depth/packed_npz/task_0065_user_0010_scene_0009_cfg_0004.npz"
     #not upscaled:
-    sample_path = "/data/rh20t_api/data/test_data_full_rgb_upscaled_depth/uncompressed_low_res_data/packed_npz/task_0065_user_0010_scene_0009_cfg_0004.npz"
+    # sample_path = "/data/rh20t_api/data/test_data_full_rgb_upscaled_depth/uncompressed_low_res_data/packed_npz/task_0065_user_0010_scene_0009_cfg_0004.npz"
     # sample_path = "/data/rh20t_api/data/low_res_data/packed_npz/task_0001_user_0010_scene_0005_cfg_0004.npz"
     #with mapanythign
     # sample_path = "/data/npz_file/task_0065_user_0010_scene_0009_cfg_0004_pred.npz"
+    #Final mapanything
+    sample_path = "/data/rh20t_api/mapanything_test/task_0065_user_0010_scene_0009_cfg_0004_processed.npz"
 
     print("HUMANS NOT SUPPORTED YET") #TODO: find out why _human not work
     print("Loading large RH20T dataset - this may take a while...")
@@ -616,11 +619,11 @@ def main():
     
     # Load with memory mapping to avoid loading entire file into RAM at once
     sample = np.load(sample_path, mmap_mode='r',allow_pickle=True)  
-
     #only for now, remove all camera data from id "045322071843" for this copy the data
     camera_ids = sample["camera_ids"]
     if "045322071843" in camera_ids:
         print("Removing camera 045322071843 for this demo")
+        raise NotImplementedError("Remove this exception after testing")
         mask = camera_ids != "045322071843"
         sample = {
             "rgbs": sample["rgbs"][mask],
@@ -633,7 +636,7 @@ def main():
         }
 
         
-    print(f"Dataset shapes - RGB: {sample['rgbs'].shape}, Depth: {sample['depths'].shape}")
+    print(f"Dataset shapes - RGB: {sample['rgbs'].shape}, Depth: {sample['pred_depths'].shape}")
     camera_ids: Optional[List[str]] = None
     if "camera_ids" in sample:
         raw_camera_ids = np.array(sample["camera_ids"], copy=False)
@@ -695,7 +698,7 @@ def main():
                 # Load only this batch from memory-mapped file
                 load_start = time.time()
                 rgbs_batch = torch.from_numpy(sample["rgbs"][view_start:view_end, frame_start:frame_end:temporal_stride]).float()
-                depths_batch = torch.from_numpy(sample["depths"][view_start:view_end, frame_start:frame_end:temporal_stride]).float()
+                depths_batch = torch.from_numpy(sample["pred_depths"][view_start:view_end, frame_start:frame_end:temporal_stride]).float()
                 intrs_batch = torch.from_numpy(sample["intrs"][view_start:view_end, frame_start:frame_end:temporal_stride]).float()
                 extrs_batch = torch.from_numpy(sample["extrs"][view_start:view_end, frame_start:frame_end:temporal_stride]).float()
                 load_time = time.time() - load_start
@@ -866,7 +869,7 @@ def main():
         # For visualization, we need the full data loaded once
         print("Loading subsampled data for visualization...")
         rgbs = torch.from_numpy(sample["rgbs"][:, ::temporal_stride]).float()
-        depths = torch.from_numpy(sample["depths"][:, ::temporal_stride]).float()
+        depths = torch.from_numpy(sample["pred_depths"][:, ::temporal_stride]).float()
         intrs = torch.from_numpy(sample["intrs"][:, ::temporal_stride]).float()
         extrs = torch.from_numpy(sample["extrs"][:, ::temporal_stride]).float()
 
@@ -884,7 +887,7 @@ def main():
     else:
         # Original single-pass loading
         rgbs = torch.from_numpy(sample["rgbs"][:, ::temporal_stride]).float()
-        depths = torch.from_numpy(sample["depths"][:, ::temporal_stride]).float()  # Convert mm to meters
+        depths = torch.from_numpy(sample["pred_depths"][:, ::temporal_stride]).float()  # Convert mm to meters
         intrs = torch.from_numpy(sample["intrs"][:, ::temporal_stride]).float()
         extrs = torch.from_numpy(sample["extrs"][:, ::temporal_stride]).float()
         if "query_points" in sample:
