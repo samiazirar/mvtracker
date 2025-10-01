@@ -35,7 +35,7 @@ if "numpy._core" not in sys.modules:
 """Demo script for MVTracker with memory optimizations and optional VGGT depth estimation.
 run with
 
-python demo.py --batch_processing --optimize_performance --temporal_stride 1 --spatial_downsample 1 --depth_estimator vggt_raw --depth_cache_dir ./depth_cache --rerun save  --random_query_points
+python demo.py --batch_processing --optimize_performance --temporal_stride 1 --spatial_downsample 1 --depth_estimator gt --depth_cache_dir ./depth_cache --rerun save  --random_query_points
 """
 
 def _prepare_uint8_rgbs(rgbs: torch.Tensor) -> torch.Tensor:
@@ -600,10 +600,10 @@ def main():
     #upscaled:
     # sample_path = "/data/rh20t_api/data/test_data_full_rgb_upscaled_depth/packed_npz/task_0065_user_0010_scene_0009_cfg_0004.npz"
     #not upscaled:
-    # sample_path = "/data/rh20t_api/data/test_data_full_rgb_upscaled_depth/uncompressed_low_res_data/packed_npz/task_0065_user_0010_scene_0009_cfg_0004.npz"
+    sample_path = "/data/rh20t_api/data/test_data_full_rgb_upscaled_depth/uncompressed_low_res_data/packed_npz/task_0065_user_0010_scene_0009_cfg_0004.npz"
     # sample_path = "/data/rh20t_api/data/low_res_data/packed_npz/task_0001_user_0010_scene_0005_cfg_0004.npz"
     #with mapanythign
-    sample_path = "/data/npz_file/task_0065_user_0010_scene_0009_cfg_0004_pred.npz"
+    # sample_path = "/data/npz_file/task_0065_user_0010_scene_0009_cfg_0004_pred.npz"
 
     print("HUMANS NOT SUPPORTED YET") #TODO: find out why _human not work
     print("Loading large RH20T dataset - this may take a while...")
@@ -1001,7 +1001,7 @@ def main():
         depths_conf=None,
         conf_thrs=[5.0],
         log_only_confident_pc=False,
-        radii=-2.95,#make smaller for now SIZE
+        radii=-0.95,#make smaller for now SIZE
         fps=12,
         bbox_crop=None,
         sphere_radius_crop=12.0,

@@ -572,7 +572,7 @@ def reproject_to_sparse_depth_cv2(
     target_colors = high_res_rgb[v_idx, u_idx]
     color_diff = np.mean(np.abs(orig_colors_final.astype(float) - target_colors.astype(float)), axis=1)
     color_match_mask = color_diff < color_threshold
-    
+
     u_final, v_final = u_idx[color_match_mask], v_idx[color_match_mask]
     depth_final = depth_final[color_match_mask]
     
@@ -695,7 +695,7 @@ def process_frames(
                 rgb_low = read_rgb(_resolve_frame(color_lookup_low[ci], t_low, cid, "low-res color"))
                 K_low = scaled_low_intrinsics[ci]
                 E_inv = np.linalg.inv(scene_low.extrinsics_base_aligned[cid])
-                
+
                 # Create and add the point cloud for this view
                 pcds_per_cam.append(unproject_to_world_o3d(depth_low, rgb_low, K_low, E_inv))
             
@@ -747,7 +747,6 @@ def process_frames(
         # Step 2: Generate the final output data for each camera view
         for ci in range(C):
             cid = final_cam_ids[ci]
-
             if args.high_res_folder and scene_high is not None:
                 # Use high-res calibration when available; low-res version is only for point-cloud generation.
                 E_world_to_cam = scene_high.extrinsics_base_aligned[cid]
@@ -837,7 +836,7 @@ def main():
         default=True,
         help="Enable color-based filtering of reprojected points (disable with --no-color-alignment-check)."
     )
-    parser.add_argument("--color-threshold", type=float, default=5.0, help="Max average color difference (0-255) for a point to be aligned.")
+    parser.add_argument("--color-threshold", type=float, default=25.0, help="Max average color difference (0-255) for a point to be aligned.")
     parser.add_argument(
         "--sharpen-edges-with-mesh",
         action=argparse.BooleanOptionalAction,
@@ -859,13 +858,13 @@ def main():
     parser.add_argument(
         "--pc-clean-radius",
         type=float,
-        default=0.01,
+        default=0.02,
         help="Radius (meters) for the Open3D radius outlier removal filter."
     )
     parser.add_argument(
         "--pc-clean-min-points",
         type=int,
-        default=40,
+        default=10,
         help="Minimum number of neighbors within radius to keep a point during cleaning."
     )
     parser.add_argument("--no-pointcloud", action="store_true", help="Only generate the .npz file, skip visualization.")
