@@ -636,7 +636,7 @@ def main():
         }
 
         
-    print(f"Dataset shapes - RGB: {sample['rgbs'].shape}, Depth: {sample['pred_depths'].shape}")
+    print(f"Dataset shapes - RGB: {sample['rgbs'].shape}, Depth: {sample['depths'].shape}")
     camera_ids: Optional[List[str]] = None
     if "camera_ids" in sample:
         raw_camera_ids = np.array(sample["camera_ids"], copy=False)
@@ -698,7 +698,7 @@ def main():
                 # Load only this batch from memory-mapped file
                 load_start = time.time()
                 rgbs_batch = torch.from_numpy(sample["rgbs"][view_start:view_end, frame_start:frame_end:temporal_stride]).float()
-                depths_batch = torch.from_numpy(sample["pred_depths"][view_start:view_end, frame_start:frame_end:temporal_stride]).float()
+                depths_batch = torch.from_numpy(sample["depths"][view_start:view_end, frame_start:frame_end:temporal_stride]).float()
                 intrs_batch = torch.from_numpy(sample["intrs"][view_start:view_end, frame_start:frame_end:temporal_stride]).float()
                 extrs_batch = torch.from_numpy(sample["extrs"][view_start:view_end, frame_start:frame_end:temporal_stride]).float()
                 load_time = time.time() - load_start
@@ -869,7 +869,7 @@ def main():
         # For visualization, we need the full data loaded once
         print("Loading subsampled data for visualization...")
         rgbs = torch.from_numpy(sample["rgbs"][:, ::temporal_stride]).float()
-        depths = torch.from_numpy(sample["pred_depths"][:, ::temporal_stride]).float()
+        depths = torch.from_numpy(sample["depths"][:, ::temporal_stride]).float()
         intrs = torch.from_numpy(sample["intrs"][:, ::temporal_stride]).float()
         extrs = torch.from_numpy(sample["extrs"][:, ::temporal_stride]).float()
 
@@ -887,7 +887,7 @@ def main():
     else:
         # Original single-pass loading
         rgbs = torch.from_numpy(sample["rgbs"][:, ::temporal_stride]).float()
-        depths = torch.from_numpy(sample["pred_depths"][:, ::temporal_stride]).float()  # Convert mm to meters
+        depths = torch.from_numpy(sample["depths"][:, ::temporal_stride]).float()  # Convert mm to meters
         intrs = torch.from_numpy(sample["intrs"][:, ::temporal_stride]).float()
         extrs = torch.from_numpy(sample["extrs"][:, ::temporal_stride]).float()
         if "query_points" in sample:
