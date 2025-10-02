@@ -17,4 +17,3 @@ mediapy==1.2.0
 rerun-sdk==0.21.0
 open3d
 transforms3d
-pytorch3d
