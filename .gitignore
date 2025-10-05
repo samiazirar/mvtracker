@@ -36,6 +36,27 @@ rh20t_api/
 rh20t_api/*
 *rh20t_api
 
+rh20t_api
+rh20t/
+rh20t_api_cached
+rh20t_api_cached/
+rh20t_api_cached/*
+*rh20t_api_cached
+rh20t_api_cached
+
+RH20T
+RH20T/
+RH20T/*
+RH20T_cached
+RH20T_cached/
+RH20T_cached/*
+*RH20T_cached
+
+rh20t_api_safety
+rh20t_api_safety/
+rh20t_api_safety/*
+*rh20t_api_safety
+rh20t_api_safety_cachedrh20t_api_safety
 data
 data/
 

@@ -287,3 +287,8 @@ find cood way to store
 
 they use cotracker 2 parts check if better avaialble
 -- it has cotracker3 somewhere so maybe just use this
+
+# Howot
+first create sparse depth maps for upscaling
+(depth completion with mapanything, does not seem to work well)
+then run demo.py for flow

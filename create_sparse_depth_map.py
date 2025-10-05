@@ -40,9 +40,10 @@ python create_sparse_depth_map.py   --task-folder /data/rh20t_api/data/test_data
 # Standard library imports
 import argparse
 import re
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 # Third-party imports
 import numpy as np
@@ -56,9 +57,10 @@ from tqdm import tqdm
 
 # Project-specific imports
 from mvtracker.utils.visualizer_rerun import log_pointclouds_to_rerun
-from rh20t_api.rh20t_api.configurations import load_conf
-from rh20t_api.rh20t_api.scene import RH20TScene
-
+from RH20T.rh20t_api.configurations import get_conf_from_dir_name, load_conf
+from RH20T.rh20t_api.scene import RH20TScene
+from RH20T.utils.robot import RobotModel
+import warnings
 # --- File I/O & Utility Functions ---
 
 NUM_RE = re.compile(r"(\d+)")
@@ -135,8 +137,103 @@ def infer_calibration_resolution(scene: RH20TScene, camera_id: str) -> Optional[
         width, height = img.size
     return width, height
 
-# --- Data Loading & Synchronization ---
 
+def _create_robot_model(
+    sample_path: Path,
+    configs_path: Optional[Path] = None,
+    rh20t_root: Optional[Path] = None,
+) -> Optional[RobotModel]:
+    """Create a RobotModel instance for the current scene."""
+    configs_path = configs_path or (Path(__file__).resolve().parent / "rh20t_api" / "configs" / "configs.json")
+    rh20t_root = rh20t_root or (Path(__file__).resolve().parent / "rh20t_api")
+
+    try:
+        confs = load_conf(str(configs_path))
+    except Exception as exc:  # pragma: no cover - best-effort logging
+        warnings.warn(f"Failed to load RH20T configurations ({exc}); skipping robot overlay.")
+        return None
+
+    try:
+        conf = get_conf_from_dir_name(str(sample_path), confs)
+    except Exception as exc:  # pragma: no cover - dataset naming mismatches
+        warnings.warn(f"Could not infer robot configuration from '{sample_path}' ({exc}); skipping robot overlay.")
+        return None
+
+    robot_urdf = (rh20t_root / conf.robot_urdf).resolve()
+    robot_mesh_root = (rh20t_root / conf.robot_mesh).resolve()
+
+    if not robot_urdf.exists():
+        warnings.warn(f"Robot URDF not found at '{robot_urdf}'; skipping robot overlay.")
+        return None
+    if not robot_mesh_root.exists():
+        warnings.warn(f"Robot mesh directory '{robot_mesh_root}' not found; skipping robot overlay.")
+        return None
+
+    try:
+        robot_model = RobotModel(
+            robot_joint_sequence=conf.robot_joint_sequence,
+            robot_urdf=str(robot_urdf),
+            robot_mesh=str(robot_mesh_root),
+        )
+    except Exception as exc:  # pragma: no cover - URDF parsing is best-effort
+        warnings.warn(f"Failed to load robot model from URDF ({exc}); skipping robot overlay.")
+        return None
+
+    return robot_model
+
+
+def _robot_model_to_pointcloud(
+    robot_model: RobotModel,
+    joint_angles: np.ndarray,
+    is_first_time: bool = False,
+    points_per_mesh: int = 10000,
+) -> o3d.geometry.PointCloud:
+    """Convert a robot model at a specific joint state to a point cloud."""
+    # Update the robot model with the current joint angles
+    robot_model.update(joint_angles, first_time=is_first_time)
+    # Combine all robot meshes into a single point cloud
+    robot_pcd = o3d.geometry.PointCloud()
+    geometries = robot_model.geometries_to_add if is_first_time else robot_model.geometries_to_update
+    print("running _robot_model_to_pointcloud")
+    for mesh in geometries:
+        vertices = np.asarray(mesh.vertices)
+        triangles = np.asarray(mesh.triangles)
+        if vertices.size == 0 or triangles.size == 0:
+            continue
+
+        # Create an Open3D mesh from the current state
+        o3d_mesh = o3d.geometry.TriangleMesh()
+        o3d_mesh.vertices = o3d.utility.Vector3dVector(vertices)
+        o3d_mesh.triangles = o3d.utility.Vector3iVector(triangles)
+        
+        # Preserve vertex colors if available from the original mesh
+        if mesh.has_vertex_colors():
+            colors = np.asarray(mesh.vertex_colors)
+            if colors.size:
+                o3d_mesh.vertex_colors = o3d.utility.Vector3dVector(colors)
+        
+        # Sample points from the mesh surface
+        mesh_pcd = o3d_mesh.sample_points_uniformly(number_of_points=points_per_mesh)
+        warnings.warn("Debug mode: Will paint all robot points red")
+        num_points = len(mesh_pcd.points)
+        default_color = np.tile([1.0, 0.0, 0.0], (num_points, 1))  # Red color
+        mesh_pcd.colors = o3d.utility.Vector3dVector(default_color)
+        warnings.warn("Remove this after debugging")
+
+        # Ensure sampled points have colors
+        if not mesh_pcd.has_colors():
+            warnings.warn("The robot mesh does not have color information; defaulting to gray color.")
+            # Default to a light gray/silver color for robot parts without color information
+            num_points = len(mesh_pcd.points)
+            default_color = np.tile([0.7, 0.7, 0.7], (num_points, 1))  # Light gray
+            mesh_pcd.colors = o3d.utility.Vector3dVector(default_color)
+        
+        robot_pcd += mesh_pcd
+
+    return robot_pcd
+
+
+#TODO: add jounts
 def load_scene_data(task_path: Path, robot_configs: List) -> Tuple[Optional[RH20TScene], List[str], List[Path]]:
     """
     Loads an RH20T scene and filters for calibrated, external (non-hand) cameras.
@@ -539,7 +636,14 @@ def reproject_to_sparse_depth_cv2(
         return sparse_depth
 
     pts_world = np.asarray(pcd.points)
-    orig_colors = (np.asarray(pcd.colors) * 255).astype(np.uint8)
+    
+    # Handle point clouds with or without colors
+    if pcd.has_colors():
+        orig_colors = (np.asarray(pcd.colors) * 255).astype(np.uint8)
+    else:
+        # If no colors, create a default gray color for all points
+        num_points = pts_world.shape[0]
+        orig_colors = np.full((num_points, 3), 128, dtype=np.uint8)  # Gray color
 
     # Decompose extrinsics into rotation and translation vectors for OpenCV
     R, t = E[:3, :3], E[:3, 3]
@@ -612,6 +716,19 @@ def process_frames(
         color_lookup_high = [list_frames(cdir / 'color') for cdir in cam_dirs_high]
     else:
         color_lookup_high = None
+
+    # Create robot model if requested
+    robot_model = None
+    if args.add_robot:
+        configs_path = args.config.resolve()
+        rh20t_root = configs_path.parent.parent if configs_path.parent.name == "configs" else configs_path.parent
+        robot_model = _create_robot_model(
+            sample_path=args.task_folder,
+            configs_path=configs_path,
+            rh20t_root=rh20t_root,
+        )
+        if robot_model:
+            print("[INFO] Robot model loaded successfully.")
 
     def _resolve_frame(frame_map: Dict[int, Path], ts: int, cam_name: str, label: str) -> Path:
         path = frame_map.get(ts)
@@ -704,6 +821,30 @@ def process_frames(
             # Merge all individual point clouds into a single scene representation
             for pcd in pcds_per_cam:
                 combined_pcd += pcd
+
+            # Add robot point cloud with current joint state if available
+            if robot_model is not None:
+                try:
+                    # Get the timestamp for the current frame
+                    t_low = int(per_cam_low_ts[0][ti])
+                    # Get joint angles at this timestamp
+                    joint_angles = scene_low.get_joint_angles_aligned(t_low)
+                    # Create robot point cloud at this state
+                    robot_pcd = _robot_model_to_pointcloud(
+                        robot_model, 
+                        joint_angles, 
+                        is_first_time=(ti == 0),
+                        points_per_mesh=10000
+                    )
+                    if robot_pcd.has_points():
+                        combined_pcd += robot_pcd
+                        if ti == 0:
+                            print(f"[INFO] Added robot with {len(robot_pcd.points)} points for frame {ti}")
+                except Exception as exc:
+                    if ti == 0:
+                        print(f"[WARN] Failed to add robot to point cloud: {exc}")
+            else:
+                Warning("Robot model not available; skipping robot point cloud addition.")
 
             if combined_pcd.has_points():
                 if args.clean_pointcloud:
@@ -820,6 +961,9 @@ def save_and_visualize(args, rgbs, depths, intrs, extrs, final_cam_ids, timestam
             log_rgb_pointcloud=True,
             log_camera_frustrum=True,
         )
+        configs_path = args.config.resolve()
+        rh20t_root = configs_path.parent.parent if configs_path.parent.name == "configs" else configs_path.parent
+
 
 def main():
     """Parses arguments and orchestrates the entire data processing workflow."""
@@ -830,7 +974,7 @@ def main():
     parser.add_argument("--task-folder", required=True, type=Path, help="Path to the primary (low-res) RH20T task folder.")
     parser.add_argument("--high-res-folder", type=Path, default=None, help="Optional: Path to the high-resolution task folder for reprojection.")
     parser.add_argument("--out-dir", required=True, type=Path, help="Output directory for .npz and .rrd files.")
-    parser.add_argument("--config", default="rh20t_api/configs/configs.json", type=Path, help="Path to RH20T robot configs JSON.")
+    parser.add_argument("--config", default="RH20T/configs/configs.json", type=Path, help="Path to RH20T robot configs JSON.")
     parser.add_argument("--max-frames", type=int, default=50, help="Limit frames to process (0 for all).")
     parser.add_argument("--frame-selection", choices=["first", "last", "middle"], default="middle", help="Method for selecting frames.")
     parser.add_argument(
@@ -875,6 +1019,7 @@ def main():
     parser.add_argument("--sync-min-density", type=float, default=0.6, help="Minimum density ratio required per camera during synchronization.")
     parser.add_argument("--sync-max-drift", type=float, default=0.05, help="Maximum tolerated fractional FPS shortfall before warning.")
     parser.add_argument("--sync-tolerance-ms", type=float, default=50.0, help="Maximum timestamp deviation (ms) when matching frames; defaults to half frame period.")
+    parser.add_argument("--add-robot", action="store_true", help="Include robot model in Rerun visualization.")
     args = parser.parse_args()
 
     if not args.config.exists():
