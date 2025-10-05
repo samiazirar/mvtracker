@@ -56,9 +56,9 @@ rh20t_api_safety
 rh20t_api_safety/
 rh20t_api_safety/*
 *rh20t_api_safety
-rh20t_api_safety_cachedrh20t_api_safety
 data
 data/
+!mvtracker/models/core/shape-of-motion/flow3d/data/
 
 pytorch3d
 pytorch3d/
