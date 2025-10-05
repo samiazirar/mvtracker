@@ -3,6 +3,7 @@
 Processes RH20T task folders to generate sparse, high-resolution depth maps by
 reprojecting a point cloud from low-resolution depth onto high-resolution views.
 
+generate npz with transform to npz
 This script uses the Open3D and OpenCV libraries for robust 3D data handling and
 includes an optional color-based alignment check to ensure high-quality results.
 
@@ -31,7 +32,7 @@ python create_sparse_depth_map.py \\
 # points where the original color (from low-res) doesn't match the target
 # color (in high-res), indicating a potential calibration misalignment.
 
-python create_sparse_depth_map.py   --task-folder /data/rh20t_api/data/test_data_full_rgb_upscaled_depth/uncompressed_low_res_data/task_0065_user_0010_scene_0009_cfg_0004   --high-res-folder /data/rh20t_api/data/test_data_full_rgb_upscaled_depth/rgb_data/RH20T_cfg4/task_0065_user_0010_scene_0009_cfg_0004  --out-dir ./data/high_res_filtered   --max-frames 100   --color-alignment-check   --color-threshold 35
+python create_sparse_depth_map.py   --task-folder /data/rh20t_api/data/test_data_full_rgb_upscaled_depth/uncompressed_low_res_data/task_0065_user_0010_scene_0009_cfg_0004   --high-res-folder /data/rh20t_api/data/test_data_full_rgb_upscaled_depth/rgb_data/RH20T_cfg4/task_0065_user_0010_scene_0009_cfg_0004  --out-dir ./data/high_res_filtered   --max-frames 100   --color-alignment-check   --color-threshold 35 --no-sharpen-edges-with-mesh
 
 """
 

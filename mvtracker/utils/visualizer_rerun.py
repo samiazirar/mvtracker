@@ -127,7 +127,6 @@ def log_pointclouds_to_rerun(
     extrs_square = torch.eye(4).to(extrs.device)[None].repeat(B, V, T, 1, 1)
     extrs_square[:, :, :, :3, :] = extrs
     extrs_inv = torch.inverse(extrs_square.float()).type(extrs.dtype)
-    
     assert intrs_inv.shape == (B, V, T, 3, 3)
     assert extrs_inv.shape == (B, V, T, 4, 4)
     camera_labels: Optional[List[str]] = None

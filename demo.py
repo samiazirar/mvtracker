@@ -17,6 +17,11 @@ from mvtracker.models.core.monocular_baselines import (
     MonocularToMultiViewAdapter,
 )
 from mvtracker.utils.visualizer_rerun import log_pointclouds_to_rerun, log_tracks_to_rerun
+from rh20t_api.rh20t_api.configurations import (
+    get_conf_from_dir_name,
+    load_conf,
+)
+from rh20t_api.utils.robot import RobotModel
 
 import sys
 import types
@@ -50,6 +55,72 @@ def _prepare_uint8_rgbs(rgbs: torch.Tensor) -> torch.Tensor:
         rgbs_to_scale = rgbs_to_scale * 255.0
     return rgbs_to_scale.clamp(0, 255).round().to(torch.uint8)
 
+
+def _log_robot_meshes_to_rerun(
+    dataset_name: str,
+    datapoint_idx: int,
+    sample_path: Path,
+    configs_path: Optional[Path] = None,
+    rh20t_root: Optional[Path] = None,
+) -> None:
+    """Load the robot URDF for the current scene and log it to Rerun as static meshes."""
+    configs_path = configs_path or (Path(__file__).resolve().parent / "rh20t_api" / "configs" / "configs.json")
+    rh20t_root = rh20t_root or (Path(__file__).resolve().parent / "rh20t_api")
+
+    try:
+        confs = load_conf(str(configs_path))
+    except Exception as exc:  # pragma: no cover - best-effort logging
+        warnings.warn(f"Failed to load RH20T configurations ({exc}); skipping robot overlay.")
+        return
+
+    try:
+        conf = get_conf_from_dir_name(str(sample_path), confs)
+    except Exception as exc:  # pragma: no cover - dataset naming mismatches
+        warnings.warn(f"Could not infer robot configuration from '{sample_path}' ({exc}); skipping robot overlay.")
+        return
+
+    robot_urdf = (rh20t_root / conf.robot_urdf).resolve()
+    robot_mesh_root = (rh20t_root / conf.robot_mesh).resolve()
+
+    if not robot_urdf.exists():
+        warnings.warn(f"Robot URDF not found at '{robot_urdf}'; skipping robot overlay.")
+        return
+    if not robot_mesh_root.exists():
+        warnings.warn(f"Robot mesh directory '{robot_mesh_root}' not found; skipping robot overlay.")
+        return
+
+    try:
+        robot_model = RobotModel(
+            robot_joint_sequence=conf.robot_joint_sequence,
+            robot_urdf=str(robot_urdf),
+            robot_mesh=str(robot_mesh_root),
+        )
+    except Exception as exc:  # pragma: no cover - URDF parsing is best-effort
+        warnings.warn(f"Failed to load robot model from URDF ({exc}); skipping robot overlay.")
+        return
+
+    joint_state = np.zeros(len(conf.robot_joint_sequence), dtype=np.float64)
+    robot_model.update(joint_state, first_time=True)
+
+    base_entity = f"sequence-{datapoint_idx}/{dataset_name}/robot"
+    for mesh_idx, mesh in enumerate(robot_model.geometries_to_add):
+        vertices = np.asarray(mesh.vertices)
+        triangles = np.asarray(mesh.triangles)
+        if vertices.size == 0 or triangles.size == 0:
+            continue
+
+        mesh_kwargs: Dict[str, Any] = {
+            "vertex_positions": vertices.astype(np.float32),
+            "triangle_indices": triangles.astype(np.uint32),
+        }
+
+        if mesh.has_vertex_colors():
+            colors = np.asarray(mesh.vertex_colors)
+            if colors.size:
+                mesh_kwargs["vertex_colors"] = colors.astype(np.float32)
+
+        entity_path = f"{base_entity}/link_{mesh_idx:02d}"
+        rr.log(entity_path, rr.Mesh3D(**mesh_kwargs))
 
 def maybe_estimate_depths_from_generic(
     rgbs: torch.Tensor,
@@ -537,6 +608,11 @@ def main():
             "Note that rerun prefers recordings to have a .rrd suffix."
         ),
     )
+    p.add_argument(
+        "--include-robot",
+        action="store_true",
+        help="Overlay the robot URDF as a static mesh in the Rerun visualization."
+    )
     args = p.parse_args()
     np.random.seed(72)
     torch.manual_seed(72)
@@ -581,20 +657,6 @@ def main():
         mvtracker = MonocularToMultiViewAdapter(base_tracker).to(device)
         mvtracker.eval()
 
-    # Download demo sample from Hugging Face Hub
-    sample_path = hf_hub_download(
-        repo_id="ethz-vlg/mvtracker",
-        filename="data_sample.npz",
-        token=os.getenv("HF_TOKEN"),
-        repo_type="model",
-    )
-    sample_original = np.load(sample_path)
-    rgbs_original = torch.from_numpy(sample_original["rgbs"]).float() 
-    depths_original = torch.from_numpy(sample_original["depths"]).float()  
-    intrs_original = torch.from_numpy(sample_original["intrs"]).float()  
-    extrs_original = torch.from_numpy(sample_original["extrs"]).float()  
-    query_points_original = torch.from_numpy(sample_original["query_points"]).float()  
-    print("Shapes: rgbs, depths, intrs, extrs, query_points:", rgbs_original.shape, depths_original.shape, intrs_original.shape, extrs_original.shape, query_points_original.shape)
     # Load the RH20T dataset with memory management
     #sample_path = "/data/rh20t_api/data/RH20T/packed_npz/task_0015_user_0011_scene_0006_cfg_0003.npz"
 
@@ -606,8 +668,12 @@ def main():
     #with mapanythign
     # sample_path = "/data/npz_file/task_0065_user_0010_scene_0009_cfg_0004_pred.npz"
     #Final mapanything
-    sample_path = "/data/rh20t_api/mapanything_test/task_0065_user_0010_scene_0009_cfg_0004_processed.npz"
+    # sample_path = "/data/rh20t_api/mapanything_test/task_0065_user_0010_scene_0009_cfg_0004_processed.npz"
 
+    #reprojected without depth
+    sample_path = "data/high_res_filtered/task_0065_user_0010_scene_0009_cfg_0004_processed.npz"
+    #input to mapanythibg
+    # sample_path = "/data/rh20t_api/test_npz/task_0065_user_0010_scene_0009_cfg_0004_processed.npz"
     print("HUMANS NOT SUPPORTED YET") #TODO: find out why _human not work
     print("Loading large RH20T dataset - this may take a while...")
     print("Memory before loading:", torch.cuda.memory_allocated() / 1024**3 if torch.cuda.is_available() else "N/A", "GB GPU")
@@ -1016,6 +1082,12 @@ def main():
         log_rgb_pointcloud=True,
         pc_clean_cfg=pc_clean_cfg,
     )
+    if args.include_robot:
+        _log_robot_meshes_to_rerun(
+            dataset_name="demo",
+            datapoint_idx=0,
+            sample_path=Path(sample_path),
+        )
     log_tracks_to_rerun(
         dataset_name="demo",
         datapoint_idx=0,

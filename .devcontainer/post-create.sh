@@ -36,7 +36,8 @@ pip install -r requirements.txt || true
 #     'git+https://github.com/ethz-vlg/pointcept.git@2082918#subdirectory=libs/pointops'
 echo "Update safetensors"
 pip install --upgrade safetensors
-
+#clone if not exist
+pip install -r rh20t_api/requirements.txt
 # Configure git
 echo "Configuring git..."
 git config --global --add safe.directory /workspace
