@@ -57,20 +57,13 @@ from tqdm import tqdm
 
 # Project-specific imports
 from mvtracker.utils.visualizer_rerun import log_pointclouds_to_rerun
-from RH20T.rh20t_api.configurations import get_conf_from_dir_name, load_conf
-from RH20T.rh20t_api.scene import RH20TScene
-from RH20T.utils.robot import RobotModel
+from rh20t_api_safety.rh20t_api.configurations import get_conf_from_dir_name, load_conf
+from rh20t_api_safety.rh20t_api.scene import RH20TScene
+from rh20t_api_safety.utils.robot import RobotModel
 import warnings
 # --- File I/O & Utility Functions ---
 
 NUM_RE = re.compile(r"(\d+)")
-
-GRIPPER_TEMPLATE_ROOT = Path("external_assets/grippers/templates")
-GRIPPER_TEMPLATE_MAP = {
-    "Robotiq 2F-85": "robotiq_2f_85",
-    "WSG-50": "schunk_wsg50",
-    "Dahuan AG-95": "dh_ag95",
-}
 
 ROBOT_EE_LINK_MAP = {
     "ur5": "ee_link",
@@ -78,49 +71,6 @@ ROBOT_EE_LINK_MAP = {
     "kuka": "lbr_iiwa_link_7",
     "franka": "panda_link8",
 }
-
-# Robot-specific gripper mount pose corrections
-# These override the template mount_pose based on URDF joint specifications
-ROBOT_GRIPPER_MOUNT_CORRECTIONS = {
-    "ur5": {
-        "Robotiq 2F-85": np.array([
-            [0, 0, 1, 0.15],    # 90° rotation around Y axis + translation
-            [0, 1, 0, 0],       # X_new = Z_old, Y_new = Y_old, Z_new = -X_old  
-            [-1, 0, 0, 0],      # Adjust first row, last column to lower gripper
-            [0, 0, 0, 1]        # Positive = one direction, Negative = opposite
-        ], dtype=np.float32),
-    },
-}
-
-_GRIPPER_TEMPLATE_CACHE: Dict[str, Dict[str, Any]] = {}
-
-
-def _load_gripper_template_from_npz(name: str) -> Optional[Dict[str, Any]]:
-    key = GRIPPER_TEMPLATE_MAP.get(name)
-    if not key:
-        return None
-    if key in _GRIPPER_TEMPLATE_CACHE:
-        return _GRIPPER_TEMPLATE_CACHE[key]
-    template_path = GRIPPER_TEMPLATE_ROOT / f"{key}.npz"
-    if not template_path.exists():
-        warnings.warn(f"Gripper template '{key}' not found at {template_path}.")
-        return None
-    data = np.load(template_path, allow_pickle=True)
-    points = data.get("points")
-    colors = data.get("colors")
-    if isinstance(colors, np.ndarray) and colors.ndim == 0:
-        colors = None
-    mount_pose = data.get("mount_pose")
-    template = {
-        "key": key,
-        "label": name,
-        "points": points.astype(np.float32) if points is not None else np.empty((0, 3), dtype=np.float32),
-        "colors": colors.astype(np.float32) if isinstance(colors, np.ndarray) else None,
-        "mount_pose": mount_pose.astype(np.float32) if mount_pose is not None else np.eye(4, dtype=np.float32),
-        "root_link": str(data.get("root_link", "")),
-    }
-    _GRIPPER_TEMPLATE_CACHE[key] = template
-    return template
 
 @dataclass
 class SyncResult:
@@ -234,17 +184,6 @@ def _create_robot_model(
     except Exception as exc:  # pragma: no cover - URDF parsing is best-effort
         warnings.warn(f"Failed to load robot model from URDF ({exc}); skipping robot overlay.")
         return None
-
-    gripper_template = _load_gripper_template_from_npz(conf.gripper)
-    ee_link = ROBOT_EE_LINK_MAP.get(conf.robot.lower())
-    
-    # Apply robot-specific gripper mount pose corrections
-    if gripper_template and conf.robot.lower() in ROBOT_GRIPPER_MOUNT_CORRECTIONS:
-        corrections = ROBOT_GRIPPER_MOUNT_CORRECTIONS[conf.robot.lower()]
-        gripper_name = gripper_template.get("label", "")
-        if gripper_name in corrections:
-            gripper_template["mount_pose"] = corrections[gripper_name]
-            print(f"[INFO] Applied mount pose correction for {conf.robot} + {gripper_name}")
     
     # Load MTL colors from mesh directory (graphics subdirectory)
     graphics_dir = robot_mesh_root / "graphics"
@@ -254,8 +193,6 @@ def _create_robot_model(
 
     return {
         "model": robot_model,
-        "gripper_template": gripper_template,
-        "ee_link": ee_link,
         "mtl_colors": mtl_colors,
     }
 
@@ -366,9 +303,6 @@ def _robot_model_to_pointcloud(
     debug_mode: bool = False,
     urdf_colors: Optional[Dict[str, np.ndarray]] = None,
     mtl_colors: Optional[Dict[str, np.ndarray]] = None,
-    gripper_template: Optional[Dict[str, Any]] = None,
-    ee_link: Optional[str] = None,
-    gripper_joint_angle: Optional[float] = None,
 ) -> o3d.geometry.PointCloud:
     """Convert a robot model at a specific joint state to a point cloud.
     
@@ -377,13 +311,12 @@ def _robot_model_to_pointcloud(
     
     Args:
         robot_model: The robot model to convert
-        joint_angles: Joint angles for the robot configuration (excluding gripper)
+        joint_angles: Joint angles for the robot configuration
         is_first_time: Whether this is the first frame (affects mesh loading)
         points_per_mesh: Number of points to sample per mesh
         debug_mode: If True, use colorful debug colors per part. If False, use mesh colors.
         urdf_colors: Dictionary mapping link names to RGB colors from URDF
         mtl_colors: Dictionary mapping mesh base names to RGB colors from MTL files
-        gripper_joint_angle: The gripper finger joint angle (for animating open/close)
     """
     # Update the robot model with the current joint angles
     # This transforms the internal meshes to the correct pose
@@ -493,102 +426,6 @@ def _robot_model_to_pointcloud(
                 mesh_pcd.colors = o3d.utility.Vector3dVector(np.tile(default_color, (num_points, 1)))
         
         robot_pcd += mesh_pcd
-
-    # Add gripper if template is available
-    if gripper_template and fk is not None and ee_link and ee_link in fk:
-        if debug_mode:
-            print(f"[DEBUG] Adding gripper: ee_link={ee_link}, fk available={ee_link in fk}")
-        T_world_ee = fk[ee_link].matrix()
-        mount_pose = gripper_template.get("mount_pose")
-        if mount_pose is None:
-            mount_pose = np.eye(4, dtype=np.float32)
-        T_world_gripper = T_world_ee @ mount_pose
-
-        points = gripper_template.get("points")
-        if points is not None and points.size:
-            if debug_mode:
-                print(f"[DEBUG] Gripper has {len(points)} points, joint_angle={gripper_joint_angle}")
-            
-            # Animate gripper open/close based on joint angle
-            # gripper_joint_angle now contains gripper width in mm (0-85mm for Robotiq 2F-85)
-            # Natural closing: scale the finger Y coordinates proportionally to the commanded gap
-            gripper_points = points.copy()
-            if gripper_joint_angle is not None and gripper_joint_angle > 0.1:
-                # gripper_joint_angle is gripper width in mm (distance between finger tips)
-                # Template baseline: fingers at ~96mm gap (natural mesh position)
-                # Robotiq 2F-85: 0mm = closed (touching), 85mm = fully open
-                
-                # The gripper command is the GAP between fingers
-                # We scale the Y coordinates to match this gap while preserving finger shape
-                
-                y_coords = gripper_points[:, 1]
-                left_finger_mask = y_coords < -0.005  # Left finger
-                right_finger_mask = y_coords > 0.005   # Right finger
-                
-                # Calculate template baseline gap (mean Y position of each finger)
-                template_left_center = y_coords[left_finger_mask].mean()
-                template_right_center = y_coords[right_finger_mask].mean()
-                template_gap_m = template_right_center - template_left_center
-                
-                # Target gap from command (in meters)
-                target_gap_m = gripper_joint_angle / 1000.0  # mm to meters
-                
-                # Scale factor: how much to scale the Y coordinates
-                # At 0mm: scale = 0 (fingers at Y=0, fully closed)
-                # At template_gap: scale = 1 (fingers at template position)
-                # At 85mm: scale = 85/96 ≈ 0.885 (fingers scaled to 85mm gap)
-                scale_factor = target_gap_m / template_gap_m
-                
-                # Scale Y coordinates toward center (Y=0) based on scale factor
-                # This preserves the finger shape while closing naturally
-                gripper_points[left_finger_mask, 1] *= scale_factor
-                gripper_points[right_finger_mask, 1] *= scale_factor
-                
-                if debug_mode and is_first_time:
-                    print(f"[DEBUG] Gripper command: {gripper_joint_angle:.2f}mm, scale factor: {scale_factor:.3f}")
-            elif gripper_joint_angle is not None and gripper_joint_angle <= 0.1:
-                # If gripper width is essentially zero, show it slightly open for visibility
-                # Use a default 25mm width (about 30% of max 85mm)
-                default_width_mm = 25.0
-                finger_offset = (default_width_mm / 1000.0) / 2.0
-                
-                y_coords = gripper_points[:, 1]
-                left_finger_mask = y_coords < -0.005
-                right_finger_mask = y_coords > 0.005
-                
-                gripper_points[left_finger_mask, 1] -= finger_offset
-                gripper_points[right_finger_mask, 1] += finger_offset
-                
-                if debug_mode and is_first_time:
-                    print(f"[DEBUG] No gripper data (width={gripper_joint_angle:.2f}mm), using default {default_width_mm}mm width")
-            
-            R = T_world_gripper[:3, :3]
-            t = T_world_gripper[:3, 3]
-            pts_world = (gripper_points @ R.T) + t
-            gripper_pcd = o3d.geometry.PointCloud()
-            gripper_pcd.points = o3d.utility.Vector3dVector(pts_world)
-            template_colors = gripper_template.get("colors")
-            if template_colors is not None and not debug_mode:
-                gripper_pcd.colors = o3d.utility.Vector3dVector(template_colors)
-            else:
-                default_color = [1.0, 0.0, 0.0] if debug_mode else [0.7, 0.7, 0.7]
-                gripper_pcd.colors = o3d.utility.Vector3dVector(
-                    np.tile(default_color, (pts_world.shape[0], 1))
-                )
-            robot_pcd += gripper_pcd
-        elif debug_mode:
-            print(f"[DEBUG] Gripper template has no points or empty points")
-    elif debug_mode:
-        missing_parts = []
-        if not gripper_template:
-            missing_parts.append("gripper_template")
-        if fk is None:
-            missing_parts.append("fk")
-        if not ee_link:
-            missing_parts.append("ee_link")
-        elif ee_link not in fk:
-            missing_parts.append(f"ee_link '{ee_link}' not in fk")
-        print(f"[DEBUG] Gripper not added: missing {', '.join(missing_parts)}")
 
     return robot_pcd
 
@@ -1092,8 +929,6 @@ def process_frames(
 
     # Create robot model if requested
     robot_model = None
-    robot_gripper_template = None
-    robot_ee_link = None
     robot_urdf_colors = None
     robot_mtl_colors = None
     if args.add_robot:
@@ -1106,8 +941,6 @@ def process_frames(
         )
         if robot_bundle:
             robot_model = robot_bundle.get("model")
-            robot_gripper_template = robot_bundle.get("gripper_template")
-            robot_ee_link = robot_bundle.get("ee_link")
             robot_mtl_colors = robot_bundle.get("mtl_colors")
         if robot_model:
             print("[INFO] Robot model loaded successfully.")
@@ -1290,9 +1123,6 @@ def process_frames(
                         debug_mode=getattr(args, "debug_mode", False),
                         urdf_colors=robot_urdf_colors,
                         mtl_colors=robot_mtl_colors,
-                        gripper_template=robot_gripper_template,
-                        ee_link=robot_ee_link,
-                        gripper_joint_angle=gripper_joint_angle,
                     )
                     
                     # NOTE: Removed align_mat_base transformation
@@ -1491,7 +1321,7 @@ def main():
     parser.add_argument("--task-folder", required=True, type=Path, help="Path to the primary (low-res) RH20T task folder.")
     parser.add_argument("--high-res-folder", type=Path, default=None, help="Optional: Path to the high-resolution task folder for reprojection.")
     parser.add_argument("--out-dir", required=True, type=Path, help="Output directory for .npz and .rrd files.")
-    parser.add_argument("--config", default="RH20T/configs/configs.json", type=Path, help="Path to RH20T robot configs JSON.")
+    parser.add_argument("--config", default="rh20t_api_safety/configs/configs.json", type=Path, help="Path to RH20T robot configs JSON.")
     parser.add_argument("--max-frames", type=int, default=50, help="Limit frames to process (0 for all).")
     parser.add_argument("--frame-selection", choices=["first", "last", "middle"], default="middle", help="Method for selecting frames.")
     parser.add_argument(
