@@ -65,6 +65,62 @@ import warnings
 
 NUM_RE = re.compile(r"(\d+)")
 
+GRIPPER_TEMPLATE_ROOT = Path("external_assets/grippers/templates")
+GRIPPER_TEMPLATE_MAP = {
+    "Robotiq 2F-85": "robotiq_2f_85",
+    "WSG-50": "schunk_wsg50",
+    "Dahuan AG-95": "dh_ag95",
+}
+
+ROBOT_EE_LINK_MAP = {
+    "ur5": "ee_link",
+    "flexiv": "link7",
+    "kuka": "lbr_iiwa_link_7",
+    "franka": "panda_link8",
+}
+
+# Robot-specific gripper mount pose corrections
+# These override the template mount_pose based on URDF joint specifications
+ROBOT_GRIPPER_MOUNT_CORRECTIONS = {
+    "ur5": {
+        "Robotiq 2F-85": np.array([
+            [0, 0, 1, 0.15],    # 90° rotation around Y axis + translation
+            [0, 1, 0, 0],       # X_new = Z_old, Y_new = Y_old, Z_new = -X_old  
+            [-1, 0, 0, 0],      # Adjust first row, last column to lower gripper
+            [0, 0, 0, 1]        # Positive = one direction, Negative = opposite
+        ], dtype=np.float32),
+    },
+}
+
+_GRIPPER_TEMPLATE_CACHE: Dict[str, Dict[str, Any]] = {}
+
+
+def _load_gripper_template_from_npz(name: str) -> Optional[Dict[str, Any]]:
+    key = GRIPPER_TEMPLATE_MAP.get(name)
+    if not key:
+        return None
+    if key in _GRIPPER_TEMPLATE_CACHE:
+        return _GRIPPER_TEMPLATE_CACHE[key]
+    template_path = GRIPPER_TEMPLATE_ROOT / f"{key}.npz"
+    if not template_path.exists():
+        warnings.warn(f"Gripper template '{key}' not found at {template_path}.")
+        return None
+    data = np.load(template_path, allow_pickle=True)
+    points = data.get("points")
+    colors = data.get("colors")
+    if isinstance(colors, np.ndarray) and colors.ndim == 0:
+        colors = None
+    mount_pose = data.get("mount_pose")
+    template = {
+        "key": key,
+        "label": name,
+        "points": points.astype(np.float32) if points is not None else np.empty((0, 3), dtype=np.float32),
+        "colors": colors.astype(np.float32) if isinstance(colors, np.ndarray) else None,
+        "mount_pose": mount_pose.astype(np.float32) if mount_pose is not None else np.eye(4, dtype=np.float32),
+        "root_link": str(data.get("root_link", "")),
+    }
+    _GRIPPER_TEMPLATE_CACHE[key] = template
+    return template
 
 @dataclass
 class SyncResult:
@@ -179,7 +235,127 @@ def _create_robot_model(
         warnings.warn(f"Failed to load robot model from URDF ({exc}); skipping robot overlay.")
         return None
 
-    return robot_model
+    gripper_template = _load_gripper_template_from_npz(conf.gripper)
+    ee_link = ROBOT_EE_LINK_MAP.get(conf.robot.lower())
+    
+    # Apply robot-specific gripper mount pose corrections
+    if gripper_template and conf.robot.lower() in ROBOT_GRIPPER_MOUNT_CORRECTIONS:
+        corrections = ROBOT_GRIPPER_MOUNT_CORRECTIONS[conf.robot.lower()]
+        gripper_name = gripper_template.get("label", "")
+        if gripper_name in corrections:
+            gripper_template["mount_pose"] = corrections[gripper_name]
+            print(f"[INFO] Applied mount pose correction for {conf.robot} + {gripper_name}")
+    
+    # Load MTL colors from mesh directory (graphics subdirectory)
+    graphics_dir = robot_mesh_root / "graphics"
+    if not graphics_dir.exists():
+        graphics_dir = robot_mesh_root  # Fallback to robot_mesh_root itself
+    mtl_colors = _load_mtl_colors_for_mesh_dir(graphics_dir)
+
+    return {
+        "model": robot_model,
+        "gripper_template": gripper_template,
+        "ee_link": ee_link,
+        "mtl_colors": mtl_colors,
+    }
+
+
+def _load_urdf_link_colors(urdf_path: Path) -> Dict[str, np.ndarray]:
+    """Parse URDF file to extract material colors for each link.
+    
+    Returns:
+        Dictionary mapping link names to RGB colors (0-1 range)
+    """
+    import xml.etree.ElementTree as ET
+    
+    link_colors = {}
+    
+    try:
+        tree = ET.parse(str(urdf_path))
+        root = tree.getroot()
+        
+        # First, collect material definitions
+        materials = {}
+        for material in root.findall('.//material'):
+            name = material.get('name')
+            if not name:
+                continue
+            color_elem = material.find('color')
+            if color_elem is not None:
+                rgba = color_elem.get('rgba')
+                if rgba:
+                    rgba_values = [float(x) for x in rgba.split()]
+                    materials[name] = np.array(rgba_values[:3])  # RGB only
+        
+        # Now map links to their visual materials
+        for link in root.findall('.//link'):
+            link_name = link.get('name')
+            if not link_name:
+                continue
+                
+            visuals = link.findall('visual')
+            if visuals:
+                # Use first visual's material
+                material = visuals[0].find('material')
+                if material is not None:
+                    mat_name = material.get('name')
+                    color_elem = material.find('color')
+                    
+                    if color_elem is not None:
+                        # Inline color definition
+                        rgba = color_elem.get('rgba')
+                        if rgba:
+                            rgba_values = [float(x) for x in rgba.split()]
+                            link_colors[link_name] = np.array(rgba_values[:3])
+                    elif mat_name and mat_name in materials:
+                        # Reference to material definition
+                        link_colors[link_name] = materials[mat_name]
+    
+    except Exception as e:
+        print(f"[WARN] Could not parse URDF colors: {e}")
+    
+    return link_colors
+
+
+def _load_mtl_colors_for_mesh_dir(mesh_dir: Path) -> Dict[str, np.ndarray]:
+    """Load material colors from MTL files in the mesh directory.
+    
+    Args:
+        mesh_dir: Directory containing mesh and MTL files
+        
+    Returns:
+        Dictionary mapping mesh filenames (without extension) to RGB colors (0-1 range)
+    """
+    mesh_colors = {}
+    
+    try:
+        # Find all MTL files in the directory
+        for mtl_file in mesh_dir.glob("*.mtl"):
+            # Parse the MTL file
+            material_color = None
+            with open(mtl_file, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    # Look for diffuse color (Kd)
+                    if line.startswith('Kd '):
+                        parts = line.split()
+                        if len(parts) >= 4:
+                            try:
+                                r, g, b = float(parts[1]), float(parts[2]), float(parts[3])
+                                material_color = np.array([r, g, b])
+                                break
+                            except ValueError:
+                                continue
+            
+            if material_color is not None:
+                # Map this color to all mesh files with the same base name
+                base_name = mtl_file.stem  # e.g., "link0_body"
+                mesh_colors[base_name] = material_color
+                
+    except Exception as e:
+        print(f"[WARN] Could not parse MTL colors: {e}")
+    
+    return mesh_colors
 
 
 def _robot_model_to_pointcloud(
@@ -187,48 +363,232 @@ def _robot_model_to_pointcloud(
     joint_angles: np.ndarray,
     is_first_time: bool = False,
     points_per_mesh: int = 10000,
+    debug_mode: bool = False,
+    urdf_colors: Optional[Dict[str, np.ndarray]] = None,
+    mtl_colors: Optional[Dict[str, np.ndarray]] = None,
+    gripper_template: Optional[Dict[str, Any]] = None,
+    ee_link: Optional[str] = None,
+    gripper_joint_angle: Optional[float] = None,
 ) -> o3d.geometry.PointCloud:
-    """Convert a robot model at a specific joint state to a point cloud."""
+    """Convert a robot model at a specific joint state to a point cloud.
+    
+    Note: This function gets the transformed mesh vertices from the robot model,
+    which have already been transformed by robot_model.update() to the correct pose.
+    
+    Args:
+        robot_model: The robot model to convert
+        joint_angles: Joint angles for the robot configuration (excluding gripper)
+        is_first_time: Whether this is the first frame (affects mesh loading)
+        points_per_mesh: Number of points to sample per mesh
+        debug_mode: If True, use colorful debug colors per part. If False, use mesh colors.
+        urdf_colors: Dictionary mapping link names to RGB colors from URDF
+        mtl_colors: Dictionary mapping mesh base names to RGB colors from MTL files
+        gripper_joint_angle: The gripper finger joint angle (for animating open/close)
+    """
     # Update the robot model with the current joint angles
-    robot_model.update(joint_angles, first_time=is_first_time)
+    # This transforms the internal meshes to the correct pose
+    try:
+        robot_model.update(joint_angles, first_time=is_first_time)
+    except Exception as e:
+        print(f"[ERROR] robot_model.update() failed: {e}")
+        return o3d.geometry.PointCloud()
+
+    fk = None
+    joint_sequence = getattr(robot_model, "joint_sequence", [])
+    if joint_sequence:
+        if len(joint_sequence) != len(joint_angles):
+            warnings.warn(
+                f"Joint angle length ({len(joint_angles)}) does not match robot joint sequence ({len(joint_sequence)})."
+            )
+        try:
+            joint_map = {name: float(joint_angles[i]) for i, name in enumerate(joint_sequence)}
+            fk = robot_model.chain.forward_kinematics(joint_map)
+        except Exception as exc:
+            warnings.warn(f"Failed to compute forward kinematics for robot model ({exc}).")
+    
     # Combine all robot meshes into a single point cloud
     robot_pcd = o3d.geometry.PointCloud()
-    geometries = robot_model.geometries_to_add if is_first_time else robot_model.geometries_to_update
-    print("running _robot_model_to_pointcloud")
-    for mesh in geometries:
+    try:
+        geometries = robot_model.geometries_to_add if is_first_time else robot_model.geometries_to_update
+    except Exception as e:
+        print(f"[ERROR] Failed to get geometries: {e}")
+        return robot_pcd
+    
+    # Define debug colors for different robot parts (only used if debug_mode=True)
+    debug_part_colors = [
+        [0.2, 0.3, 0.8],   # Blue
+        [0.8, 0.3, 0.2],   # Red-orange
+        [0.2, 0.8, 0.3],   # Green
+        [0.8, 0.8, 0.2],   # Yellow
+        [0.8, 0.2, 0.8],   # Magenta
+        [0.2, 0.8, 0.8],   # Cyan
+        [0.9, 0.5, 0.1],   # Orange
+    ]
+    
+    for mesh_idx, mesh in enumerate(geometries):
+        # The mesh vertices are already in the correct world position
+        # thanks to robot_model.update() transforming them
         vertices = np.asarray(mesh.vertices)
         triangles = np.asarray(mesh.triangles)
         if vertices.size == 0 or triangles.size == 0:
             continue
 
-        # Create an Open3D mesh from the current state
+        # Create an Open3D mesh from the current transformed state
         o3d_mesh = o3d.geometry.TriangleMesh()
         o3d_mesh.vertices = o3d.utility.Vector3dVector(vertices)
         o3d_mesh.triangles = o3d.utility.Vector3iVector(triangles)
         
-        # Preserve vertex colors if available from the original mesh
+        # IMPORTANT: Copy vertex colors from original mesh if they exist
         if mesh.has_vertex_colors():
-            colors = np.asarray(mesh.vertex_colors)
-            if colors.size:
-                o3d_mesh.vertex_colors = o3d.utility.Vector3dVector(colors)
+            o3d_mesh.vertex_colors = mesh.vertex_colors
         
-        # Sample points from the mesh surface
+        # Sample points from the mesh surface (already in correct position)
         mesh_pcd = o3d_mesh.sample_points_uniformly(number_of_points=points_per_mesh)
-        warnings.warn("Debug mode: Will paint all robot points red")
-        num_points = len(mesh_pcd.points)
-        default_color = np.tile([1.0, 0.0, 0.0], (num_points, 1))  # Red color
-        mesh_pcd.colors = o3d.utility.Vector3dVector(default_color)
-        warnings.warn("Remove this after debugging")
-
-        # Ensure sampled points have colors
-        if not mesh_pcd.has_colors():
-            warnings.warn("The robot mesh does not have color information; defaulting to gray color.")
-            # Default to a light gray/silver color for robot parts without color information
+        
+        # Assign colors based on mode
+        if debug_mode:
+            # Debug mode: Use bright, distinct colors for each part
             num_points = len(mesh_pcd.points)
-            default_color = np.tile([0.7, 0.7, 0.7], (num_points, 1))  # Light gray
-            mesh_pcd.colors = o3d.utility.Vector3dVector(default_color)
+            part_color = debug_part_colors[mesh_idx % len(debug_part_colors)]
+            mesh_pcd.colors = o3d.utility.Vector3dVector(np.tile(part_color, (num_points, 1)))
+        else:
+            # Normal mode: Try MTL colors first, then URDF colors, then mesh colors, then default gray
+            color_assigned = False
+            
+            # First try: MTL material colors (most accurate colors from the actual mesh files)
+            if mtl_colors:
+                mesh_basename = robot_model.get_filename_for_mesh(mesh)
+                if mesh_basename in mtl_colors:
+                    num_points = len(mesh_pcd.points)
+                    mtl_color = mtl_colors[mesh_basename]
+                    mesh_pcd.colors = o3d.utility.Vector3dVector(np.tile(mtl_color, (num_points, 1)))
+                    color_assigned = True
+            
+            # Second try: URDF material colors
+            if not color_assigned and urdf_colors:
+                link_name = robot_model.get_link_for_mesh(mesh)
+                if link_name in urdf_colors:
+                    num_points = len(mesh_pcd.points)
+                    urdf_color = urdf_colors[link_name]
+                    mesh_pcd.colors = o3d.utility.Vector3dVector(np.tile(urdf_color, (num_points, 1)))
+                    color_assigned = True
+            
+            # Third try: Original mesh vertex colors
+            if not color_assigned and mesh.has_vertex_colors():
+                colors = np.asarray(mesh.vertex_colors)
+                if colors.size > 0:
+                    # Transfer colors from mesh to sampled points using nearest neighbor
+                    kdtree = o3d.geometry.KDTreeFlann(o3d_mesh)
+                    sampled_colors = np.zeros((len(mesh_pcd.points), 3))
+                    for i, point in enumerate(np.asarray(mesh_pcd.points)):
+                        _, idx, _ = kdtree.search_knn_vector_3d(point, 1)
+                        sampled_colors[i] = colors[idx[0]]
+                    mesh_pcd.colors = o3d.utility.Vector3dVector(sampled_colors)
+                    color_assigned = True
+            
+            # Fallback: Use a neutral gray/silver color
+            if not color_assigned:
+                num_points = len(mesh_pcd.points)
+                default_color = [0.7, 0.7, 0.7]  # Light gray
+                mesh_pcd.colors = o3d.utility.Vector3dVector(np.tile(default_color, (num_points, 1)))
         
         robot_pcd += mesh_pcd
+
+    # Add gripper if template is available
+    if gripper_template and fk is not None and ee_link and ee_link in fk:
+        if debug_mode:
+            print(f"[DEBUG] Adding gripper: ee_link={ee_link}, fk available={ee_link in fk}")
+        T_world_ee = fk[ee_link].matrix()
+        mount_pose = gripper_template.get("mount_pose")
+        if mount_pose is None:
+            mount_pose = np.eye(4, dtype=np.float32)
+        T_world_gripper = T_world_ee @ mount_pose
+
+        points = gripper_template.get("points")
+        if points is not None and points.size:
+            if debug_mode:
+                print(f"[DEBUG] Gripper has {len(points)} points, joint_angle={gripper_joint_angle}")
+            
+            # Animate gripper open/close based on joint angle
+            # gripper_joint_angle now contains gripper width in mm (0-85mm for Robotiq 2F-85)
+            # Natural closing: scale the finger Y coordinates proportionally to the commanded gap
+            gripper_points = points.copy()
+            if gripper_joint_angle is not None and gripper_joint_angle > 0.1:
+                # gripper_joint_angle is gripper width in mm (distance between finger tips)
+                # Template baseline: fingers at ~96mm gap (natural mesh position)
+                # Robotiq 2F-85: 0mm = closed (touching), 85mm = fully open
+                
+                # The gripper command is the GAP between fingers
+                # We scale the Y coordinates to match this gap while preserving finger shape
+                
+                y_coords = gripper_points[:, 1]
+                left_finger_mask = y_coords < -0.005  # Left finger
+                right_finger_mask = y_coords > 0.005   # Right finger
+                
+                # Calculate template baseline gap (mean Y position of each finger)
+                template_left_center = y_coords[left_finger_mask].mean()
+                template_right_center = y_coords[right_finger_mask].mean()
+                template_gap_m = template_right_center - template_left_center
+                
+                # Target gap from command (in meters)
+                target_gap_m = gripper_joint_angle / 1000.0  # mm to meters
+                
+                # Scale factor: how much to scale the Y coordinates
+                # At 0mm: scale = 0 (fingers at Y=0, fully closed)
+                # At template_gap: scale = 1 (fingers at template position)
+                # At 85mm: scale = 85/96 ≈ 0.885 (fingers scaled to 85mm gap)
+                scale_factor = target_gap_m / template_gap_m
+                
+                # Scale Y coordinates toward center (Y=0) based on scale factor
+                # This preserves the finger shape while closing naturally
+                gripper_points[left_finger_mask, 1] *= scale_factor
+                gripper_points[right_finger_mask, 1] *= scale_factor
+                
+                if debug_mode and is_first_time:
+                    print(f"[DEBUG] Gripper command: {gripper_joint_angle:.2f}mm, scale factor: {scale_factor:.3f}")
+            elif gripper_joint_angle is not None and gripper_joint_angle <= 0.1:
+                # If gripper width is essentially zero, show it slightly open for visibility
+                # Use a default 25mm width (about 30% of max 85mm)
+                default_width_mm = 25.0
+                finger_offset = (default_width_mm / 1000.0) / 2.0
+                
+                y_coords = gripper_points[:, 1]
+                left_finger_mask = y_coords < -0.005
+                right_finger_mask = y_coords > 0.005
+                
+                gripper_points[left_finger_mask, 1] -= finger_offset
+                gripper_points[right_finger_mask, 1] += finger_offset
+                
+                if debug_mode and is_first_time:
+                    print(f"[DEBUG] No gripper data (width={gripper_joint_angle:.2f}mm), using default {default_width_mm}mm width")
+            
+            R = T_world_gripper[:3, :3]
+            t = T_world_gripper[:3, 3]
+            pts_world = (gripper_points @ R.T) + t
+            gripper_pcd = o3d.geometry.PointCloud()
+            gripper_pcd.points = o3d.utility.Vector3dVector(pts_world)
+            template_colors = gripper_template.get("colors")
+            if template_colors is not None and not debug_mode:
+                gripper_pcd.colors = o3d.utility.Vector3dVector(template_colors)
+            else:
+                default_color = [1.0, 0.0, 0.0] if debug_mode else [0.7, 0.7, 0.7]
+                gripper_pcd.colors = o3d.utility.Vector3dVector(
+                    np.tile(default_color, (pts_world.shape[0], 1))
+                )
+            robot_pcd += gripper_pcd
+        elif debug_mode:
+            print(f"[DEBUG] Gripper template has no points or empty points")
+    elif debug_mode:
+        missing_parts = []
+        if not gripper_template:
+            missing_parts.append("gripper_template")
+        if fk is None:
+            missing_parts.append("fk")
+        if not ee_link:
+            missing_parts.append("ee_link")
+        elif ee_link not in fk:
+            missing_parts.append(f"ee_link '{ee_link}' not in fk")
+        print(f"[DEBUG] Gripper not added: missing {', '.join(missing_parts)}")
 
     return robot_pcd
 
@@ -612,19 +972,25 @@ def reconstruct_mesh_from_pointcloud(pcd: o3d.geometry.PointCloud, depth: int) -
 
 
 def reproject_to_sparse_depth_cv2(
-    pcd: o3d.geometry.PointCloud, high_res_rgb: np.ndarray, K: np.ndarray, E: np.ndarray, color_threshold: float
+    pcd: o3d.geometry.PointCloud, 
+    high_res_rgb: np.ndarray, 
+    K: np.ndarray, 
+    E: np.ndarray, 
+    color_threshold: float,
 ) -> np.ndarray:
     """
     Projects an Open3D point cloud to a sparse depth map using OpenCV.
 
-    Includes a color alignment check to filter out misaligned points.
+    Includes color alignment check:
+    - If color diff > color_threshold: remove point
+    - Otherwise: keep point with original color
 
     Args:
         pcd: The Open3D PointCloud in world coordinates.
         high_res_rgb: The target high-resolution color image.
         K: The 3x3 intrinsic matrix of the target camera.
         E: The 3x4 extrinsic matrix of the target camera (world-to-camera).
-        color_threshold: The maximum allowed color difference (0-255) for a point to be kept.
+        color_threshold: Maximum color difference to keep a point.
 
     Returns:
         A sparse depth map of the same resolution as the high_res_rgb.
@@ -677,10 +1043,12 @@ def reproject_to_sparse_depth_cv2(
     # 3. Color Alignment Check
     target_colors = high_res_rgb[v_idx, u_idx]
     color_diff = np.mean(np.abs(orig_colors_final.astype(float) - target_colors.astype(float)), axis=1)
-    color_match_mask = color_diff < color_threshold
     
-    u_final, v_final = u_idx[color_match_mask], v_idx[color_match_mask]
-    depth_final = depth_final[color_match_mask]
+    # Filter out points with color difference above threshold
+    keep_mask = color_diff < color_threshold
+    u_final = u_idx[keep_mask]
+    v_final = v_idx[keep_mask]
+    depth_final = depth_final[keep_mask]
     
     # 4. Z-Buffering: Handle occlusions by keeping only the closest point for each pixel
     # Sort points by depth in reverse order, so closer points are processed last and overwrite farther ones.
@@ -709,6 +1077,11 @@ def process_frames(
     C, T = len(final_cam_ids), len(timeline)
     is_l515_flags = [cid.startswith('f') for cid in final_cam_ids]
 
+    # Collect robot points if robot model will be enabled
+    # We need this regardless of debug mode so we can log it to Rerun
+    robot_debug_points: Optional[List[np.ndarray]] = [] if args.add_robot else None
+    robot_debug_colors: Optional[List[np.ndarray]] = [] if robot_debug_points is not None else None
+
     color_lookup_low = [list_frames(cdir / 'color') for cdir in cam_dirs_low]
     depth_lookup_low = [list_frames(cdir / 'depth') for cdir in cam_dirs_low]
 
@@ -719,16 +1092,38 @@ def process_frames(
 
     # Create robot model if requested
     robot_model = None
+    robot_gripper_template = None
+    robot_ee_link = None
+    robot_urdf_colors = None
+    robot_mtl_colors = None
     if args.add_robot:
         configs_path = args.config.resolve()
         rh20t_root = configs_path.parent.parent if configs_path.parent.name == "configs" else configs_path.parent
-        robot_model = _create_robot_model(
+        robot_bundle = _create_robot_model(
             sample_path=args.task_folder,
             configs_path=configs_path,
             rh20t_root=rh20t_root,
         )
+        if robot_bundle:
+            robot_model = robot_bundle.get("model")
+            robot_gripper_template = robot_bundle.get("gripper_template")
+            robot_ee_link = robot_bundle.get("ee_link")
+            robot_mtl_colors = robot_bundle.get("mtl_colors")
         if robot_model:
             print("[INFO] Robot model loaded successfully.")
+            # Load URDF colors for the robot (if any exist in URDF)
+            try:
+                confs = load_conf(str(configs_path))
+                conf = get_conf_from_dir_name(str(args.task_folder), confs)
+                robot_urdf_path = (rh20t_root / conf.robot_urdf).resolve()
+                robot_urdf_colors = _load_urdf_link_colors(robot_urdf_path)
+                if robot_urdf_colors:
+                    print(f"[INFO] Loaded colors for {len(robot_urdf_colors)} robot links from URDF")
+            except Exception as e:
+                print(f"[WARN] Could not load URDF colors: {e}")
+            # Report MTL colors if loaded
+            if robot_mtl_colors and len(robot_mtl_colors) > 0:
+                print(f"[INFO] Loaded MTL colors for {len(robot_mtl_colors)} robot parts")
 
     def _resolve_frame(frame_map: Dict[int, Path], ts: int, cam_name: str, label: str) -> Path:
         path = frame_map.get(ts)
@@ -802,6 +1197,8 @@ def process_frames(
     extrs_out = np.zeros((C, T, 3, 4), dtype=np.float32)
 
     for ti in tqdm(range(T), desc="Processing Frames"):
+        debug_pts = None
+        debug_cols = None
         # Step 1: Create a combined point cloud for the current frame from all low-res views
         combined_pcd = o3d.geometry.PointCloud()
         if args.high_res_folder:
@@ -829,22 +1226,102 @@ def process_frames(
                     t_low = int(per_cam_low_ts[0][ti])
                     # Get joint angles at this timestamp
                     joint_angles = scene_low.get_joint_angles_aligned(t_low)
-                    # Create robot point cloud at this state
+                    
+                    # Ensure we have the correct number of joints
+                    # The robot model expects len(conf.robot_joint_sequence) joints
+                    expected_joints = len(scene_low.configuration.robot_joint_sequence)
+                    gripper_joint_angle = None
+                    
+                    if len(joint_angles) < expected_joints:
+                        # Pad with zeros (neutral gripper position) if missing joints
+                        padding = np.zeros(expected_joints - len(joint_angles))
+                        joint_angles_padded = np.concatenate([joint_angles, padding])
+                        if ti == 0:
+                            print(f"[INFO] Padded joint angles from {len(joint_angles)} to {len(joint_angles_padded)}")
+                        # Don't use padded zero - interpolate from gripper dictionary instead
+                        gripper_joint_angle = 0.0  # Will be replaced below
+                        # Use all joints for robot model (including padded gripper)
+                        robot_joint_angles = joint_angles_padded
+                    elif len(joint_angles) > expected_joints:
+                        # Truncate if we have too many joints
+                        robot_joint_angles = joint_angles[:expected_joints]
+                        gripper_joint_angle = robot_joint_angles[-1]
+                        if ti == 0:
+                            print(f"[WARN] Truncated joint angles from {len(joint_angles)} to {expected_joints}")
+                    else:
+                        robot_joint_angles = joint_angles
+                        gripper_joint_angle = joint_angles[-1]
+                    
+                    # Get actual gripper width from scene.gripper dictionary
+                    # The gripper dictionary has structure: scene.gripper[camera_id][timestamp] = {'gripper_command': [width, ...]}
+                    # We need to pick one camera's gripper data
+                    gripper_data_source = None
+                    if hasattr(scene_low, 'gripper') and len(scene_low.gripper) > 0:
+                        # Find first camera with gripper data
+                        for cam_id in sorted(scene_low.gripper.keys()):
+                            if len(scene_low.gripper[cam_id]) > 0:
+                                gripper_data_source = scene_low.gripper[cam_id]
+                                if ti == 0:
+                                    print(f"[INFO] Using gripper data from camera {cam_id}")
+                                break
+                    
+                    if gripper_data_source is not None:
+                        gripper_timestamps = sorted(gripper_data_source.keys())
+                        # Find closest gripper timestamp to current frame
+                        closest_idx = min(range(len(gripper_timestamps)), 
+                                        key=lambda i: abs(gripper_timestamps[i] - t_low))
+                        closest_ts = gripper_timestamps[closest_idx]
+                        
+                        # Get gripper command (first element is gripper width in mm)
+                        gripper_width_mm = gripper_data_source[closest_ts]['gripper_command'][0]
+                        
+                        # Robotiq 2F-85 gripper: 0mm (closed) to 85mm (fully open)
+                        # Pass width directly to _robot_model_to_pointcloud for finger animation
+                        gripper_joint_angle = gripper_width_mm  # Width in mm
+                        
+                        if ti == 0:
+                            print(f"[INFO] Gripper width at frame 0: {gripper_width_mm:.2f} mm")
+                    
                     robot_pcd = _robot_model_to_pointcloud(
-                        robot_model, 
-                        joint_angles, 
+                        robot_model,
+                        robot_joint_angles,
                         is_first_time=(ti == 0),
-                        points_per_mesh=10000
+                        points_per_mesh=10000,
+                        debug_mode=getattr(args, "debug_mode", False),
+                        urdf_colors=robot_urdf_colors,
+                        mtl_colors=robot_mtl_colors,
+                        gripper_template=robot_gripper_template,
+                        ee_link=robot_ee_link,
+                        gripper_joint_angle=gripper_joint_angle,
                     )
+                    
+                    # NOTE: Removed align_mat_base transformation
+                    # The robot joint angles from get_joint_angles_aligned() are already in the aligned frame
+                    # Applying align_mat_base was causing the robot to face the wrong direction
+                    # if robot_pcd.has_points():
+                    #     align_mat = scene_low.configuration.align_mat_base
+                    #     robot_pcd.transform(align_mat)
+
                     if robot_pcd.has_points():
+                        if robot_debug_points is not None:
+                            pts_np = np.asarray(robot_pcd.points, dtype=np.float32)
+                            if robot_pcd.has_colors():
+                                cols_np = (np.asarray(robot_pcd.colors) * 255).astype(np.uint8)
+                            else:
+                                cols_np = np.full((pts_np.shape[0], 3), [180, 180, 180], dtype=np.uint8)
+                            debug_pts = pts_np
+                            debug_cols = cols_np
                         combined_pcd += robot_pcd
                         if ti == 0:
                             print(f"[INFO] Added robot with {len(robot_pcd.points)} points for frame {ti}")
+                        elif ti % 5 == 0:
+                            print(f"[INFO] Frame {ti}: Robot has {len(robot_pcd.points)} points")
                 except Exception as exc:
                     if ti == 0:
                         print(f"[WARN] Failed to add robot to point cloud: {exc}")
-            else:
-                Warning("Robot model not available; skipping robot point cloud addition.")
+            if robot_debug_points is not None and debug_pts is None:
+                debug_pts = np.empty((0, 3), dtype=np.float32)
+                debug_cols = np.empty((0, 3), dtype=np.uint8)
 
             if combined_pcd.has_points():
                 if args.clean_pointcloud:
@@ -919,9 +1396,28 @@ def process_frames(
                 depths_out[ci, ti] = read_depth(_resolve_frame(depth_lookup_low[ci], t_low, cid, "low-res depth"), is_l515_flags[ci])
                 intrs_out[ci, ti] = scaled_low_intrinsics[ci]
 
-    return rgbs_out, depths_out, intrs_out, extrs_out
+        if robot_debug_points is not None:
+            if debug_pts is None:
+                debug_pts = np.empty((0, 3), dtype=np.float32)
+                debug_cols = np.empty((0, 3), dtype=np.uint8)
+            robot_debug_points.append(debug_pts)
+            if robot_debug_colors is not None:
+                robot_debug_colors.append(debug_cols)
 
-def save_and_visualize(args, rgbs, depths, intrs, extrs, final_cam_ids, timestamps, per_camera_timestamps):
+    return rgbs_out, depths_out, intrs_out, extrs_out, robot_debug_points, robot_debug_colors
+
+def save_and_visualize(
+    args,
+    rgbs,
+    depths,
+    intrs,
+    extrs,
+    final_cam_ids,
+    timestamps,
+    per_camera_timestamps,
+    robot_debug_points=None,
+    robot_debug_colors=None,
+):
     """Saves the processed data to an NPZ file and generates a Rerun visualization."""
     # Convert to channels-first format for NPZ
     rgbs_final = np.moveaxis(rgbs, -1, 2)
@@ -964,6 +1460,27 @@ def save_and_visualize(args, rgbs, depths, intrs, extrs, final_cam_ids, timestam
         configs_path = args.config.resolve()
         rh20t_root = configs_path.parent.parent if configs_path.parent.name == "configs" else configs_path.parent
 
+        # Log robot points separately (they survive better than going through reprojection)
+        if robot_debug_points is not None and len(robot_debug_points) > 0:
+            fps = 30.0
+            print(f"[INFO] Logging {len(robot_debug_points)} robot point clouds to Rerun...")
+            for idx, pts in enumerate(robot_debug_points):
+                if pts is None or pts.size == 0:
+                    continue
+                cols = robot_debug_colors[idx] if robot_debug_colors and idx < len(robot_debug_colors) else None
+                rr.set_time_seconds("frame", idx / fps)
+                # Log to top-level robot entity for easy toggling (NOT under sequence-0)
+                rr.log(
+                    f"robot",
+                    rr.Points3D(pts.astype(np.float32, copy=False), colors=cols),
+                )
+                # Also log to debug entity if in debug mode
+                if getattr(args, "debug_mode", False):
+                    rr.log(
+                        f"robot_debug",
+                        rr.Points3D(pts.astype(np.float32, copy=False), colors=cols),
+                    )
+
 
 def main():
     """Parses arguments and orchestrates the entire data processing workflow."""
@@ -983,7 +1500,7 @@ def main():
         default=True,
         help="Enable color-based filtering of reprojected points (disable with --no-color-alignment-check)."
     )
-    parser.add_argument("--color-threshold", type=float, default=5.0, help="Max average color difference (0-255) for a point to be aligned.")
+    parser.add_argument("--color-threshold", type=float, default=5.0, help="Max average color difference (0-255) for a point to be removed.")
     parser.add_argument(
         "--sharpen-edges-with-mesh",
         action=argparse.BooleanOptionalAction,
@@ -1020,6 +1537,12 @@ def main():
     parser.add_argument("--sync-max-drift", type=float, default=0.05, help="Maximum tolerated fractional FPS shortfall before warning.")
     parser.add_argument("--sync-tolerance-ms", type=float, default=50.0, help="Maximum timestamp deviation (ms) when matching frames; defaults to half frame period.")
     parser.add_argument("--add-robot", action="store_true", help="Include robot model in Rerun visualization.")
+    parser.add_argument(
+        "--debug-mode",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable additional debug outputs such as red robot point overlays in Rerun.",
+    )
     args = parser.parse_args()
 
     if not args.config.exists():
@@ -1122,7 +1645,7 @@ def main():
     per_cam_high_sel = [arr[selected_idx] for arr in per_cam_high] if per_cam_high is not None else None
 
     # --- Step 2: Process Frames ---
-    rgbs, depths, intrs, extrs = process_frames(
+    rgbs, depths, intrs, extrs, robot_debug_points, robot_debug_colors = process_frames(
         args,
         scene_low,
         scene_high,
@@ -1137,7 +1660,18 @@ def main():
     # --- Step 3: Save and Visualize ---
     rr.init("RH20T_Reprojection_Frameworks", spawn=False)
     per_cam_for_npz = per_cam_high_sel if per_cam_high_sel is not None else per_cam_low_sel
-    save_and_visualize(args, rgbs, depths, intrs, extrs, final_cam_ids, timestamps, per_cam_for_npz)
+    save_and_visualize(
+        args,
+        rgbs,
+        depths,
+        intrs,
+        extrs,
+        final_cam_ids,
+        timestamps,
+        per_cam_for_npz,
+        robot_debug_points,
+        robot_debug_colors,
+    )
 
     if not args.no_pointcloud:
         rrd_path = args.out_dir / f"{args.task_folder.name}_reprojected.rrd"
