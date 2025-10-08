@@ -38,6 +38,18 @@ echo "Update safetensors"
 pip install --upgrade safetensors
 #clone if not exist
 pip install -r rh20t_api/requirements.txt
+
+# Install SAM2 in editable mode (clone if missing)
+SAM2_DIR="/workspace/sam2"
+if [ ! -d "$SAM2_DIR" ]; then
+    echo "Cloning SAM2 repository..."
+    git clone https://github.com/facebookresearch/sam2.git "$SAM2_DIR"
+else
+    echo "SAM2 repository already exists, skipping clone."
+fi
+
+echo "Installing SAM2..."
+pip install -e "$SAM2_DIR"
 # Configure git
 echo "Configuring git..."
 git config --global --add safe.directory /workspace
