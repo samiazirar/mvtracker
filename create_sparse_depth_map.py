@@ -205,10 +205,10 @@ def _compute_gripper_bbox(
     contact_height_m: Optional[float] = None,
     contact_length_m: Optional[float] = None,
     tcp_transform: Optional[np.ndarray] = None,
-) -> Tuple[Optional[Dict[str, np.ndarray]], Optional[Dict[str, np.ndarray]]]:
-    """Estimate both a contact bbox and a full gripper bbox aligned with the jaw frame."""
+) -> Tuple[Optional[Dict[str, np.ndarray]], Optional[Dict[str, np.ndarray]], Optional[Dict[str, np.ndarray]]]:
+    """Estimate contact bbox, full gripper bbox, and fingertip bbox aligned with the jaw frame."""
     if robot_conf is None:
-        return None, None
+        return None, None, None
 
     # Grab the most recent FK results so we can derive pad transforms.
     fk_map = getattr(robot_model, "latest_transforms", None) or {}
@@ -227,7 +227,7 @@ def _compute_gripper_bbox(
     if tf_matrix is None and tcp_transform is not None:
         tf_matrix = tcp_transform
     if tf_matrix is None:
-        return None, None
+        return None, None, None
 
     tf_matrix = np.asarray(tf_matrix, dtype=np.float32)
     rotation = tf_matrix[:3, :3]
@@ -283,41 +283,58 @@ def _compute_gripper_bbox(
     left_pos = left_tf[:3, 3] if left_tf is not None else None
     right_pos = right_tf[:3, 3] if right_tf is not None else None
 
-    width_axis = rotation[:, 0]
-    pad_midpoint = translation
-    measured_width = None
-    pad_forward_hint: Optional[np.ndarray] = None
-    pad_up_hint: Optional[np.ndarray] = None
-
-    # If both pad centers are available, use them to seed the coordinate frame.
+    # If both pads available, derive a stable coordinate frame directly from their transforms
     if left_pos is not None and right_pos is not None:
-        pad_midpoint = (left_pos + right_pos) * 0.5
+        # Width axis: from right to left (jaw separation direction)
         width_vec = left_pos - right_pos
         width_norm = np.linalg.norm(width_vec)
-        if width_norm > 1e-6:
-            width_axis = width_vec / width_norm
-            measured_width = float(width_norm)
-        pad_forward_hint = ((left_tf[:3, 2] + right_tf[:3, 2]) * 0.5).astype(np.float32)
-        pad_up_hint = (-(left_tf[:3, 0] + right_tf[:3, 0]) * 0.5).astype(np.float32)
+        if width_norm < 1e-6:
+            return None, None, None
+        width_axis = (width_vec / width_norm).astype(np.float32)
+        measured_width = float(width_norm)
+        
+        # Pad midpoint is the center point between the two finger pads
+        pad_midpoint = ((left_pos + right_pos) * 0.5).astype(np.float32)
+        
+        # Approach axis: average Z-axis (forward direction) from both finger pads
+        # This is stable and points toward the object being grasped
+        approach_axis = ((left_tf[:3, 2] + right_tf[:3, 2]) * 0.5).astype(np.float32)
+        approach_norm = np.linalg.norm(approach_axis)
+        if approach_norm < 1e-6:
+            return None, None, None
+        approach_axis = (approach_axis / approach_norm).astype(np.float32)
+        
+        # Height axis: perpendicular to both width and approach (completes right-handed frame)
+        # This should point "up" relative to gripper (from tips toward palm)
+        height_axis = np.cross(approach_axis, width_axis).astype(np.float32)
+        height_norm = np.linalg.norm(height_axis)
+        if height_norm < 1e-6:
+            return None, None, None
+        height_axis = (height_axis / height_norm).astype(np.float32)
+        
+        # Re-orthogonalize to ensure perfect right-handed frame
+        approach_axis = np.cross(width_axis, height_axis).astype(np.float32)
+        approach_axis = (approach_axis / np.linalg.norm(approach_axis)).astype(np.float32)
+        
     elif left_tf is not None:
-        pad_midpoint = left_tf[:3, 3]
-        pad_forward_hint = left_tf[:3, 2].astype(np.float32)
-        pad_up_hint = (-left_tf[:3, 0]).astype(np.float32)
+        # Fallback: use only left pad
+        pad_midpoint = left_tf[:3, 3].astype(np.float32)
+        width_axis = left_tf[:3, 0].astype(np.float32)  # X-axis of pad frame
+        approach_axis = left_tf[:3, 2].astype(np.float32)  # Z-axis of pad frame
+        height_axis = left_tf[:3, 1].astype(np.float32)  # Y-axis of pad frame
+        measured_width = None
     elif right_tf is not None:
-        pad_midpoint = right_tf[:3, 3]
-        pad_forward_hint = right_tf[:3, 2].astype(np.float32)
-        pad_up_hint = (-right_tf[:3, 0]).astype(np.float32)
+        # Fallback: use only right pad
+        pad_midpoint = right_tf[:3, 3].astype(np.float32)
+        width_axis = -right_tf[:3, 0].astype(np.float32)  # Flip X to match left orientation
+        approach_axis = right_tf[:3, 2].astype(np.float32)  # Z-axis of pad frame
+        height_axis = right_tf[:3, 1].astype(np.float32)  # Y-axis of pad frame
+        measured_width = None
+    else:
+        # No pad transforms available
+        return None, None, None
 
-    base_width_hint = rotation[:, 0]
-    if np.dot(width_axis, base_width_hint) < 0.0:
-        width_axis = -width_axis
-    width_axis_norm = np.linalg.norm(width_axis)
-    if width_axis_norm < 1e-6:
-        width_axis = base_width_hint
-        width_axis_norm = np.linalg.norm(width_axis)
-    width_axis = width_axis / max(width_axis_norm, 1e-6)
-
-    # Mix measured width with command width and fall back to conservative defaults.
+    # Calculate contact width from measured or commanded gripper width
     width_candidates = []
     if measured_width is not None:
         width_candidates.append(measured_width)
@@ -329,51 +346,7 @@ def _compute_gripper_bbox(
         width_m = dims["default_width"] * CONTACT_WIDTH_SCALE_FALLBACK
     width_m = max(width_m - 2.0 * clearance, MIN_CONTACT_WIDTH)
 
-    approach_vec = pad_midpoint - translation
-    if np.linalg.norm(approach_vec) < 1e-6:
-        approach_vec = rotation[:, 2]
-    approach_axis = approach_vec - width_axis * np.dot(width_axis, approach_vec)
-    if np.linalg.norm(approach_axis) < 1e-6 and pad_forward_hint is not None:
-        approach_axis = pad_forward_hint - width_axis * np.dot(width_axis, pad_forward_hint)
-    if np.linalg.norm(approach_axis) < 1e-6:
-        approach_axis = rotation[:, 2] - width_axis * np.dot(width_axis, rotation[:, 2])
-    approach_norm = np.linalg.norm(approach_axis)
-    if approach_norm < 1e-6:
-        approach_axis = np.array([0.0, 1.0, 0.0], dtype=np.float32)
-        approach_norm = np.linalg.norm(approach_axis)
-    approach_axis = approach_axis / max(approach_norm, 1e-6)
-
-    if pad_forward_hint is not None and np.linalg.norm(pad_forward_hint) > 1e-6:
-        pad_forward_hint = pad_forward_hint / np.linalg.norm(pad_forward_hint)
-        if np.dot(approach_axis, pad_forward_hint) < 0.0:
-            approach_axis = -approach_axis
-    elif np.dot(approach_axis, rotation[:, 2]) < 0.0:
-        approach_axis = -approach_axis
-
-    # Derive the remaining axes to form a right-handed basis for the bbox.
-    height_axis = np.cross(approach_axis, width_axis)
-    height_norm = np.linalg.norm(height_axis)
-    if height_norm < 1e-6:
-        fallback = rotation[:, 1] if rotation.shape == (3, 3) else np.array([0.0, 1.0, 0.0], dtype=np.float32)
-        height_axis = fallback - width_axis * np.dot(width_axis, fallback)
-        height_norm = np.linalg.norm(height_axis)
-    height_axis = height_axis / max(height_norm, 1e-6)
-
-    approach_axis = np.cross(width_axis, height_axis)
-    approach_axis = approach_axis / max(np.linalg.norm(approach_axis), 1e-6)
-    height_axis = np.cross(approach_axis, width_axis)
-    height_axis = height_axis / max(np.linalg.norm(height_axis), 1e-6)
-
-    if pad_up_hint is not None and np.linalg.norm(pad_up_hint) > 1e-6:
-        pad_up_hint = pad_up_hint / np.linalg.norm(pad_up_hint)
-        if np.dot(height_axis, pad_up_hint) < 0.0:
-            height_axis = -height_axis
-            approach_axis = np.cross(width_axis, height_axis)
-            approach_axis = approach_axis / max(np.linalg.norm(approach_axis), 1e-6)
-            height_axis = np.cross(approach_axis, width_axis)
-    height_axis = height_axis / max(np.linalg.norm(height_axis), 1e-6)
-
-    # Assemble the oriented box with half-extents derived above.
+    # Assemble the oriented box with half-extents
     basis = np.column_stack((width_axis, height_axis, approach_axis)).astype(np.float32)
     contact_half_sizes = np.array(
         [width_m / 2.0, height_m / 2.0, base_half_length],
@@ -388,12 +361,25 @@ def _compute_gripper_bbox(
         dtype=np.float32,
     )
 
-    origin = pad_midpoint if pad_midpoint is not None else translation
-    forward_offset_contact = max(contact_half_sizes[2] - clearance * 0.25, contact_half_sizes[2] * 0.5)
-    contact_center = origin + approach_axis * forward_offset_contact - height_axis * clearance
-    full_center = contact_center + approach_axis * (full_half_sizes[2] - contact_half_sizes[2]) + height_axis * (
-        full_half_sizes[1] - contact_half_sizes[1]
-    )
+    # Position the contact bbox:
+    # - Back face at pad midpoint (fingertips)
+    # - Box extends forward from the gripper tips along the approach direction
+    contact_center = (pad_midpoint + approach_axis * contact_half_sizes[2]).astype(np.float32)
+    
+    # Full box shares the same front face position
+    full_center = (pad_midpoint + approach_axis * full_half_sizes[2]).astype(np.float32)
+
+    # Create a third bbox (blue) positioned at the TOP of the body bbox (opposite side from orange)
+    # Same size as contact bbox (orange), but positioned inside the red body bbox
+    # so its TOP face aligns with the red bbox's TOP face (toward the palm/wrist)
+    fingertip_half_sizes = contact_half_sizes.copy()  # Same size as orange contact bbox
+    
+    # Position: top face aligned with body bbox top face (opposite direction from orange)
+    # Body bbox top is at: full_center + approach_axis * full_half_sizes[2]
+    # Blue bbox top should be at the same position
+    # So: blue_center + approach_axis * fingertip_half_sizes[2] = full_center + approach_axis * full_half_sizes[2]
+    # Therefore: blue_center = full_center + approach_axis * (full_half_sizes[2] - fingertip_half_sizes[2])
+    fingertip_center = (full_center + approach_axis * (full_half_sizes[2] - fingertip_half_sizes[2])).astype(np.float32)
 
     # Provide both tight contact box and larger safety box consumers can choose between.
     quat = _rotation_matrix_to_xyzw(basis)
@@ -409,7 +395,13 @@ def _compute_gripper_bbox(
         "quat_xyzw": quat,
         "basis": basis,
     }
-    return contact_box, full_box
+    fingertip_box = {
+        "center": fingertip_center.astype(np.float32),
+        "half_sizes": fingertip_half_sizes.astype(np.float32),
+        "quat_xyzw": quat,
+        "basis": basis,
+    }
+    return contact_box, full_box, fingertip_box
 
 
 def _compute_gripper_body_bbox(
@@ -438,19 +430,23 @@ def _compute_gripper_body_bbox(
     contact_half_sizes = ref_bbox["half_sizes"]
     height_m = float(contact_half_sizes[1] * 2.0)
     half_sizes = np.array([width_m / 2.0, height_m / 2.0, length_m / 2.0], dtype=np.float32)
-    # Share the same basis and center logic: offset by half length along approach axis
+    
+    # Share the same basis as contact bbox
     basis = ref_bbox.get("basis")
     if basis is None:
         return None
-    length_axis = basis[:, 2]
-    # For body, anchor center at the same origin offset along length
-    # Reconstruct translation by subtracting the previous forward offset from contact center
+    
+    # Position body box to share the same front face as contact box
+    # Get the contact box's front face position (pad_midpoint)
     contact_center = ref_bbox["center"]
-    contact_half_len = contact_half_sizes[2]
-    translation = contact_center - length_axis * contact_half_len
-    # Shift the body bbox center to align bottom with contact surface
-    height_axis = basis[:, 1]
-    center = translation + length_axis * half_sizes[2] + height_axis * (contact_half_sizes[1] - half_sizes[1])
+    approach_axis = basis[:, 2]
+    
+    # The contact box front face is at: contact_center - approach_axis * contact_half_sizes[2]
+    # The body box front face should be at the same position
+    # So: body_center = front_face + approach_axis * body_half_sizes[2]
+    front_face = contact_center - approach_axis * contact_half_sizes[2]
+    center = (front_face + approach_axis * half_sizes[2]).astype(np.float32)
+    
     quat = _rotation_matrix_to_xyzw(basis)
     return {
         "center": center.astype(np.float32),
@@ -1458,7 +1454,10 @@ def process_frames(
     robot_debug_colors: Optional[List[np.ndarray]] = [] if robot_debug_points is not None else None
     robot_gripper_boxes: Optional[List[Optional[Dict[str, np.ndarray]]]] = [] if (args.add_robot and getattr(args, "gripper_bbox", False)) else None
     robot_gripper_body_boxes: Optional[List[Optional[Dict[str, np.ndarray]]]] = [] if (args.add_robot and getattr(args, "gripper_body_bbox", False)) else None
+    robot_gripper_fingertip_boxes: Optional[List[Optional[Dict[str, np.ndarray]]]] = [] if (args.add_robot and getattr(args, "gripper_fingertip_bbox", False)) else None
     robot_gripper_pad_points: Optional[List[Optional[np.ndarray]]] = [] if (args.add_robot and getattr(args, "gripper_pad_points", False)) else None
+    robot_tcp_points: Optional[List[Optional[np.ndarray]]] = [] if (args.add_robot and getattr(args, "tcp_points", False)) else None
+    robot_object_points: Optional[List[Optional[np.ndarray]]] = [] if getattr(args, "object_points", False) else None
 
     color_lookup_low = [list_frames(cdir / 'color') for cdir in cam_dirs_low]
     depth_lookup_low = [list_frames(cdir / 'depth') for cdir in cam_dirs_low]
@@ -1601,191 +1600,224 @@ def process_frames(
             # Add robot point cloud with current joint state if available
             if robot_model is not None:
                 current_gripper_width_mm: Optional[float] = None
-                try:
-                    # Get the timestamp for the current frame
-                    t_low = int(per_cam_low_ts[0][ti])
-                    # Get joint angles at this timestamp
-                    joint_angles = scene_low.get_joint_angles_aligned(t_low)
-                    
-                    # Ensure we have the correct number of joints
-                    # The robot model expects len(conf.robot_joint_sequence) joints
-                    expected_joints = len(scene_low.configuration.robot_joint_sequence)
-                    gripper_joint_angle = None
-                    
-                    if len(joint_angles) < expected_joints:
-                        # Pad with zeros (neutral gripper position) if missing joints
-                        padding = np.zeros(expected_joints - len(joint_angles))
-                        joint_angles_padded = np.concatenate([joint_angles, padding])
-                        if ti == 0:
-                            print(f"[INFO] Padded joint angles from {len(joint_angles)} to {len(joint_angles_padded)}")
-                        # Don't use padded zero - interpolate from gripper dictionary instead
-                        gripper_joint_angle = 0.0  # Will be replaced below
-                        # Use all joints for robot model (including padded gripper)
-                        robot_joint_angles = joint_angles_padded
-                    elif len(joint_angles) > expected_joints:
-                        # Truncate if we have too many joints
-                        robot_joint_angles = joint_angles[:expected_joints]
-                        gripper_joint_angle = robot_joint_angles[-1]
-                        if ti == 0:
-                            print(f"[WARN] Truncated joint angles from {len(joint_angles)} to {expected_joints}")
-                    else:
-                        robot_joint_angles = joint_angles
-                        gripper_joint_angle = joint_angles[-1]
-                    
-                    # Get actual gripper width from scene.gripper dictionary
-                    # The gripper dictionary has structure: scene.gripper[camera_id][timestamp] = {'gripper_command': [width, ...]}
-                    # We need to pick one camera's gripper data
-                    gripper_data_source = None
-                    if hasattr(scene_low, 'gripper') and len(scene_low.gripper) > 0:
-                        # Find first camera with gripper data
-                        for cam_id in sorted(scene_low.gripper.keys()):
-                            if len(scene_low.gripper[cam_id]) > 0:
-                                gripper_data_source = scene_low.gripper[cam_id]
-                                if ti == 0:
-                                    print(f"[INFO] Using gripper data from camera {cam_id}")
-                                break
-                    
-                    if gripper_data_source is not None:
-                        gripper_timestamps = sorted(gripper_data_source.keys())
-                        # Find closest gripper timestamp to current frame
-                        closest_idx = min(range(len(gripper_timestamps)), 
-                                        key=lambda i: abs(gripper_timestamps[i] - t_low))
-                        closest_ts = gripper_timestamps[closest_idx]
-                        
-                        # Get gripper command (first element is gripper width in mm)
-                        gripper_width_mm = gripper_data_source[closest_ts]['gripper_command'][0]
-                        
-                        # Robotiq 2F-85 gripper: 0mm (closed) to 85mm (fully open)
-                        # Convert gripper width to finger_joint angle in radians
-                        # finger_joint: 0 rad (open) to ~0.8 rad (closed)
-                        max_width_mm = 85.0
-                        max_angle_rad = 0.8  # ~45 degrees when fully closed
-                        # Invert: larger width = smaller angle (more open)
-                        gripper_joint_angle = max_angle_rad * (1.0 - gripper_width_mm / max_width_mm)
-                        current_gripper_width_mm = float(gripper_width_mm)
-                        
-                        # Update the robot_joint_angles array with the calculated angle
-                        robot_joint_angles[-1] = gripper_joint_angle
-                        
-                        if ti == 0:
-                            print(f"[INFO] Gripper width at frame 0: {gripper_width_mm:.2f} mm (finger_joint: {gripper_joint_angle:.3f} rad)")
-                    
-                    robot_pcd = _robot_model_to_pointcloud(
-                        robot_model,
-                        robot_joint_angles,
-                        is_first_time=(ti == 0),
-                        points_per_mesh=10000,
-                        debug_mode=getattr(args, "debug_mode", False),
-                        urdf_colors=robot_urdf_colors,
-                        mtl_colors=robot_mtl_colors,
-                    )
-                    if robot_gripper_boxes is not None:
-                        # Use API's get_tcp_aligned for precise TCP pose (more accurate than FK)
-                        tcp_transform = None
-                        try:
-                            # Get the official TCP pose from the dataset (7D: position + quaternion)
-                            # This is the pre-processed, high-fidelity pose from the robot's controller
-                            tcp_pose_7d = scene_low.get_tcp_aligned(t_low)
-                            
-                            # Validate that we got valid data
-                            if tcp_pose_7d is not None and len(tcp_pose_7d) == 7:
-                                # Convert 7D pose [x, y, z, qx, qy, qz, qw] to 4x4 matrix
-                                tcp_transform = _pose_7d_to_matrix(tcp_pose_7d)
-                                if ti == 0:
-                                    print(f"[INFO] Using API TCP pose for gripper bbox: position={tcp_pose_7d[:3]}, quat={tcp_pose_7d[3:]}")
-                            else:
-                                if ti == 0:
-                                    print(f"[WARN] API returned invalid TCP data: {tcp_pose_7d}")
-                                    print(f"[INFO] Falling back to FK-based TCP computation")
-                                raise ValueError("Invalid TCP data from API")
-                                
-                        except TypeError as e:
-                            breakpoint()
-                            if ti == 0 and "Invalid TCP data" not in str(e):
-                                print(f"[WARN] Could not get TCP from API: {e}")
-                                print(f"[INFO] Falling back to FK-based TCP computation")
-                            # Fallback to FK if API method fails
-                            try:
-                                if hasattr(robot_model, 'chain') and hasattr(robot_model, 'joint_sequence'):
-                                    joint_map = {}
-                                    for idx, joint_name in enumerate(robot_model.joint_sequence):
-                                        if idx < len(robot_joint_angles):
-                                            joint_map[joint_name] = float(robot_joint_angles[idx])
-                                    
-                                    robot_type_str = getattr(robot_conf, "robot", None)
-                                    ee_link_name = ROBOT_EE_LINK_MAP.get(robot_type_str, "ee_link")
-                                    fk_result = robot_model.chain.forward_kinematics(joint_map)
-                                    
-                                    if ee_link_name in fk_result:
-                                        tcp_transform = fk_result[ee_link_name].matrix().astype(np.float32)
-                                        if ti == 0:
-                                            print(f"[INFO] Using FK-based TCP from link '{ee_link_name}'")
-                                    elif ti == 0:
-                                        print(f"[WARN] EE link '{ee_link_name}' not found in FK result")
-                            except Exception as e2:
-                                if ti == 0:
-                                    print(f"[WARN] FK fallback also failed: {e2}")
-                        
-                        bbox_entry_for_frame, base_full_bbox = _compute_gripper_bbox(
-                            robot_model,
-                            robot_conf,
-                            current_gripper_width_mm,
-                            contact_height_m=getattr(args, "gripper_bbox_contact_height_m", None),
-                            contact_length_m=getattr(args, "gripper_bbox_contact_length_m", None),
-                            tcp_transform=tcp_transform,
-                        )
-                        full_bbox_for_frame = base_full_bbox
-                        if robot_gripper_body_boxes is not None and bbox_entry_for_frame is not None:
-                            body_width_override = getattr(args, "gripper_body_width_m", None)
-                            body_length_override = getattr(args, "gripper_body_length_m", None)
-                            if body_width_override is not None or body_length_override is not None:
-                                full_bbox_for_frame = _compute_gripper_body_bbox(
-                                    robot_model,
-                                    robot_conf,
-                                    bbox_entry_for_frame,
-                                    body_width_m=body_width_override,
-                                    body_length_m=body_length_override,
-                                )
-                    if robot_gripper_pad_points is not None:
-                        pad_pts_for_frame = _compute_gripper_pad_points(robot_model, robot_conf)
-                    
-                    # NOTE: Removed align_mat_base transformation
-                    # The robot joint angles from get_joint_angles_aligned() are already in the aligned frame
-                    # Applying align_mat_base was causing the robot to face the wrong direction
-                    # if robot_pcd.has_points():
-                    #     align_mat = scene_low.configuration.align_mat_base
-                    #     robot_pcd.transform(align_mat)
-
-                    if robot_pcd.has_points():
-                        if robot_debug_points is not None:
-                            pts_np = np.asarray(robot_pcd.points, dtype=np.float32)
-                            if robot_pcd.has_colors():
-                                cols_np = (np.asarray(robot_pcd.colors) * 255).astype(np.uint8)
-                            else:
-                                cols_np = np.full((pts_np.shape[0], 3), [180, 180, 180], dtype=np.uint8)
-                            debug_pts = pts_np
-                            debug_cols = cols_np
-                        combined_pcd += robot_pcd
-
-                        
-                        width_info = (
-                            f"{current_gripper_width_mm:.2f} mm"
-                            if current_gripper_width_mm is not None
-                            else "N/A"
-                        )
-                        if ti == 0:
-                            print(
-                                f"[INFO] Added robot with {len(robot_pcd.points)} points for frame {ti} "
-                                f"(gripper width: {width_info})"
-                            )
-                        elif ti % 5 == 0:
-                            print(
-                                f"[INFO] Frame {ti}: Robot has {len(robot_pcd.points)} points "
-                                f"(gripper width: {width_info})"
-                            )
-                except Exception as exc:
+                # Get the timestamp for the current frame
+                t_low = int(per_cam_low_ts[0][ti])
+                # Get joint angles at this timestamp
+                # Use scene_high if available (it has the robot data), otherwise fall back to scene_low
+                robot_scene = scene_low if scene_low is not None else scene_high
+                joint_angles = robot_scene.get_joint_angles_aligned(t_low)
+                
+                # Ensure we have the correct number of joints
+                # The robot model expects len(conf.robot_joint_sequence) joints
+                expected_joints = len(scene_low.configuration.robot_joint_sequence)
+                gripper_joint_angle = None
+                
+                if len(joint_angles) < expected_joints:
+                    # Pad with zeros (neutral gripper position) if missing joints
+                    padding = np.zeros(expected_joints - len(joint_angles))
+                    joint_angles_padded = np.concatenate([joint_angles, padding])
                     if ti == 0:
-                        print(f"[WARN] Failed to add robot to point cloud: {exc}")
+                        print(f"[INFO] Padded joint angles from {len(joint_angles)} to {len(joint_angles_padded)}")
+                    # Don't use padded zero - interpolate from gripper dictionary instead
+                    gripper_joint_angle = 0.0  # Will be replaced below
+                    # Use all joints for robot model (including padded gripper)
+                    robot_joint_angles = joint_angles_padded
+                elif len(joint_angles) > expected_joints:
+                    # Truncate if we have too many joints
+                    robot_joint_angles = joint_angles[:expected_joints]
+                    gripper_joint_angle = robot_joint_angles[-1]
+                    if ti == 0:
+                        print(f"[WARN] Truncated joint angles from {len(joint_angles)} to {expected_joints}")
+                else:
+                    robot_joint_angles = joint_angles
+                    gripper_joint_angle = joint_angles[-1]
+                
+                # Get actual gripper width from scene.gripper dictionary
+                # The gripper dictionary has structure: scene.gripper[camera_id][timestamp] = {'gripper_command': [width, ...]}
+                # We need to pick one camera's gripper data
+                gripper_data_source = None
+                # Use scene_high if available (it has the robot data), otherwise fall back to scene_low
+                robot_scene = scene_low if scene_low is not None else scene_high
+                if hasattr(robot_scene, 'gripper') and len(robot_scene.gripper) > 0:
+                    # Find first camera with gripper data
+                    for cam_id in sorted(robot_scene.gripper.keys()):
+                        if len(robot_scene.gripper[cam_id]) > 0:
+                            gripper_data_source = robot_scene.gripper[cam_id]
+                            if ti == 0:
+                                print(f"[INFO] Using gripper data from camera {cam_id}")
+                            break
+                
+                if gripper_data_source is not None:
+                    gripper_timestamps = sorted(gripper_data_source.keys())
+                    # Find closest gripper timestamp to current frame
+                    closest_idx = min(range(len(gripper_timestamps)), 
+                                    key=lambda i: abs(gripper_timestamps[i] - t_low))
+                    closest_ts = gripper_timestamps[closest_idx]
+                    
+                    # Get gripper command (first element is gripper width in mm)
+                    gripper_width_mm = gripper_data_source[closest_ts]['gripper_command'][0]
+                    
+                    # Robotiq 2F-85 gripper: 0mm (closed) to 85mm (fully open)
+                    # Convert gripper width to finger_joint angle in radians
+                    # finger_joint: 0 rad (open) to ~0.8 rad (closed)
+                    max_width_mm = 85.0
+                    max_angle_rad = 0.8  # ~45 degrees when fully closed
+                    # Invert: larger width = smaller angle (more open)
+                    gripper_joint_angle = max_angle_rad * (1.0 - gripper_width_mm / max_width_mm)
+                    current_gripper_width_mm = float(gripper_width_mm)
+                    
+                    # Update the robot_joint_angles array with the calculated angle
+                    robot_joint_angles[-1] = gripper_joint_angle
+                    
+                    if ti == 0:
+                        print(f"[INFO] Gripper width at frame 0: {gripper_width_mm:.2f} mm (finger_joint: {gripper_joint_angle:.3f} rad)")
+                
+                robot_pcd = _robot_model_to_pointcloud(
+                    robot_model,
+                    robot_joint_angles,
+                    is_first_time=(ti == 0),
+                    points_per_mesh=10000,
+                    debug_mode=getattr(args, "debug_mode", False),
+                    urdf_colors=robot_urdf_colors,
+                    mtl_colors=robot_mtl_colors,
+                )
+                if robot_gripper_boxes is not None:
+                    # Use API's get_tcp_aligned for precise TCP pose (more accurate than FK)
+                    #is it base ?
+                    tcp_transform = None
+                    try:
+                        print("Getting TCP from API...")
+                        # Get the official TCP pose from the dataset (7D: position + quaternion)
+                        # This is the pre-processed, high-fidelity pose from the robot's controller
+                        # Use scene_high if available (it has the robot data), otherwise fall back to scene_low
+                        robot_scene = scene_low if scene_low is not None else scene_high
+                        tcp_pose_7d = robot_scene.get_tcp_aligned(t_low)
+                        # Validate that we got valid data
+                        if tcp_pose_7d is not None and len(tcp_pose_7d) == 7:
+                            # Convert 7D pose [x, y, z, qx, qy, qz, qw] to 4x4 matrix
+                            tcp_transform = _pose_7d_to_matrix(tcp_pose_7d)
+                            if ti == 0:
+                                print(f"[INFO] Using API TCP pose for gripper bbox: position={tcp_pose_7d[:3]}, quat={tcp_pose_7d[3:]}")
+                        else:
+                            if ti == 0:
+                                print(f"[WARN] API returned invalid TCP data: {tcp_pose_7d}")
+                                print(f"[INFO] Falling back to FK-based TCP computation")
+                            raise ValueError("Invalid TCP data from API")
+                            
+                    except TypeError as e:
+                        if ti == 0 and "Invalid TCP data" not in str(e):
+                            print(f"[WARN] Could not get TCP from API: {e}")
+                            print(f"[INFO] Falling back to FK-based TCP computation")
+                        # Fallback to FK if API method fails
+                        if hasattr(robot_model, 'chain') and hasattr(robot_model, 'joint_sequence'):
+                            joint_map = {}
+                            for idx, joint_name in enumerate(robot_model.joint_sequence):
+                                if idx < len(robot_joint_angles):
+                                    joint_map[joint_name] = float(robot_joint_angles[idx])
+                            
+                            robot_type_str = getattr(robot_conf, "robot", None)
+                            ee_link_name = ROBOT_EE_LINK_MAP.get(robot_type_str, "ee_link")
+                            fk_result = robot_model.chain.forward_kinematics(joint_map)
+                            
+                            if ee_link_name in fk_result:
+                                tcp_transform = fk_result[ee_link_name].matrix().astype(np.float32)
+                                if ti == 0:
+                                    print(f"[INFO] Using FK-based TCP from link '{ee_link_name}'")
+                            elif ti == 0:
+                                print(f"[WARN] EE link '{ee_link_name}' not found in FK result")
+                    
+                    bbox_entry_for_frame, base_full_bbox, fingertip_bbox_for_frame = _compute_gripper_bbox(
+                        robot_model,
+                        robot_conf,
+                        current_gripper_width_mm,
+                        contact_height_m=getattr(args, "gripper_bbox_contact_height_m", None),
+                        contact_length_m=getattr(args, "gripper_bbox_contact_length_m", None),
+                        tcp_transform=tcp_transform,
+                    )
+                    full_bbox_for_frame = base_full_bbox
+                    if robot_gripper_body_boxes is not None and bbox_entry_for_frame is not None:
+                        body_width_override = getattr(args, "gripper_body_width_m", None)
+                        body_length_override = getattr(args, "gripper_body_length_m", None)
+                        if body_width_override is not None or body_length_override is not None:
+                            full_bbox_for_frame = _compute_gripper_body_bbox(
+                                robot_model,
+                                robot_conf,
+                                bbox_entry_for_frame,
+                                body_width_m=body_width_override,
+                                body_length_m=body_length_override,
+                            )
+                    elif robot_gripper_body_boxes is None and full_bbox_for_frame is not None:
+                        print("[WARN] Computed full gripper body bbox but no output list to store it")
+                    elif robot_gripper_body_boxes is not None and full_bbox_for_frame is None:
+                        print("[WARN] robot_gripper_body_boxes is not None but full_bbox_for_frame is None")
+                    else:
+                        print("[WARN] Could not compute gripper bbox for this frame")
+
+                if robot_gripper_pad_points is not None:
+                    pad_pts_for_frame = _compute_gripper_pad_points(robot_model, robot_conf)
+                
+                # Get TCP point from API if requested
+                tcp_pt_for_frame: Optional[np.ndarray] = None
+                if robot_tcp_points is not None:
+                    try:
+                        robot_scene = scene_low if scene_low is not None else scene_high
+                        tcp_pose_7d = robot_scene.get_tcp_aligned(t_low)
+                        if tcp_pose_7d is not None and len(tcp_pose_7d) >= 3:
+                            # Extract position (first 3 elements: x, y, z)
+                            tcp_pt_for_frame = np.array(tcp_pose_7d[:3], dtype=np.float32)
+                    except Exception as e:
+                        if ti == 0:
+                            print(f"[WARN] Could not get TCP point from API: {e}")
+                
+                # Get object point from API if requested and available
+                obj_pt_for_frame: Optional[np.ndarray] = None
+                if robot_object_points is not None:
+                    try:
+                        robot_scene = scene_low if scene_low is not None else scene_high
+                        # Try to get object pose if the API has it
+                        # This is speculative - the exact method name may vary
+                        if hasattr(robot_scene, 'get_object_pose'):
+                            obj_pose = robot_scene.get_object_pose(t_low)
+                            if obj_pose is not None and len(obj_pose) >= 3:
+                                obj_pt_for_frame = np.array(obj_pose[:3], dtype=np.float32)
+                    except Exception as e:
+                        if ti == 0:
+                            print(f"[INFO] Object pose not available from API: {e}")
+                
+                # NOTE: Removed align_mat_base transformation
+                # The robot joint angles from get_joint_angles_aligned() are already in the aligned frame
+                # Applying align_mat_base was causing the robot to face the wrong direction
+                # if robot_pcd.has_points():
+                #     align_mat = scene_low.configuration.align_mat_base
+                #     robot_pcd.transform(align_mat)
+
+                if robot_pcd.has_points():
+                    if robot_debug_points is not None:
+                        pts_np = np.asarray(robot_pcd.points, dtype=np.float32)
+                        if robot_pcd.has_colors():
+                            cols_np = (np.asarray(robot_pcd.colors) * 255).astype(np.uint8)
+                        else:
+                            cols_np = np.full((pts_np.shape[0], 3), [180, 180, 180], dtype=np.uint8)
+                        debug_pts = pts_np
+                        debug_cols = cols_np
+                    combined_pcd += robot_pcd
+
+                    
+                    width_info = (
+                        f"{current_gripper_width_mm:.2f} mm"
+                        if current_gripper_width_mm is not None
+                        else "N/A"
+                    )
+                    if ti == 0:
+                        print(
+                            f"[INFO] Added robot with {len(robot_pcd.points)} points for frame {ti} "
+                            f"(gripper width: {width_info})"
+                        )
+                    elif ti % 5 == 0:
+                        print(
+                            f"[INFO] Frame {ti}: Robot has {len(robot_pcd.points)} points "
+                            f"(gripper width: {width_info})"
+                        )
             if robot_debug_points is not None and debug_pts is None:
                 debug_pts = np.empty((0, 3), dtype=np.float32)
                 debug_cols = np.empty((0, 3), dtype=np.uint8)
@@ -1835,9 +1867,15 @@ def process_frames(
             robot_gripper_boxes.append(bbox_entry_for_frame)
         if robot_gripper_body_boxes is not None:
             robot_gripper_body_boxes.append(full_bbox_for_frame)
+        if robot_gripper_fingertip_boxes is not None:
+            robot_gripper_fingertip_boxes.append(fingertip_bbox_for_frame)
         if robot_gripper_pad_points is not None:
             # Ensure we append even if None to keep timeline alignment
             robot_gripper_pad_points.append(pad_pts_for_frame)
+        if robot_tcp_points is not None:
+            robot_tcp_points.append(tcp_pt_for_frame)
+        if robot_object_points is not None:
+            robot_object_points.append(obj_pt_for_frame)
 
         # Step 2: Generate the final output data for each camera view
         for ci in range(C):
@@ -1888,7 +1926,10 @@ def process_frames(
         robot_debug_colors,
         robot_gripper_boxes,
         robot_gripper_body_boxes,
+        robot_gripper_fingertip_boxes,
         robot_gripper_pad_points,
+        robot_tcp_points,
+        robot_object_points,
     )
 
 def save_and_visualize(
@@ -1904,7 +1945,10 @@ def save_and_visualize(
     robot_debug_colors=None,
     robot_gripper_boxes=None,
     robot_gripper_body_boxes=None,
+    robot_gripper_fingertip_boxes=None,
     robot_gripper_pad_points=None,
+    robot_tcp_points=None,
+    robot_object_points=None,
 ):
     """Saves the processed data to an NPZ file and generates a Rerun visualization."""
     # Convert to channels-first format for NPZ
@@ -2008,6 +2052,26 @@ def save_and_visualize(
                             colors=np.array([[255, 0, 0]], dtype=np.uint8),
                         ),
                     )
+        if robot_gripper_fingertip_boxes:
+            valid_box_count = sum(1 for box in robot_gripper_fingertip_boxes if box)
+            if valid_box_count > 0:
+                fps = 30.0
+                print(f"[INFO] Logging {valid_box_count} gripper FINGERTIP bounding boxes to Rerun...")
+                for idx, box in enumerate(robot_gripper_fingertip_boxes):
+                    if not box:
+                        continue
+                    rr.set_time_seconds("frame", idx / fps)
+                    centers = np.asarray(box["center"], dtype=np.float32)[None, :]
+                    half_sizes = np.asarray(box["half_sizes"], dtype=np.float32)[None, :]
+                    rr.log(
+                        "robot/gripper_bbox_fingertip",
+                        rr.Boxes3D(
+                            centers=centers,
+                            half_sizes=half_sizes,
+                            quaternions=np.asarray(box["quat_xyzw"], dtype=np.float32)[None, :],
+                            colors=np.array([[0, 0, 255]], dtype=np.uint8),  # Blue color
+                        ),
+                    )
         if robot_gripper_pad_points:
             fps = 30.0
             valid_pts = any(pts is not None and len(pts) > 0 for pts in robot_gripper_pad_points)
@@ -2022,6 +2086,49 @@ def save_and_visualize(
                     rr.log(
                         "robot/gripper_pad_points",
                         rr.Points3D(pts.astype(np.float32, copy=False), colors=cols),
+                    )
+        
+        # Log TCP points from API (cyan spheres)
+        if robot_tcp_points:
+            fps = args.sync_fps if args.sync_fps > 0 else 30.0
+            valid_pts = any(pt is not None and len(pt) == 3 for pt in robot_tcp_points)
+            if valid_pts:
+                count = sum(1 for pt in robot_tcp_points if pt is not None and len(pt) == 3)
+                tcp_radius = getattr(args, "tcp_point_radius", 0.01)
+                print(f"[INFO] Logging {count} TCP points from API to Rerun (cyan, radius={tcp_radius}m)...")
+                for idx, pt in enumerate(robot_tcp_points):
+                    if pt is None or len(pt) != 3:
+                        continue
+                    rr.set_time_seconds("frame", idx / fps)
+                    # Log as a single cyan point with larger radius
+                    rr.log(
+                        "points/tcp_point",
+                        rr.Points3D(
+                            pt.reshape(1, 3).astype(np.float32, copy=False),
+                            colors=np.array([[0, 255, 255]], dtype=np.uint8),  # Cyan
+                            radii=np.array([0.02], dtype=np.float32),  # Increased for visibility
+                        ),
+                    )
+        
+        # Log object points from API (yellow spheres)
+        if robot_object_points:
+            fps = args.sync_fps if args.sync_fps > 0 else 30.0
+            valid_pts = any(pt is not None and len(pt) == 3 for pt in robot_object_points)
+            if valid_pts:
+                count = sum(1 for pt in robot_object_points if pt is not None and len(pt) == 3)
+                print(f"[INFO] Logging {count} object points from API to Rerun (yellow)...")
+                for idx, pt in enumerate(robot_object_points):
+                    if pt is None or len(pt) != 3:
+                        continue
+                    rr.set_time_seconds("frame", idx / fps)
+                    # Log as a single yellow point
+                    rr.log(
+                        "points/object_point",
+                        rr.Points3D(
+                            pt.reshape(1, 3).astype(np.float32, copy=False),
+                            colors=np.array([[255, 255, 0]], dtype=np.uint8),  # Yellow
+                            radii=np.array([0.025], dtype=np.float32),  # Increased for visibility
+                        ),
                     )
 
     if getattr(args, "export_bbox_video", False):
@@ -2118,6 +2225,12 @@ def main():
         help="Also log a larger gripper body bbox (fixed width).",
     )
     parser.add_argument(
+        "--gripper-fingertip-bbox",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Log a blue bbox at the bottom of the body bbox (fingertip position).",
+    )
+    parser.add_argument(
         "--gripper-body-width-m",
         type=float,
         default=None,
@@ -2134,6 +2247,24 @@ def main():
         action=argparse.BooleanOptionalAction,
         default=False,
         help="If set, log magenta points at the left/right gripper pad centers (FK-based).",
+    )
+    parser.add_argument(
+        "--tcp-points",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="If set, log cyan spheres at TCP positions from the API (requires --add-robot).",
+    )
+    parser.add_argument(
+        "--tcp-point-radius",
+        type=float,
+        default=0.05,
+        help="Radius of TCP point spheres in meters.",
+    )
+    parser.add_argument(
+        "--object-points",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="If set, log yellow spheres at object positions from the API if available.",
     )
     parser.add_argument(
         "--export-bbox-video",
@@ -2267,7 +2398,10 @@ def main():
      robot_debug_colors,
      robot_gripper_boxes,
      robot_gripper_body_boxes,
-     robot_gripper_pad_points) = process_frames(
+     robot_gripper_fingertip_boxes,
+     robot_gripper_pad_points,
+     robot_tcp_points,
+     robot_object_points) = process_frames(
         args,
         scene_low,
         scene_high,
@@ -2295,7 +2429,10 @@ def main():
         robot_debug_colors,
         robot_gripper_boxes,
         robot_gripper_body_boxes,
+        robot_gripper_fingertip_boxes,
         robot_gripper_pad_points,
+        robot_tcp_points,
+        robot_object_points,
     )
 
     if not args.no_pointcloud:

@@ -14,8 +14,12 @@ python create_sparse_depth_map.py \
   --add-robot \
   --gripper-bbox \
   --gripper-body-bbox \
+  --gripper-fingertip-bbox \
   --gripper-pad-points \
   --export-bbox-video \
+  --tcp-points \
+  --object-points \
+  --gripper-body-width-m 0.05 \
   "${@}"
 
 cp ./data/high_res_filtered/task_0065_user_0010_scene_0009_cfg_0004_reprojected.rrd /data/rh20t_api
