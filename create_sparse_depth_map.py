@@ -87,6 +87,19 @@ GRIPPER_DIMENSIONS = {
 
 DEFAULT_GRIPPER_DIMS = {"length": 0.15, "height": 0.06, "default_width": 0.08}
 
+CONTACT_SURFACE_PRESETS = {
+    "Robotiq 2F-85": {"length": 0.045, "height": 0.02, "clearance": 0.004},
+    "WSG-50": {"length": 0.040, "height": 0.018, "clearance": 0.0035},
+    "Dahuan AG-95": {"length": 0.050, "height": 0.022, "clearance": 0.004},
+    "franka": {"length": 0.038, "height": 0.018, "clearance": 0.003},
+}
+
+DEFAULT_CONTACT_SURFACE = {"length": 0.042, "height": 0.02, "clearance": 0.004}
+MIN_CONTACT_WIDTH = 0.008
+MIN_CONTACT_LENGTH = 0.015
+CONTACT_WIDTH_SCALE_FALLBACK = 0.65
+CONTACT_HEIGHT_SCALE_FALLBACK = 0.45
+
 
 def _rotation_matrix_to_xyzw(R: np.ndarray) -> np.ndarray:
     """Convert a 3x3 rotation matrix to a quaternion [x, y, z, w]."""
@@ -160,30 +173,28 @@ def _compute_gripper_bbox(
     contact_height_m: Optional[float] = None,
     contact_length_m: Optional[float] = None,
     tcp_transform: Optional[np.ndarray] = None,
+    scene_points: Optional[np.ndarray] = None,
 ) -> Optional[Dict[str, np.ndarray]]:
-    """Estimate a gripper-aligned bounding box using FK transforms or TCP.
+    """Estimate a tight gripper contact bbox using FK and nearby scene points.
     
     Args:
-        robot_model: The robot model with FK transforms
-        robot_conf: Robot configuration
-        gripper_width_mm: Current gripper opening width in mm
-        contact_height_m: Override for bbox height
-        contact_length_m: Override for bbox length
-        tcp_transform: Optional 4x4 TCP transform matrix (independent of gripper meshes)
+        robot_model: The robot model with FK transforms.
+        robot_conf: Robot configuration.
+        gripper_width_mm: Current gripper opening width in millimeters.
+        contact_height_m: Optional override for the bbox vertical size.
+        contact_length_m: Optional override for the bbox length (approach axis).
+        tcp_transform: Optional 4x4 TCP transform matrix (used as fallback when FK misses the EE link).
+        scene_points: Optional Nx3 array of scene points (without the robot) used to refine placement.
     """
     if robot_conf is None:
         return None
 
-    fk_map = getattr(robot_model, "latest_transforms", None)
-    if fk_map is None:
-        fk_map = {}
-    
+    fk_map = getattr(robot_model, "latest_transforms", None) or {}
     robot_type = getattr(robot_conf, "robot", None)
     candidate_links = GRIPPER_LINK_CANDIDATES.get(robot_type, [])
     ee_link = ROBOT_EE_LINK_MAP.get(robot_type)
 
     tf_matrix = None
-    # Try to find gripper-specific links first
     if fk_map:
         for link_name in candidate_links:
             if link_name in fk_map:
@@ -191,35 +202,36 @@ def _compute_gripper_bbox(
                 break
         if tf_matrix is None and ee_link and ee_link in fk_map:
             tf_matrix = fk_map[ee_link].matrix()
-    
-    # Use TCP as fallback (independent of gripper mesh loading)
     if tf_matrix is None and tcp_transform is not None:
         tf_matrix = tcp_transform
-    
     if tf_matrix is None:
         return None
 
-    # Gripper dimensions lookup
-    dims = DEFAULT_GRIPPER_DIMS
+    tf_matrix = np.asarray(tf_matrix, dtype=np.float32)
+    rotation = tf_matrix[:3, :3]
+    translation = tf_matrix[:3, 3].astype(np.float32)
+
     gripper_name = getattr(robot_conf, "gripper", "")
+    dims = DEFAULT_GRIPPER_DIMS
+    contact_preset = CONTACT_SURFACE_PRESETS.get(gripper_name, DEFAULT_CONTACT_SURFACE)
     if gripper_name:
         for name, values in GRIPPER_DIMENSIONS.items():
             if name.lower() == gripper_name.lower():
                 dims = values
                 break
 
-    width_m = dims["default_width"]
-    if gripper_width_mm is not None:
-        width_m = max(gripper_width_mm / 1000.0, 0.01)
-    height_m = contact_height_m if contact_height_m is not None else dims["height"]
-    length_m = contact_length_m if contact_length_m is not None else dims["length"]
-    half_sizes = np.array(
-        [width_m / 2.0, height_m / 2.0, length_m / 2.0],
-        dtype=np.float32,
+    height_m = contact_height_m if contact_height_m is not None else contact_preset.get(
+        "height", dims["height"] * CONTACT_HEIGHT_SCALE_FALLBACK
     )
+    base_length_m = contact_length_m if contact_length_m is not None else contact_preset.get(
+        "length", dims["length"] * CONTACT_HEIGHT_SCALE_FALLBACK
+    )
+    clearance = contact_preset.get("clearance", DEFAULT_CONTACT_SURFACE["clearance"])
 
-    rotation = tf_matrix[:3, :3]
-    translation = tf_matrix[:3, 3].astype(np.float32)
+    height_m = float(max(height_m, 0.005))
+    base_length_m = float(max(base_length_m, MIN_CONTACT_LENGTH))
+    base_half_length = base_length_m / 2.0
+    min_half_length = max(base_half_length * 0.5, MIN_CONTACT_LENGTH / 2.0)
 
     def _find_link(keyword_groups):
         for keywords in keyword_groups:
@@ -229,9 +241,6 @@ def _compute_gripper_bbox(
                     return name
         return None
 
-    left_link = None
-    right_link = None
-    # Prefer specific finger pads when available
     left_link = _find_link([
         ("left", "inner", "finger", "pad"),
         ("left", "finger", "pad"),
@@ -247,60 +256,101 @@ def _compute_gripper_bbox(
         ("right", "knuckle"),
     ])
 
-    width_axis = rotation[:, 0]
-    length_axis = rotation[:, 2]
+    left_tf = fk_map[left_link].matrix().astype(np.float32) if left_link and left_link in fk_map else None
+    right_tf = fk_map[right_link].matrix().astype(np.float32) if right_link and right_link in fk_map else None
+    left_pos = left_tf[:3, 3] if left_tf is not None else None
+    right_pos = right_tf[:3, 3] if right_tf is not None else None
 
-    if left_link and right_link:
-        left_pos = fk_map[left_link].matrix()[:3, 3]
-        right_pos = fk_map[right_link].matrix()[:3, 3]
+    width_axis = rotation[:, 0]
+    approach_axis = rotation[:, 2]
+    pad_midpoint = None
+    measured_width = None
+
+    if left_pos is not None and right_pos is not None:
+        pad_midpoint = (left_pos + right_pos) * 0.5
         width_vec = left_pos - right_pos
         width_norm = np.linalg.norm(width_vec)
         if width_norm > 1e-6:
             width_axis = width_vec / width_norm
-
-    # Ensure orthonormal basis using modified Gram-Schmidt
-    width_axis = width_axis / np.linalg.norm(width_axis)
-
-    length_axis = length_axis - width_axis * np.dot(width_axis, length_axis)
-    length_norm = np.linalg.norm(length_axis)
-    if length_norm < 1e-6:
-        alt_axis = rotation[:, 1]
-        length_axis = alt_axis - width_axis * np.dot(width_axis, alt_axis)
-        length_norm = np.linalg.norm(length_axis)
-    if length_norm > 1e-6:
-        length_axis = length_axis / length_norm
+            measured_width = float(width_norm)
     else:
-        length_axis = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+        pad_midpoint = translation
 
-    height_axis = np.cross(length_axis, width_axis)
+    width_candidates = []
+    if measured_width is not None:
+        width_candidates.append(measured_width)
+    if gripper_width_mm is not None:
+        width_candidates.append(max(gripper_width_mm / 1000.0, MIN_CONTACT_WIDTH))
+    if width_candidates:
+        width_m = min(width_candidates)
+    else:
+        width_m = dims["default_width"] * CONTACT_WIDTH_SCALE_FALLBACK
+    width_m = max(width_m - 2.0 * clearance, MIN_CONTACT_WIDTH)
+
+    width_axis_norm = np.linalg.norm(width_axis)
+    if width_axis_norm < 1e-6:
+        width_axis = rotation[:, 0]
+        width_axis_norm = np.linalg.norm(width_axis)
+    width_axis = width_axis / max(width_axis_norm, 1e-6)
+
+    approach_axis = approach_axis - width_axis * np.dot(width_axis, approach_axis)
+    approach_norm = np.linalg.norm(approach_axis)
+    if approach_norm < 1e-6:
+        approach_axis = rotation[:, 2] - width_axis * np.dot(width_axis, rotation[:, 2])
+        approach_norm = np.linalg.norm(approach_axis)
+    if approach_norm < 1e-6:
+        fallback = rotation[:, 1] if rotation.shape == (3, 3) else np.array([0.0, 0.0, 1.0], dtype=np.float32)
+        approach_axis = fallback - width_axis * np.dot(width_axis, fallback)
+        approach_norm = np.linalg.norm(approach_axis)
+    if approach_norm < 1e-6:
+        approach_axis = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+    else:
+        approach_axis = approach_axis / approach_norm
+
+    height_axis = np.cross(approach_axis, width_axis)
     height_norm = np.linalg.norm(height_axis)
     if height_norm < 1e-6:
-        alt_axis = rotation[:, 1] - width_axis * np.dot(width_axis, rotation[:, 1])
-        height_axis = alt_axis
+        fallback = rotation[:, 1] if rotation.shape == (3, 3) else np.array([0.0, 1.0, 0.0], dtype=np.float32)
+        height_axis = fallback - width_axis * np.dot(width_axis, fallback)
         height_norm = np.linalg.norm(height_axis)
-    if height_norm > 1e-6:
-        height_axis = height_axis / height_norm
-    else:
-        # Fall back to a generic orthogonal axis
-        if abs(width_axis[0]) < 0.9:
-            temp = np.array([1.0, 0.0, 0.0], dtype=np.float32)
-        else:
-            temp = np.array([0.0, 1.0, 0.0], dtype=np.float32)
-        height_axis = np.cross(length_axis, temp)
-        height_axis /= np.linalg.norm(height_axis)
+    height_axis = height_axis / max(height_norm, 1e-6)
 
-    # Recompute axes to guarantee an orthonormal right-handed frame
-    length_axis = np.cross(width_axis, height_axis)
-    length_axis = length_axis / np.linalg.norm(length_axis)
-    height_axis = np.cross(length_axis, width_axis)
-    height_axis = height_axis / np.linalg.norm(height_axis)
+    approach_axis = np.cross(width_axis, height_axis)
+    approach_axis = approach_axis / max(np.linalg.norm(approach_axis), 1e-6)
+    height_axis = np.cross(approach_axis, width_axis)
+    height_axis = height_axis / max(np.linalg.norm(height_axis), 1e-6)
 
-    basis = np.column_stack((width_axis, height_axis, length_axis)).astype(np.float32)
+    basis = np.column_stack((width_axis, height_axis, approach_axis)).astype(np.float32)
+    half_sizes = np.array(
+        [width_m / 2.0, height_m / 2.0, base_length_m / 2.0],
+        dtype=np.float32,
+    )
+
+    origin = pad_midpoint if pad_midpoint is not None else translation
+    center = origin + approach_axis * (half_sizes[2] * 0.5)
+
+    if scene_points is not None and len(scene_points) > 0:
+        pts = np.asarray(scene_points, dtype=np.float32)
+        rel = pts - origin[None, :]
+        local = rel @ basis
+        width_limit = max(half_sizes[0] * 1.15, MIN_CONTACT_WIDTH * 0.5)
+        height_limit = max(half_sizes[1] * 1.8, 0.005)
+        mask = (np.abs(local[:, 0]) <= width_limit) & (np.abs(local[:, 1]) <= height_limit)
+        forward = local[mask, 2]
+        forward = forward[forward > 0.0]
+        if forward.size:
+            contact_depth = float(np.quantile(forward, 0.3))
+            new_half_length = max(
+                min_half_length,
+                min(contact_depth * 0.5, base_half_length * 1.5),
+            )
+            half_sizes[2] = new_half_length
+            center_offset = max(contact_depth - new_half_length, 0.0)
+            center = origin + approach_axis * center_offset
+
     quat = _rotation_matrix_to_xyzw(basis)
-    center = translation + length_axis * half_sizes[2]
-
     return {
-        "center": center,
+        "center": center.astype(np.float32),
         "half_sizes": half_sizes,
         "quat_xyzw": quat,
         "basis": basis,
@@ -581,7 +631,6 @@ def _create_robot_model(
     sample_path: Path,
     configs_path: Optional[Path] = None,
     rh20t_root: Optional[Path] = None,
-    include_gripper_visuals: bool = False,
 ) -> Optional[RobotModel]:
     """Create a RobotModel instance for the current scene."""
     configs_path = configs_path or (Path(__file__).resolve().parent / "rh20t_api" / "configs" / "configs.json")
@@ -614,7 +663,6 @@ def _create_robot_model(
             robot_joint_sequence=conf.robot_joint_sequence,
             robot_urdf=str(robot_urdf),
             robot_mesh=str(robot_mesh_root),
-            include_gripper_visuals=include_gripper_visuals,
         )
     except Exception as exc:  # pragma: no cover - URDF parsing is best-effort
         warnings.warn(f"Failed to load robot model from URDF ({exc}); skipping robot overlay.")
@@ -1373,17 +1421,12 @@ def process_frames(
             sample_path=args.task_folder,
             configs_path=configs_path,
             rh20t_root=rh20t_root,
-            include_gripper_visuals=getattr(args, "include_gripper_visuals", False),
         )
         if robot_bundle:
             robot_model = robot_bundle.get("model")
             robot_mtl_colors = robot_bundle.get("mtl_colors")
         if robot_model:
             print("[INFO] Robot model loaded successfully.")
-            if getattr(args, "include_gripper_visuals", False):
-                print("[INFO] Gripper meshes are enabled for robot overlay.")
-            else:
-                print("[INFO] Gripper meshes are disabled for robot overlay to avoid ghost artifacts.")
             # Load URDF colors for the robot (if any exist in URDF)
             try:
                 confs = load_conf(str(configs_path))
@@ -1475,6 +1518,7 @@ def process_frames(
         debug_cols = None
         bbox_entry_for_frame: Optional[Dict[str, np.ndarray]] = None
         pad_pts_for_frame: Optional[np.ndarray] = None
+        scene_points_np: Optional[np.ndarray] = None
         # Step 1: Create a combined point cloud for the current frame from all low-res views
         combined_pcd = o3d.geometry.PointCloud()
         if args.high_res_folder:
@@ -1494,6 +1538,8 @@ def process_frames(
             # Merge all individual point clouds into a single scene representation
             for pcd in pcds_per_cam:
                 combined_pcd += pcd
+            if combined_pcd.has_points():
+                scene_points_np = np.asarray(combined_pcd.points, dtype=np.float32).copy()
 
             # Add robot point cloud with current joint state if available
             if robot_model is not None:
@@ -1609,6 +1655,7 @@ def process_frames(
                             contact_height_m=getattr(args, "gripper_bbox_contact_height_m", None),
                             contact_length_m=getattr(args, "gripper_bbox_contact_length_m", None),
                             tcp_transform=tcp_transform,
+                            scene_points=scene_points_np,
                         )
                         if robot_gripper_body_boxes is not None and bbox_entry_for_frame is not None:
                             body_box = _compute_gripper_body_bbox(
@@ -1964,12 +2011,6 @@ def main():
     parser.add_argument("--sync-max-drift", type=float, default=0.05, help="Maximum tolerated fractional FPS shortfall before warning.")
     parser.add_argument("--sync-tolerance-ms", type=float, default=50.0, help="Maximum timestamp deviation (ms) when matching frames; defaults to half frame period.")
     parser.add_argument("--add-robot", action="store_true", help="Include robot arm model in Rerun visualization.")
-    parser.add_argument(
-        "--include-gripper-visuals",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="If set, keep gripper meshes when rendering the robot overlay (default drops them).",
-    )
     parser.add_argument(
         "--gripper-bbox",
         action=argparse.BooleanOptionalAction,

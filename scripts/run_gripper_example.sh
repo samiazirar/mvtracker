@@ -13,7 +13,6 @@ python create_sparse_depth_map.py \
   --no-color-alignment-check \
   --no-sharpen-edges-with-mesh \
   --add-robot \
-  --include-gripper-visuals \
   --gripper-bbox \
   --export-bbox-video \
   "${@}"
