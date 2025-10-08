@@ -43,7 +43,7 @@ import re
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 # Third-party imports
 import numpy as np
@@ -59,7 +59,7 @@ from tqdm import tqdm
 from mvtracker.utils.visualizer_rerun import log_pointclouds_to_rerun
 from RH20T.rh20t_api.configurations import get_conf_from_dir_name, load_conf
 from RH20T.rh20t_api.scene import RH20TScene
-from RH20T.utils.robot import RobotModel
+from RH20T.utils.robot_gripper_full import RobotModel
 # --- File I/O & Utility Functions ---
 
 NUM_RE = re.compile(r"(\d+)")
@@ -86,8 +86,6 @@ GRIPPER_DIMENSIONS = {
 }
 
 DEFAULT_GRIPPER_DIMS = {"length": 0.15, "height": 0.06, "default_width": 0.08}
-
-
 def _rotation_matrix_to_xyzw(R: np.ndarray) -> np.ndarray:
     """Convert a 3x3 rotation matrix to a quaternion [x, y, z, w]."""
     if R.shape != (3, 3):
@@ -123,34 +121,6 @@ def _rotation_matrix_to_xyzw(R: np.ndarray) -> np.ndarray:
     if norm == 0.0:
         return np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)
     return quat / norm
-
-
-def _quaternion_xyzw_to_rotation_matrix(quat: np.ndarray) -> np.ndarray:
-    """Convert a quaternion [x, y, z, w] to a rotation matrix."""
-    quat = np.asarray(quat, dtype=np.float32)
-    if quat.shape[0] != 4:
-        raise ValueError("Quaternion must have four components [x, y, z, w].")
-    x, y, z, w = quat
-    norm = np.sqrt(x * x + y * y + z * z + w * w)
-    if norm == 0.0:
-        return np.eye(3, dtype=np.float32)
-    x /= norm
-    y /= norm
-    z /= norm
-    w /= norm
-
-    xx, yy, zz = x * x, y * y, z * z
-    xy, xz, yz = x * y, x * z, y * z
-    wx, wy, wz = w * x, w * y, w * z
-
-    return np.array(
-        [
-            [1.0 - 2.0 * (yy + zz), 2.0 * (xy - wz), 2.0 * (xz + wy)],
-            [2.0 * (xy + wz), 1.0 - 2.0 * (xx + zz), 2.0 * (yz - wx)],
-            [2.0 * (xz - wy), 2.0 * (yz + wx), 1.0 - 2.0 * (xx + yy)],
-        ],
-        dtype=np.float32,
-    )
 
 
 def _compute_gripper_bbox(
@@ -395,116 +365,6 @@ def _compute_gripper_pad_points(
         return None
     return np.stack(points, axis=0).astype(np.float32)
 
-def _compute_bbox_corners_world(bbox: Dict[str, np.ndarray]) -> Optional[np.ndarray]:
-    basis = bbox.get("basis")
-    if basis is None:
-        quat = bbox.get("quat_xyzw")
-        if quat is None:
-            return None
-        basis = _quaternion_xyzw_to_rotation_matrix(quat)
-    basis = np.asarray(basis, dtype=np.float32)
-    center = np.asarray(bbox.get("center"), dtype=np.float32)
-    half_sizes = np.asarray(bbox.get("half_sizes"), dtype=np.float32)
-    if basis.shape != (3, 3) or center.shape != (3,) or half_sizes.shape != (3,):
-        return None
-    offsets = np.array(
-        [
-            [-1.0, -1.0, -1.0],
-            [1.0, -1.0, -1.0],
-            [1.0, 1.0, -1.0],
-            [-1.0, 1.0, -1.0],
-            [-1.0, -1.0, 1.0],
-            [1.0, -1.0, 1.0],
-            [1.0, 1.0, 1.0],
-            [-1.0, 1.0, 1.0],
-        ],
-        dtype=np.float32,
-    )
-    local = offsets * half_sizes[None, :]
-    corners = center[None, :] + local @ basis.T
-    return corners
-
-
-def _project_bbox_pixels(corners_world: np.ndarray, intr: np.ndarray, extr: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-    corners_world = np.asarray(corners_world, dtype=np.float32)
-    intr = np.asarray(intr, dtype=np.float32)
-    extr = np.asarray(extr, dtype=np.float32)
-    num = corners_world.shape[0]
-    pixels = np.zeros((num, 2), dtype=np.float32)
-    valid = np.zeros((num,), dtype=bool)
-    if num == 0:
-        return pixels, valid
-
-    corners_h = np.concatenate([corners_world, np.ones((num, 1), dtype=np.float32)], axis=1)
-    cam = (extr @ corners_h.T).T
-    z = cam[:, 2]
-    valid = z > 1e-6
-    if not np.any(valid):
-        return pixels, valid
-    cam_valid = cam[valid]
-    proj = (intr @ cam_valid.T).T
-    proj_xy = proj[:, :2] / proj[:, 2:3]
-    pixels[valid] = proj_xy
-    return pixels, valid
-
-
-def _export_gripper_bbox_videos(
-    args,
-    rgbs: np.ndarray,
-    intrs: np.ndarray,
-    extrs: np.ndarray,
-    bboxes: Optional[List[Optional[Dict[str, np.ndarray]]]],
-    camera_ids: Sequence[str],
-) -> None:
-    if bboxes is None or len(bboxes) == 0 or all(b is None for b in bboxes):
-        print("[INFO] Skipping bbox video export: no gripper boxes available.")
-        return
-
-    video_dir = Path(args.out_dir) / "bbox_videos"
-    video_dir.mkdir(parents=True, exist_ok=True)
-
-    fps = getattr(args, "bbox_video_fps", 30.0)
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    edges = [(0, 1), (1, 2), (2, 3), (3, 0), (4, 5), (5, 6), (6, 7), (7, 4), (0, 4), (1, 5), (2, 6), (3, 7)]
-    color = (0, 165, 255)
-
-    rgbs = np.asarray(rgbs)
-    intrs = np.asarray(intrs)
-    extrs = np.asarray(extrs)
-
-    num_cams, num_frames = rgbs.shape[0], rgbs.shape[1]
-
-    for ci in range(num_cams):
-        cam_id = str(camera_ids[ci]) if camera_ids is not None else str(ci)
-        frame_shape = rgbs[ci, 0].shape
-        if len(frame_shape) != 3:
-            continue
-        height, width = frame_shape[0], frame_shape[1]
-        video_path = video_dir / f"{args.task_folder.name}_cam_{cam_id}_bbox.mp4"
-        writer = cv2.VideoWriter(str(video_path), fourcc, float(fps), (width, height))
-        if not writer.isOpened():
-            print(f"[WARN] Could not open video writer for {video_path}.")
-            continue
-
-        for ti in range(num_frames):
-            frame_rgb = rgbs[ci, ti]
-            frame_bgr = np.ascontiguousarray(frame_rgb[:, :, ::-1])
-            bbox = bboxes[ti]
-            if bbox is not None:
-                corners_world = _compute_bbox_corners_world(bbox)
-                if corners_world is not None:
-                    pixels, valid = _project_bbox_pixels(corners_world, intrs[ci, ti], extrs[ci, ti])
-                    for a, b in edges:
-                        if valid[a] and valid[b]:
-                            pt1 = tuple(np.round(pixels[a]).astype(int))
-                            pt2 = tuple(np.round(pixels[b]).astype(int))
-                            cv2.line(frame_bgr, pt1, pt2, color, 2)
-            writer.write(frame_bgr)
-
-        writer.release()
-        print(f"[INFO] Wrote bbox overlay video: {video_path}")
-
-
 @dataclass
 class SyncResult:
     """Container for synchronized timeline information."""
@@ -581,7 +441,7 @@ def _create_robot_model(
     sample_path: Path,
     configs_path: Optional[Path] = None,
     rh20t_root: Optional[Path] = None,
-    include_gripper_visuals: bool = False,
+    include_gripper: bool = True,
 ) -> Optional[RobotModel]:
     """Create a RobotModel instance for the current scene."""
     configs_path = configs_path or (Path(__file__).resolve().parent / "rh20t_api" / "configs" / "configs.json")
@@ -614,7 +474,7 @@ def _create_robot_model(
             robot_joint_sequence=conf.robot_joint_sequence,
             robot_urdf=str(robot_urdf),
             robot_mesh=str(robot_mesh_root),
-            include_gripper_visuals=include_gripper_visuals,
+            include_gripper_visuals=include_gripper,
         )
     except Exception as exc:  # pragma: no cover - URDF parsing is best-effort
         warnings.warn(f"Failed to load robot model from URDF ({exc}); skipping robot overlay.")
@@ -1373,17 +1233,13 @@ def process_frames(
             sample_path=args.task_folder,
             configs_path=configs_path,
             rh20t_root=rh20t_root,
-            include_gripper_visuals=getattr(args, "include_gripper_visuals", False),
+            include_gripper=args.add_gripper,
         )
         if robot_bundle:
             robot_model = robot_bundle.get("model")
             robot_mtl_colors = robot_bundle.get("mtl_colors")
         if robot_model:
             print("[INFO] Robot model loaded successfully.")
-            if getattr(args, "include_gripper_visuals", False):
-                print("[INFO] Gripper meshes are enabled for robot overlay.")
-            else:
-                print("[INFO] Gripper meshes are disabled for robot overlay to avoid ghost artifacts.")
             # Load URDF colors for the robot (if any exist in URDF)
             try:
                 confs = load_conf(str(configs_path))
@@ -1895,19 +1751,6 @@ def save_and_visualize(
                         rr.Points3D(pts.astype(np.float32, copy=False), colors=cols),
                     )
 
-    if getattr(args, "export_bbox_video", False):
-        try:
-            _export_gripper_bbox_videos(
-                args,
-                rgbs,
-                intrs,
-                extrs,
-                robot_gripper_boxes,
-                final_cam_ids,
-            )
-        except Exception as exc:
-            print(f"[WARN] Failed to export bounding box videos: {exc}")
-
 
 def main():
     """Parses arguments and orchestrates the entire data processing workflow."""
@@ -1963,12 +1806,18 @@ def main():
     parser.add_argument("--sync-min-density", type=float, default=0.6, help="Minimum density ratio required per camera during synchronization.")
     parser.add_argument("--sync-max-drift", type=float, default=0.05, help="Maximum tolerated fractional FPS shortfall before warning.")
     parser.add_argument("--sync-tolerance-ms", type=float, default=50.0, help="Maximum timestamp deviation (ms) when matching frames; defaults to half frame period.")
-    parser.add_argument("--add-robot", action="store_true", help="Include robot arm model in Rerun visualization.")
+    parser.add_argument("--add-robot", action="store_true", help="Include robot model in Rerun visualization.")
     parser.add_argument(
-        "--include-gripper-visuals",
-        action=argparse.BooleanOptionalAction,
+        "--add-gripper",
+        action="store_true",
         default=False,
-        help="If set, keep gripper meshes when rendering the robot overlay (default drops them).",
+        help="Include gripper visualization (requires --add-robot). If not set, gripper meshes are completely ignored.",
+    )
+    parser.add_argument(
+        "--use-gripper-points",
+        action="store_true",
+        default=False,
+        help="Include gripper points in the reprojected point cloud (not just visualization). Requires --add-gripper.",
     )
     parser.add_argument(
         "--gripper-bbox",
@@ -2013,18 +1862,6 @@ def main():
         help="If set, log magenta points at the left/right gripper pad centers (FK-based).",
     )
     parser.add_argument(
-        "--export-bbox-video",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Export per-camera RGB videos with gripper bounding boxes overlaid.",
-    )
-    parser.add_argument(
-        "--bbox-video-fps",
-        type=float,
-        default=30.0,
-        help="Frame rate used when exporting gripper bounding box videos (requires --export-bbox-video).",
-    )
-    parser.add_argument(
         "--debug-mode",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -2032,9 +1869,10 @@ def main():
     )
     args = parser.parse_args()
 
-    if getattr(args, "export_bbox_video", False) and not getattr(args, "gripper_bbox", False):
-        print("[INFO] --export-bbox-video requires bounding boxes; enabling --gripper-bbox.")
-        args.gripper_bbox = True
+    # Validation: --use-gripper-points requires --add-gripper
+    if args.use_gripper_points and not args.add_gripper:
+        print("[ERROR] --use-gripper-points requires --add-gripper to be enabled.")
+        return
 
     if not args.config.exists():
         print(f"[ERROR] RH20T config file not found at: {args.config}")
