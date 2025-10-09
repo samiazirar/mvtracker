@@ -2371,6 +2371,7 @@ def save_and_visualize(
     robot_gripper_pad_points=None,
     robot_tcp_points=None,
     robot_object_points=None,
+    mvtracker_results=None,
 ):
     """Saves the processed data to an NPZ file and generates a Rerun visualization."""
     # Convert to channels-first format for NPZ
@@ -2565,6 +2566,52 @@ def save_and_visualize(
             )
         except Exception as exc:
             print(f"[WARN] Failed to export bounding box videos: {exc}")
+    
+    # Log MVTracker results if available
+    if mvtracker_results is not None:
+        print("[INFO] Logging MVTracker results to Rerun...")
+        fps = args.sync_fps if args.sync_fps > 0 else 30.0
+        
+        track_types = [
+            ("gripper", mvtracker_results.get("gripper_tracks"), mvtracker_results.get("gripper_vis"), [255, 165, 0]),  # Orange
+            ("body", mvtracker_results.get("body_tracks"), mvtracker_results.get("body_vis"), [255, 0, 0]),  # Red
+            ("fingertip", mvtracker_results.get("fingertip_tracks"), mvtracker_results.get("fingertip_vis"), [0, 0, 255]),  # Blue
+        ]
+        
+        for track_name, tracks, vis, color in track_types:
+            if tracks is None or vis is None:
+                continue
+            
+            # tracks: [T, N, 3], vis: [T, N]
+            tracks_np = tracks.numpy() if hasattr(tracks, 'numpy') else tracks
+            vis_np = vis.numpy() if hasattr(vis, 'numpy') else vis
+            
+            num_frames, num_points = tracks_np.shape[:2]
+            print(f"  Logging {track_name} tracks: {num_frames} frames, {num_points} points")
+            
+            # Log each frame
+            for t in range(num_frames):
+                rr.set_time_seconds("frame", t / fps)
+                
+                # Get visible points at this frame
+                visible_mask = vis_np[t] > 0.5
+                if not visible_mask.any():
+                    continue
+                
+                visible_tracks = tracks_np[t][visible_mask]
+                num_visible = len(visible_tracks)
+                
+                # Create colors for this track type
+                colors = np.tile(np.array([color], dtype=np.uint8), (num_visible, 1))
+                
+                rr.log(
+                    f"tracks/{track_name}_tracks",
+                    rr.Points3D(
+                        visible_tracks.astype(np.float32),
+                        colors=colors,
+                        radii=np.full(num_visible, 0.01, dtype=np.float32),
+                    ),
+                )
 
 
 def main():
@@ -2873,6 +2920,36 @@ def main():
         per_cam_high_sel,
     )
 
+    # --- Step 2.5: Track gripper with MVTracker if requested ---
+    mvtracker_results = None
+    if getattr(args, "track_gripper_with_mvtracker", False):
+        if robot_gripper_boxes or robot_gripper_body_boxes or robot_gripper_fingertip_boxes:
+            print("[INFO] Invoking MVTracker for gripper tracking...")
+            try:
+                # Convert to torch tensors
+                rgbs_torch = torch.from_numpy(rgbs).permute(0, 1, 4, 2, 3)  # [V, T, H, W, 3] -> [V, T, 3, H, W]
+                depths_torch = torch.from_numpy(depths).unsqueeze(2)  # [V, T, H, W] -> [V, T, 1, H, W]
+                intrs_torch = torch.from_numpy(intrs)  # [V, T, 3, 3]
+                extrs_torch = torch.from_numpy(extrs)  # [V, T, 3, 4]
+                
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+                mvtracker_results = _track_gripper_with_mvtracker(
+                    rgbs=rgbs_torch,
+                    depths=depths_torch,
+                    intrs=intrs_torch,
+                    extrs=extrs_torch,
+                    gripper_bboxes=robot_gripper_boxes,
+                    body_bboxes=robot_gripper_body_boxes,
+                    fingertip_bboxes=robot_gripper_fingertip_boxes,
+                    device=device,
+                )
+                print("[INFO] ✓ MVTracker tracking complete")
+            except Exception as e:
+                print(f"[WARN] MVTracker failed: {e}")
+                mvtracker_results = None
+        else:
+            print("[WARN] --track-gripper-with-mvtracker enabled but no bboxes computed. Enable --gripper-bbox.")
+
     # --- Step 3: Save and Visualize ---
     rr.init("RH20T_Reprojection_Frameworks", spawn=False)
     per_cam_for_npz = per_cam_high_sel if per_cam_high_sel is not None else per_cam_low_sel
@@ -2893,6 +2970,7 @@ def main():
         robot_gripper_pad_points,
         robot_tcp_points,
         robot_object_points,
+        mvtracker_results=mvtracker_results,
     )
 
     if not args.no_pointcloud:
