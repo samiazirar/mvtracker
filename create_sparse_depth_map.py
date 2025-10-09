@@ -2372,6 +2372,7 @@ def save_and_visualize(
     robot_tcp_points=None,
     robot_object_points=None,
     mvtracker_results=None,
+    sam_results=None,
 ):
     """Saves the processed data to an NPZ file and generates a Rerun visualization."""
     # Convert to channels-first format for NPZ
@@ -2612,6 +2613,31 @@ def save_and_visualize(
                         radii=np.full(num_visible, 0.01, dtype=np.float32),
                     ),
                 )
+    
+    # Log SAM results if available
+    if sam_results is not None and "object_masks" in sam_results:
+        print("[INFO] Logging SAM segmentation masks to Rerun...")
+        fps = args.sync_fps if args.sync_fps > 0 else 30.0
+        object_masks = sam_results["object_masks"]
+        
+        # Log masks as segmentation images
+        num_masks = sum(1 for mask in object_masks if mask is not None)
+        print(f"  Logging {num_masks} segmentation masks")
+        
+        for t, mask in enumerate(object_masks):
+            if mask is None:
+                continue
+            
+            rr.set_time_seconds("frame", t / fps)
+            
+            # Convert boolean mask to uint8 (0 or 255)
+            mask_uint8 = (mask.astype(np.uint8) * 255)
+            
+            # Log as segmentation image (can be overlaid on RGB)
+            rr.log(
+                "segmentation/contact_objects",
+                rr.SegmentationImage(mask_uint8),
+            )
 
 
 def main():
@@ -2950,6 +2976,71 @@ def main():
         else:
             print("[WARN] --track-gripper-with-mvtracker enabled but no bboxes computed. Enable --gripper-bbox.")
 
+    # --- Step 2.6: Track contact objects with SAM if requested ---
+    sam_results = None
+    if getattr(args, "track_objects_with_sam", False):
+        if robot_gripper_boxes:
+            print("[INFO] Tracking contact objects with SAM...")
+            try:
+                # Project gripper bboxes to 2D for each camera view
+                # We'll use the first camera for simplicity (can be extended to multi-view)
+                cam_idx = 0
+                gripper_bboxes_2d = []
+                
+                for t in range(len(robot_gripper_boxes)):
+                    bbox_3d = robot_gripper_boxes[t]
+                    if bbox_3d is None:
+                        gripper_bboxes_2d.append(None)
+                        continue
+                    
+                    # Get bbox corners in 3D
+                    corners_3d = _compute_bbox_corners_world(bbox_3d)
+                    if corners_3d is None:
+                        gripper_bboxes_2d.append(None)
+                        continue
+                    
+                    # Project to 2D
+                    intr = intrs[cam_idx, t]
+                    extr = extrs[cam_idx, t]
+                    pixels, valid = _project_bbox_pixels(corners_3d, intr, extr)
+                    
+                    if valid.any():
+                        # Compute 2D bounding box from projected corners
+                        valid_pixels = pixels[valid]
+                        x_min, y_min = valid_pixels.min(axis=0)
+                        x_max, y_max = valid_pixels.max(axis=0)
+                        center_x = (x_min + x_max) / 2
+                        center_y = (y_min + y_max) / 2
+                        width = x_max - x_min
+                        height = y_max - y_min
+                        
+                        bbox_2d = {
+                            "center": np.array([center_x, center_y], dtype=np.float32),
+                            "width": float(width),
+                            "height": float(height),
+                        }
+                        gripper_bboxes_2d.append(bbox_2d)
+                    else:
+                        gripper_bboxes_2d.append(None)
+                
+                # Extract RGB sequence for first camera
+                rgbs_cam0 = rgbs[cam_idx]  # [T, H, W, 3]
+                
+                sam_results = _track_gripper_contact_objects_with_sam(
+                    rgbs=rgbs_cam0,
+                    gripper_bboxes_2d=gripper_bboxes_2d,
+                    contact_threshold_pixels=getattr(args, "sam_contact_threshold", 50.0),
+                    sam_model_type=getattr(args, "sam_model_type", "vit_b"),
+                )
+                print("[INFO] ✓ SAM object tracking complete")
+            except Exception as e:
+                print(f"[WARN] SAM tracking failed: {e}")
+                import traceback
+                traceback.print_exc()
+                sam_results = None
+        else:
+            print("[WARN] --track-objects-with-sam enabled but no gripper bboxes computed. Enable --gripper-bbox.")
+
     # --- Step 3: Save and Visualize ---
     rr.init("RH20T_Reprojection_Frameworks", spawn=False)
     per_cam_for_npz = per_cam_high_sel if per_cam_high_sel is not None else per_cam_low_sel
@@ -2971,6 +3062,7 @@ def main():
         robot_tcp_points,
         robot_object_points,
         mvtracker_results=mvtracker_results,
+        sam_results=sam_results,
     )
 
     if not args.no_pointcloud:
