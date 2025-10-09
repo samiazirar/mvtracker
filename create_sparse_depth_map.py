@@ -231,15 +231,17 @@ def _compute_gripper_bbox(
     ee_link = ROBOT_EE_LINK_MAP.get(robot_type)
 
     tf_matrix = None
-    if fk_map:
+    # Prioritize the high-precision TCP transform from the API if it's provided.
+    if tcp_transform is not None:
+        tf_matrix = tcp_transform
+    elif fk_map:
         for link_name in candidate_links:
             if link_name in fk_map:
                 tf_matrix = fk_map[link_name].matrix()
                 break
         if tf_matrix is None and ee_link and ee_link in fk_map:
             tf_matrix = fk_map[ee_link].matrix()
-    if tf_matrix is None and tcp_transform is not None:
-        tf_matrix = tcp_transform
+
     if tf_matrix is None:
         return None, None, None
 
