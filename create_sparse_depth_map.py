@@ -58,7 +58,7 @@ from tqdm import tqdm
 
 # --- Project-Specific Imports ---
 # Importing utilities and configurations specific to the RH20T dataset and robot model.
-from mvtracker.utils.visualizer_rerun import log_pointclouds_to_rerun
+from mvtracker.utils.visualizer_rerun import log_pointclouds_to_rerun, log_tracks_to_rerun
 from RH20T.rh20t_api.configurations import get_conf_from_dir_name, load_conf
 from RH20T.rh20t_api.scene import RH20TScene
 from RH20T.utils.robot import RobotModel
@@ -767,7 +767,17 @@ def _track_gripper_with_mvtracker(
             "fingertip_vis": None,
         }
     
-    result = {}
+    result = {
+        "gripper_tracks": None,
+        "gripper_vis": None,
+        "gripper_query_points": None,
+        "body_tracks": None,
+        "body_vis": None,
+        "body_query_points": None,
+        "fingertip_tracks": None,
+        "fingertip_vis": None,
+        "fingertip_query_points": None,
+    }
     bbox_types = [
         ("gripper", gripper_bboxes),
         ("body", body_bboxes),
@@ -776,8 +786,6 @@ def _track_gripper_with_mvtracker(
     
     for bbox_name, bboxes in bbox_types:
         if bboxes is None or len(bboxes) == 0:
-            result[f"{bbox_name}_tracks"] = None
-            result[f"{bbox_name}_vis"] = None
             continue
         
         # Generate query points from first bbox
@@ -788,12 +796,11 @@ def _track_gripper_with_mvtracker(
                 query_points_list.append(qp)
         
         if not query_points_list:
-            result[f"{bbox_name}_tracks"] = None
-            result[f"{bbox_name}_vis"] = None
             continue
         
         # Use query points from first frame
         query_points = torch.from_numpy(query_points_list[0]).float()
+        result[f"{bbox_name}_query_points"] = query_points.clone().detach().cpu()
         
         print(f"  Tracking {bbox_name} bbox with {len(query_points)} query points...")
         
@@ -809,6 +816,7 @@ def _track_gripper_with_mvtracker(
             
             result[f"{bbox_name}_tracks"] = tracker_result["traj_e"].cpu()
             result[f"{bbox_name}_vis"] = tracker_result["vis_e"].cpu()
+            result[f"{bbox_name}_query_points"] = query_points.clone().detach().cpu()
             print(f"  ✓ {bbox_name} tracking complete: {tracker_result['traj_e'].shape}")
             
         except Exception as e:
@@ -2584,47 +2592,53 @@ def save_and_visualize(
     if mvtracker_results is not None:
         print("[INFO] Logging MVTracker results to Rerun...")
         fps = args.sync_fps if args.sync_fps > 0 else 30.0
-        
-        track_types = [
-            ("gripper", mvtracker_results.get("gripper_tracks"), mvtracker_results.get("gripper_vis"), [255, 165, 0]),  # Orange
-            ("body", mvtracker_results.get("body_tracks"), mvtracker_results.get("body_vis"), [255, 0, 0]),  # Red
-            ("fingertip", mvtracker_results.get("fingertip_tracks"), mvtracker_results.get("fingertip_vis"), [0, 0, 255]),  # Blue
+        track_specs = [
+            ("gripper", [255, 165, 0], 0),
+            ("body", [255, 0, 0], 1),
+            ("fingertip", [0, 0, 255], 2),
         ]
-        
-        for track_name, tracks, vis, color in track_types:
-            if tracks is None or vis is None:
+
+        for track_name, color_rgb, method_id in track_specs:
+            tracks = mvtracker_results.get(f"{track_name}_tracks")
+            vis = mvtracker_results.get(f"{track_name}_vis")
+            query_points = mvtracker_results.get(f"{track_name}_query_points")
+
+            if tracks is None or vis is None or query_points is None:
                 continue
-            
-            # tracks: [T, N, 3], vis: [T, N]
-            tracks_np = tracks.numpy() if hasattr(tracks, 'numpy') else tracks
-            vis_np = vis.numpy() if hasattr(vis, 'numpy') else vis
-            
-            num_frames, num_points = tracks_np.shape[:2]
+
+            tracks_tensor = tracks if isinstance(tracks, torch.Tensor) else torch.from_numpy(np.asarray(tracks))
+            vis_tensor = vis if isinstance(vis, torch.Tensor) else torch.from_numpy(np.asarray(vis))
+            query_tensor = query_points if isinstance(query_points, torch.Tensor) else torch.from_numpy(np.asarray(query_points))
+
+            try:
+                num_frames, num_points = tracks_tensor.shape[:2]
+            except ValueError:
+                print(f"[WARN] Unexpected track tensor shape for '{track_name}'; skipping logging.")
+                continue
+
             print(f"  Logging {track_name} tracks: {num_frames} frames, {num_points} points")
-            
-            # Log each frame
-            for t in range(num_frames):
-                rr.set_time_seconds("frame", t / fps)
-                
-                # Get visible points at this frame
-                visible_mask = vis_np[t] > 0.5
-                if not visible_mask.any():
-                    continue
-                
-                visible_tracks = tracks_np[t][visible_mask]
-                num_visible = len(visible_tracks)
-                
-                # Create colors for this track type
-                colors = np.tile(np.array([color], dtype=np.uint8), (num_visible, 1))
-                
-                rr.log(
-                    f"tracks/{track_name}_tracks",
-                    rr.Points3D(
-                        visible_tracks.astype(np.float32),
-                        colors=colors,
-                        radii=np.full(num_visible, 0.01, dtype=np.float32),
-                    ),
-                )
+
+            log_tracks_to_rerun(
+                dataset_name="rh20t_reprojection",
+                datapoint_idx=0,
+                predictor_name=f"mvtracker_{track_name}",
+                gt_trajectories_3d_worldspace=None,
+                gt_visibilities_any_view=None,
+                query_points_3d=query_tensor.unsqueeze(0).to(torch.float32),
+                pred_trajectories=tracks_tensor.unsqueeze(0).to(torch.float32),
+                pred_visibilities=vis_tensor.unsqueeze(0).to(torch.float32),
+                per_track_results=None,
+                radii_scale=1.0,
+                fps=fps,
+                sphere_radius_crop=None,
+                sphere_center_crop=None,
+                log_per_interval_results=False,
+                max_tracks_to_log=None,
+                track_batch_size=max(1, num_points),
+                method_id=method_id,
+                color_per_method_id={method_id: tuple(color_rgb)},
+                memory_lightweight_logging=False,
+            )
     
     # Log SAM results if available
     if sam_results is not None and "object_masks" in sam_results:
