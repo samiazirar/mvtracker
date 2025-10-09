@@ -20,6 +20,12 @@ python create_sparse_depth_map.py \
   --tcp-points \
   --object-points \
   --gripper-body-width-m 0.05 \
+  --align-bbox-with-points \
+  --align-bbox-search-radius-scale 2.0 \
+  --track-gripper-with-mvtracker \
+  --track-objects-with-sam \
+  --sam-model-type vit_b \
+  --sam-contact-threshold 50.0 \
   "${@}"
 
 cp ./data/high_res_filtered/task_0065_user_0010_scene_0009_cfg_0004_reprojected.rrd /data/rh20t_api
