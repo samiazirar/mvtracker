@@ -37,7 +37,8 @@ python create_sparse_depth_map.py   --task-folder /data/rh20t_api/data/test_data
 """
 
 
-# Standard library imports
+# --- Standard Library Imports ---
+# Importing modules for argument parsing, regex, warnings, and file path handling.
 import argparse
 import re
 import warnings
@@ -45,26 +46,28 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-# Third-party imports
+# --- Third-Party Library Imports ---
+# Importing libraries for numerical computation, image processing, 3D data handling, and progress tracking.
 import numpy as np
 import torch
 from PIL import Image
 import cv2
 import open3d as o3d
 import rerun as rr
-
 from tqdm import tqdm
 
-# Project-specific imports
+# --- Project-Specific Imports ---
+# Importing utilities and configurations specific to the RH20T dataset and robot model.
 from mvtracker.utils.visualizer_rerun import log_pointclouds_to_rerun
 from RH20T.rh20t_api.configurations import get_conf_from_dir_name, load_conf
 from RH20T.rh20t_api.scene import RH20TScene
 from RH20T.utils.robot import RobotModel
-# --- File I/O & Utility Functions ---
 
-# Precompiled regex used to recover timestamp integers embedded in filenames.
+# --- Constants ---
+# Precompiled regex for extracting numbers from filenames.
 NUM_RE = re.compile(r"(\d+)")
 
+# Mapping of robot types to their end-effector (EE) link names.
 ROBOT_EE_LINK_MAP = {
     "ur5": "ee_link",
     "flexiv": "link7",
@@ -72,6 +75,7 @@ ROBOT_EE_LINK_MAP = {
     "franka": "panda_link8",
 }
 
+# Candidate gripper links for different robot types.
 GRIPPER_LINK_CANDIDATES = {
     "ur5": ["robotiq_arg2f_base_link", "ee_link", "wrist_3_link"],
     "flexiv": ["flange", "link7"],
@@ -79,6 +83,7 @@ GRIPPER_LINK_CANDIDATES = {
     "franka": ["panda_hand", "panda_link8"],
 }
 
+# Default dimensions for various gripper models.
 GRIPPER_DIMENSIONS = {
     "Robotiq 2F-85": {"length": 0.16, "height": 0.06, "default_width": 0.08},
     "WSG-50": {"length": 0.14, "height": 0.06, "default_width": 0.05},
@@ -86,8 +91,10 @@ GRIPPER_DIMENSIONS = {
     "franka": {"length": 0.14, "height": 0.05, "default_width": 0.08},
 }
 
+# Default dimensions for grippers if no specific model is provided.
 DEFAULT_GRIPPER_DIMS = {"length": 0.15, "height": 0.06, "default_width": 0.08}
 
+# Presets for contact surface dimensions for different gripper models.
 CONTACT_SURFACE_PRESETS = {
     "Robotiq 2F-85": {"length": 0.045, "height": 0.02, "clearance": 0.004},
     "WSG-50": {"length": 0.040, "height": 0.018, "clearance": 0.0035},
@@ -95,12 +102,19 @@ CONTACT_SURFACE_PRESETS = {
     "franka": {"length": 0.038, "height": 0.018, "clearance": 0.003},
 }
 
+# Default contact surface dimensions.
 DEFAULT_CONTACT_SURFACE = {"length": 0.042, "height": 0.02, "clearance": 0.004}
+
+# Minimum dimensions for contact width and length.
 MIN_CONTACT_WIDTH = 0.008
 MIN_CONTACT_LENGTH = 0.015
+
+# Fallback scaling factors for contact width and height.
 CONTACT_WIDTH_SCALE_FALLBACK = 0.65
 CONTACT_HEIGHT_SCALE_FALLBACK = 0.45
 
+# --- Utility Functions ---
+# Functions for mathematical transformations, gripper bounding box computation, and 3D geometry handling.
 
 def _rotation_matrix_to_xyzw(R: np.ndarray) -> np.ndarray:
     """Convert a 3x3 rotation matrix to a quaternion [x, y, z, w]."""
@@ -501,6 +515,7 @@ def _compute_gripper_pad_points(
     return np.stack(points, axis=0).astype(np.float32)
 
 def _compute_bbox_corners_world(bbox: Dict[str, np.ndarray]) -> Optional[np.ndarray]:
+    """Compute the 3D corners of a bounding box in world coordinates."""
     basis = bbox.get("basis")
     if basis is None:
         quat = bbox.get("quat_xyzw")
@@ -531,6 +546,7 @@ def _compute_bbox_corners_world(bbox: Dict[str, np.ndarray]) -> Optional[np.ndar
 
 
 def _project_bbox_pixels(corners_world: np.ndarray, intr: np.ndarray, extr: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Project 3D bounding box corners into 2D image pixels."""
     corners_world = np.asarray(corners_world, dtype=np.float32)
     intr = np.asarray(intr, dtype=np.float32)
     extr = np.asarray(extr, dtype=np.float32)
@@ -561,6 +577,7 @@ def _export_gripper_bbox_videos(
     bboxes: Optional[List[Optional[Dict[str, np.ndarray]]]],
     camera_ids: Sequence[str],
 ) -> None:
+    """Export videos with gripper bounding boxes overlaid on RGB frames."""
     if bboxes is None or len(bboxes) == 0 or all(b is None for b in bboxes):
         print("[INFO] Skipping bbox video export: no gripper boxes available.")
         return
@@ -2356,7 +2373,8 @@ def main():
         idx_low = [idx_map_low[int(t)] for t in timeline_common]
         idx_high = [idx_map_high[int(t)] for t in timeline_common]
         per_cam_low = [arr[idx_low] for arr in per_cam_low_full]
-        per_cam_high = [arr[idx_high] for arr in per_cam_high_full]
+        #error here? hould be per_cam_high_full TODO: check
+        per_cam_high = [arr[idx_high] for arr in per_cam_high_full] if per_cam_high_full is not None else None
     else:
         id_to_dir_low = {cid: d for cid, d in zip(cam_ids_low, cam_dirs_low)}
         final_cam_ids = [cid for cid in sorted(set(cam_ids_low)) if cid in id_to_dir_low]
