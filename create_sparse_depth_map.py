@@ -516,6 +516,106 @@ def _compute_gripper_pad_points(
         return None
     return np.stack(points, axis=0).astype(np.float32)
 
+
+def _align_bbox_with_point_cloud_com(
+    bbox: Dict[str, np.ndarray],
+    points: np.ndarray,
+    colors: Optional[np.ndarray] = None,
+    search_radius_scale: float = 2.0,
+    min_points_required: int = 10,
+) -> Optional[Dict[str, np.ndarray]]:
+    """
+    Align bounding box with center of mass of nearby points.
+    
+    This function adjusts the bbox center and rotation to match the point cloud,
+    but preserves the z-coordinate (height) and bbox dimensions.
+    
+    Args:
+        bbox: Dictionary with 'center', 'half_sizes', 'quat_xyzw', 'basis'
+        points: Nx3 array of 3D points in world coordinates
+        colors: Optional Nx3 array of RGB colors
+        search_radius_scale: Scale factor for search radius (relative to bbox diagonal)
+        min_points_required: Minimum points needed for alignment
+        
+    Returns:
+        Aligned bbox dictionary or None if alignment fails
+    """
+    if bbox is None or points is None or len(points) == 0:
+        return bbox
+    
+    points = np.asarray(points, dtype=np.float32)
+    if points.shape[0] < min_points_required:
+        return bbox
+    
+    # Extract bbox properties
+    center = np.asarray(bbox["center"], dtype=np.float32)
+    half_sizes = np.asarray(bbox["half_sizes"], dtype=np.float32)
+    basis = np.asarray(bbox.get("basis", np.eye(3)), dtype=np.float32)
+    
+    # Define search radius based on bbox size
+    bbox_diagonal = np.linalg.norm(half_sizes * 2.0)
+    search_radius = bbox_diagonal * search_radius_scale
+    
+    # Find points near the bbox
+    distances = np.linalg.norm(points - center[None, :], axis=1)
+    nearby_mask = distances <= search_radius
+    nearby_points = points[nearby_mask]
+    
+    if len(nearby_points) < min_points_required:
+        # Not enough points for reliable alignment
+        return bbox
+    
+    # Compute center of mass (but only adjust x-y, preserve z)
+    com = np.mean(nearby_points, axis=0).astype(np.float32)
+    aligned_center = center.copy()
+    aligned_center[0] = com[0]  # Update x
+    aligned_center[1] = com[1]  # Update y
+    # aligned_center[2] stays the same (preserve height)
+    
+    # Estimate rotation from point cloud covariance (only in x-y plane)
+    # Project points to x-y plane
+    points_xy = nearby_points[:, :2] - com[:2]
+    
+    if len(points_xy) >= 3:
+        # Compute covariance matrix in 2D
+        cov = np.cov(points_xy.T)
+        
+        # Eigen decomposition to find principal axes
+        try:
+            eigenvalues, eigenvectors = np.linalg.eigh(cov)
+            # Sort by eigenvalue (descending)
+            idx = np.argsort(eigenvalues)[::-1]
+            eigenvectors = eigenvectors[:, idx]
+            
+            # Build 3D rotation from 2D principal axes
+            # Primary axis becomes x-axis, secondary becomes y-axis
+            aligned_basis = basis.copy()
+            aligned_basis[:2, 0] = eigenvectors[:, 0]  # Primary direction -> x
+            aligned_basis[:2, 1] = eigenvectors[:, 1]  # Secondary direction -> y
+            # Normalize to ensure orthonormal
+            aligned_basis[:, 0] = aligned_basis[:, 0] / np.linalg.norm(aligned_basis[:, 0])
+            aligned_basis[:, 1] = aligned_basis[:, 1] / np.linalg.norm(aligned_basis[:, 1])
+            # Z-axis remains unchanged (preserve approach direction)
+            
+            # Recompute quaternion from aligned basis
+            aligned_quat = _rotation_matrix_to_xyzw(aligned_basis)
+        except np.linalg.LinAlgError:
+            # If eigendecomposition fails, keep original rotation
+            aligned_basis = basis
+            aligned_quat = bbox["quat_xyzw"]
+    else:
+        aligned_basis = basis
+        aligned_quat = bbox["quat_xyzw"]
+    
+    # Return aligned bbox with same dimensions
+    return {
+        "center": aligned_center,
+        "half_sizes": half_sizes,
+        "quat_xyzw": aligned_quat,
+        "basis": aligned_basis,
+    }
+
+
 def _compute_bbox_corners_world(bbox: Dict[str, np.ndarray]) -> Optional[np.ndarray]:
     """Compute the 3D corners of a bounding box in world coordinates."""
     basis = bbox.get("basis")
@@ -569,6 +669,265 @@ def _project_bbox_pixels(corners_world: np.ndarray, intr: np.ndarray, extr: np.n
     proj_xy = proj[:, :2] / proj[:, 2:3]
     pixels[valid] = proj_xy
     return pixels, valid
+
+
+def _generate_query_points_from_bbox(
+    bbox: Dict[str, np.ndarray],
+    timestamp: int,
+    num_points: int = 8,
+) -> np.ndarray:
+    """
+    Generate query points from bbox corners for tracking.
+    
+    Args:
+        bbox: Bounding box dictionary
+        timestamp: Frame timestamp for query points
+        num_points: Number of points to generate (8 for corners)
+        
+    Returns:
+        Query points array of shape [N, 4] with [t, x, y, z]
+    """
+    if bbox is None:
+        return np.zeros((0, 4), dtype=np.float32)
+    
+    # Get bbox corners in world space
+    corners = _compute_bbox_corners_world(bbox)
+    if corners is None or len(corners) == 0:
+        return np.zeros((0, 4), dtype=np.float32)
+    
+    # Limit to requested number of points
+    if num_points < len(corners):
+        # Sample evenly
+        indices = np.linspace(0, len(corners) - 1, num_points, dtype=int)
+        corners = corners[indices]
+    
+    # Add timestamp column
+    timestamps = np.full((len(corners), 1), float(timestamp), dtype=np.float32)
+    query_points = np.hstack([timestamps, corners])
+    
+    return query_points
+
+
+def _track_gripper_with_mvtracker(
+    rgbs: torch.Tensor,
+    depths: torch.Tensor,
+    intrs: torch.Tensor,
+    extrs: torch.Tensor,
+    gripper_bboxes: Optional[List[Dict[str, np.ndarray]]],
+    body_bboxes: Optional[List[Dict[str, np.ndarray]]],
+    fingertip_bboxes: Optional[List[Dict[str, np.ndarray]]],
+    device: str = "cuda",
+) -> Dict[str, Optional[torch.Tensor]]:
+    """
+    Track gripper bboxes using MVTracker.
+    
+    Invokes MVTracker three times:
+    1. For contact bbox (orange)
+    2. For body bbox (red)
+    3. For fingertip bbox (blue)
+    
+    Args:
+        rgbs: [V, T, C, H, W] RGB images (uint8 0-255)
+        depths: [V, T, 1, H, W] depth maps
+        intrs: [V, T, 3, 3] intrinsics
+        extrs: [V, T, 3, 4] extrinsics
+        gripper_bboxes: List of T contact bboxes
+        body_bboxes: List of T body bboxes
+        fingertip_bboxes: List of T fingertip bboxes
+        device: Device for inference
+        
+    Returns:
+        Dictionary with tracks and visibility for each bbox type
+    """
+    print("[INFO] Tracking gripper with MVTracker (3 invocations)...")
+    
+    # Load MVTracker model
+    try:
+        mvtracker = torch.hub.load(
+            "ethz-vlg/mvtracker",
+            "mvtracker",
+            pretrained=True,
+            device=device,
+        )
+        mvtracker.eval()
+    except Exception as e:
+        print(f"[WARN] Failed to load MVTracker: {e}")
+        return {
+            "gripper_tracks": None,
+            "gripper_vis": None,
+            "body_tracks": None,
+            "body_vis": None,
+            "fingertip_tracks": None,
+            "fingertip_vis": None,
+        }
+    
+    result = {}
+    bbox_types = [
+        ("gripper", gripper_bboxes),
+        ("body", body_bboxes),
+        ("fingertip", fingertip_bboxes),
+    ]
+    
+    for bbox_name, bboxes in bbox_types:
+        if bboxes is None or len(bboxes) == 0:
+            result[f"{bbox_name}_tracks"] = None
+            result[f"{bbox_name}_vis"] = None
+            continue
+        
+        # Generate query points from first bbox
+        query_points_list = []
+        for t, bbox in enumerate(bboxes):
+            if bbox is not None:
+                qp = _generate_query_points_from_bbox(bbox, timestamp=t, num_points=8)
+                query_points_list.append(qp)
+        
+        if not query_points_list:
+            result[f"{bbox_name}_tracks"] = None
+            result[f"{bbox_name}_vis"] = None
+            continue
+        
+        # Use query points from first frame
+        query_points = torch.from_numpy(query_points_list[0]).float()
+        
+        print(f"  Tracking {bbox_name} bbox with {len(query_points)} query points...")
+        
+        try:
+            with torch.no_grad():
+                tracker_result = mvtracker(
+                    rgbs=rgbs[None].to(device).float() / 255.0,
+                    depths=depths[None].to(device).float(),
+                    intrs=intrs[None].to(device).float(),
+                    extrs=extrs[None].to(device).float(),
+                    query_points_3d=query_points[None].to(device),
+                )
+            
+            result[f"{bbox_name}_tracks"] = tracker_result["traj_e"].cpu()
+            result[f"{bbox_name}_vis"] = tracker_result["vis_e"].cpu()
+            print(f"  ✓ {bbox_name} tracking complete: {tracker_result['traj_e'].shape}")
+            
+        except Exception as e:
+            print(f"  ✗ Failed to track {bbox_name}: {e}")
+            result[f"{bbox_name}_tracks"] = None
+            result[f"{bbox_name}_vis"] = None
+    
+    return result
+
+
+def _segment_object_with_sam(
+    rgb_image: np.ndarray,
+    bbox_prompt: Dict[str, float],
+    model_type: str = "vit_b",
+    sam_checkpoint: Optional[Path] = None,
+) -> Optional[np.ndarray]:
+    """
+    Segment object using SAM (Segment Anything Model).
+    
+    Args:
+        rgb_image: RGB image [H, W, 3] uint8
+        bbox_prompt: Dictionary with 'center' [x, y] and 'width', 'height'
+        model_type: SAM model type ('vit_b', 'vit_l', 'vit_h')
+        sam_checkpoint: Path to SAM checkpoint
+        
+    Returns:
+        Binary mask [H, W] or None if segmentation fails
+    """
+    try:
+        from segment_anything import sam_model_registry, SamPredictor
+    except ImportError:
+        print("[WARN] segment_anything not installed. Install with: pip install segment-anything")
+        return None
+    
+    # Load SAM model
+    if sam_checkpoint is None:
+        # Try to find checkpoint in common locations
+        sam_checkpoint = Path.home() / ".cache" / "sam" / f"sam_{model_type}.pth"
+        if not sam_checkpoint.exists():
+            print(f"[WARN] SAM checkpoint not found at {sam_checkpoint}")
+            return None
+    
+    try:
+        sam = sam_model_registry[model_type](checkpoint=str(sam_checkpoint))
+        sam.eval()
+        predictor = SamPredictor(sam)
+    except Exception as e:
+        print(f"[WARN] Failed to load SAM model: {e}")
+        return None
+    
+    # Set image
+    predictor.set_image(rgb_image)
+    
+    # Convert bbox prompt to xyxy format
+    cx, cy = bbox_prompt["center"]
+    w, h = bbox_prompt["width"], bbox_prompt["height"]
+    x1, y1 = cx - w / 2, cy - h / 2
+    x2, y2 = cx + w / 2, cy + h / 2
+    bbox_xyxy = np.array([x1, y1, x2, y2])
+    
+    # Predict mask
+    try:
+        masks, scores, logits = predictor.predict(
+            box=bbox_xyxy,
+            multimask_output=False,
+        )
+        # Return best mask
+        return masks[0] if len(masks) > 0 else None
+    except Exception as e:
+        print(f"[WARN] SAM prediction failed: {e}")
+        return None
+
+
+def _track_gripper_contact_objects_with_sam(
+    rgbs: np.ndarray,
+    gripper_bboxes_2d: List[Dict[str, float]],
+    contact_threshold_pixels: float = 50.0,
+    sam_model_type: str = "vit_b",
+) -> Dict[str, List[Optional[np.ndarray]]]:
+    """
+    Track objects in contact with gripper using SAM.
+    
+    Segments objects near the gripper in each frame and tracks them
+    across the sequence.
+    
+    Args:
+        rgbs: [T, H, W, 3] RGB images
+        gripper_bboxes_2d: List of T 2D bbox projections
+        contact_threshold_pixels: Distance threshold for "contact"
+        sam_model_type: SAM model type
+        
+    Returns:
+        Dictionary with 'object_masks' (list of T masks)
+    """
+    print("[INFO] Tracking gripper contact objects with SAM...")
+    
+    object_masks = []
+    
+    for t, (rgb, bbox_2d) in enumerate(zip(rgbs, gripper_bboxes_2d)):
+        if bbox_2d is None:
+            object_masks.append(None)
+            continue
+        
+        # Expand bbox to include nearby objects
+        expanded_bbox = {
+            "center": bbox_2d["center"],
+            "width": bbox_2d["width"] + 2 * contact_threshold_pixels,
+            "height": bbox_2d["height"] + 2 * contact_threshold_pixels,
+        }
+        
+        # Segment with SAM
+        mask = _segment_object_with_sam(
+            rgb_image=rgb,
+            bbox_prompt=expanded_bbox,
+            model_type=sam_model_type,
+        )
+        
+        object_masks.append(mask)
+        
+        if t % 10 == 0:
+            print(f"  Segmented frame {t}/{len(rgbs)}")
+    
+    print(f"  ✓ SAM tracking complete: {len(object_masks)} frames")
+    
+    return {"object_masks": object_masks}
 
 
 def _export_gripper_bbox_videos(
@@ -1771,6 +2130,50 @@ def process_frames(
                         print("[WARN] robot_gripper_body_boxes is not None but full_bbox_for_frame is None")
                     else:
                         print("[WARN] Could not compute gripper bbox for this frame")
+                    
+                    # Align bboxes with point cloud if requested
+                    if getattr(args, "align_bbox_with_points", True) and combined_pcd is not None:
+                        # Extract points and colors from point cloud
+                        pcd_points = np.asarray(combined_pcd.points, dtype=np.float32)
+                        pcd_colors = np.asarray(combined_pcd.colors, dtype=np.float32) if combined_pcd.has_colors() else None
+                        
+                        if len(pcd_points) > 0:
+                            search_radius_scale = getattr(args, "align_bbox_search_radius_scale", 2.0)
+                            
+                            # Align contact bbox
+                            if bbox_entry_for_frame is not None:
+                                aligned_bbox = _align_bbox_with_point_cloud_com(
+                                    bbox=bbox_entry_for_frame,
+                                    points=pcd_points,
+                                    colors=pcd_colors,
+                                    search_radius_scale=search_radius_scale,
+                                )
+                                if aligned_bbox is not None:
+                                    bbox_entry_for_frame = aligned_bbox
+                                    if ti == 0:
+                                        print(f"[INFO] Aligned contact bbox with point cloud COM")
+                            
+                            # Align body bbox
+                            if full_bbox_for_frame is not None:
+                                aligned_body = _align_bbox_with_point_cloud_com(
+                                    bbox=full_bbox_for_frame,
+                                    points=pcd_points,
+                                    colors=pcd_colors,
+                                    search_radius_scale=search_radius_scale,
+                                )
+                                if aligned_body is not None:
+                                    full_bbox_for_frame = aligned_body
+                            
+                            # Align fingertip bbox
+                            if fingertip_bbox_for_frame is not None:
+                                aligned_fingertip = _align_bbox_with_point_cloud_com(
+                                    bbox=fingertip_bbox_for_frame,
+                                    points=pcd_points,
+                                    colors=pcd_colors,
+                                    search_radius_scale=search_radius_scale,
+                                )
+                                if aligned_fingertip is not None:
+                                    fingertip_bbox_for_frame = aligned_fingertip
 
                 if robot_gripper_pad_points is not None:
                     pad_pts_for_frame = _compute_gripper_pad_points(robot_model, robot_conf)
@@ -2302,6 +2705,43 @@ def main():
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Enable additional debug outputs such as red robot point overlays in Rerun.",
+    )
+    parser.add_argument(
+        "--align-bbox-with-points",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Align gripper bboxes with center of mass of nearby point cloud (x-y and rotation only). Disable with --no-align-bbox-with-points.",
+    )
+    parser.add_argument(
+        "--align-bbox-search-radius-scale",
+        type=float,
+        default=2.0,
+        help="Scale factor for bbox alignment search radius (relative to bbox diagonal).",
+    )
+    parser.add_argument(
+        "--track-gripper-with-mvtracker",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Track gripper bboxes using MVTracker (invoked 3 times for contact/body/fingertip).",
+    )
+    parser.add_argument(
+        "--track-objects-with-sam",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Use SAM to track objects that the gripper will touch if visible.",
+    )
+    parser.add_argument(
+        "--sam-model-type",
+        type=str,
+        default="vit_b",
+        choices=["vit_b", "vit_l", "vit_h"],
+        help="SAM model type to use for object segmentation.",
+    )
+    parser.add_argument(
+        "--sam-contact-threshold",
+        type=float,
+        default=50.0,
+        help="Distance threshold (pixels) for considering objects in contact with gripper.",
     )
     args = parser.parse_args()
 
