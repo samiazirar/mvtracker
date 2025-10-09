@@ -425,6 +425,7 @@ def _compute_gripper_body_bbox(
     robot_conf: Optional[Any],
     ref_bbox: Optional[Dict[str, np.ndarray]],
     body_width_m: Optional[float] = None,
+    body_height_m: Optional[float] = None,
     body_length_m: Optional[float] = None,
 ) -> Optional[Dict[str, np.ndarray]]:
     """Compute a larger gripper body bbox with fixed width, sharing the same frame as the contact bbox."""
@@ -444,13 +445,17 @@ def _compute_gripper_body_bbox(
     length_m = body_length_m if body_length_m is not None else dims["length"]
     # Keep the same vertical size as contact bbox
     contact_half_sizes = ref_bbox["half_sizes"]
-    height_m = float(contact_half_sizes[1] * 2.0)
+    if body_height_m is not None:
+        height_m = float(body_height_m)
+    else:
+        height_m = float(contact_half_sizes[1] * 2.0)
     half_sizes = np.array([width_m / 2.0, height_m / 2.0, length_m / 2.0], dtype=np.float32)
     
     # Share the same basis as contact bbox
     basis = ref_bbox.get("basis")
     if basis is None:
         return None
+    basis = np.asarray(basis, dtype=np.float32)
     
     # Position body box to share the same front face as contact box
     # Get the contact box's front face position (pad_midpoint)
@@ -468,6 +473,7 @@ def _compute_gripper_body_bbox(
         "center": center.astype(np.float32),
         "half_sizes": half_sizes.astype(np.float32),
         "quat_xyzw": quat,
+        "basis": basis,
     }
 
 
@@ -2115,13 +2121,19 @@ def process_frames(
                     full_bbox_for_frame = base_full_bbox
                     if robot_gripper_body_boxes is not None and bbox_entry_for_frame is not None:
                         body_width_override = getattr(args, "gripper_body_width_m", None)
+                        body_height_override = getattr(args, "gripper_body_height_m", None)
                         body_length_override = getattr(args, "gripper_body_length_m", None)
-                        if body_width_override is not None or body_length_override is not None:
+                        if (
+                            body_width_override is not None
+                            or body_height_override is not None
+                            or body_length_override is not None
+                        ):
                             full_bbox_for_frame = _compute_gripper_body_bbox(
                                 robot_model,
                                 robot_conf,
                                 bbox_entry_for_frame,
                                 body_width_m=body_width_override,
+                                body_height_m=body_height_override,
                                 body_length_m=body_length_override,
                             )
                     elif robot_gripper_body_boxes is None and full_bbox_for_frame is not None:
@@ -2730,6 +2742,12 @@ def main():
         type=float,
         default=None,
         help="Body bbox width along jaw-separation axis (full size, fixed across frames).",
+    )
+    parser.add_argument(
+        "--gripper-body-height-m",
+        type=float,
+        default=None,
+        help="Body bbox thickness along the pad-normal axis (full size).",
     )
     parser.add_argument(
         "--gripper-body-length-m",
