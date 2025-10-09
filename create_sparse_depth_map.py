@@ -714,6 +714,129 @@ def _generate_query_points_from_bbox(
     return query_points
 
 
+def _sample_points_near_fingertip(
+    body_bbox: Dict[str, np.ndarray],
+    fingertip_bbox: Dict[str, np.ndarray],
+    num_samples: int,
+    rng: Optional[np.random.Generator] = None,
+) -> np.ndarray:
+    """Sample points inside the body bbox near the fingertip bbox side faces."""
+    if num_samples <= 0 or body_bbox is None or fingertip_bbox is None:
+        return np.zeros((0, 3), dtype=np.float32)
+
+    def _ensure_basis(box: Dict[str, np.ndarray]) -> Optional[np.ndarray]:
+        basis_arr = box.get("basis")
+        if basis_arr is not None:
+            return np.asarray(basis_arr, dtype=np.float32)
+        quat = box.get("quat_xyzw")
+        if quat is None:
+            return None
+        return _quaternion_xyzw_to_rotation_matrix(np.asarray(quat, dtype=np.float32))
+
+    body_basis = _ensure_basis(body_bbox)
+    if body_basis is None:
+        return np.zeros((0, 3), dtype=np.float32)
+    fingertip_basis = _ensure_basis(fingertip_bbox)
+    if fingertip_basis is None:
+        return np.zeros((0, 3), dtype=np.float32)
+
+    # Assume fingertip bbox shares the body frame; fall back to aligning via body basis.
+    if not np.allclose(body_basis, fingertip_basis, atol=1e-4):
+        fingertip_basis = body_basis
+
+    body_center = np.asarray(body_bbox["center"], dtype=np.float32)
+    body_half = np.asarray(body_bbox["half_sizes"], dtype=np.float32)
+    fingertip_center = np.asarray(fingertip_bbox["center"], dtype=np.float32)
+    fingertip_half = np.asarray(fingertip_bbox["half_sizes"], dtype=np.float32)
+
+    rng = rng or np.random.default_rng()
+
+    # Compute fingertip center in body-local coordinates.
+    fingertip_local_center = body_basis.T @ (fingertip_center - body_center)
+
+    # Margin so that sampled points hug the fingertip surfaces but stay inside the body.
+    max_margins = np.maximum(body_half - fingertip_half, 0.0)
+    base_margin = np.maximum(fingertip_half * 0.25, 0.002)
+    margins = np.minimum(np.maximum(max_margins, 0.0), base_margin + max_margins)
+    margins = np.maximum(margins, 0.002)
+
+    samples_local = np.zeros((num_samples, 3), dtype=np.float32)
+    face_indices = rng.integers(0, 6, size=num_samples)
+    for idx, face in enumerate(face_indices):
+        axis = face // 2  # 0:x, 1:y, 2:z
+        sign = -1.0 if face % 2 == 0 else 1.0
+
+        coord = fingertip_local_center.copy()
+        # Sample coordinates along the two orthogonal axes within fingertip extents.
+        for other_axis in (a for a in range(3) if a != axis):
+            extent = fingertip_half[other_axis]
+            coord[other_axis] = fingertip_local_center[other_axis] + rng.uniform(-extent, extent)
+
+        # Offset slightly outward from the fingertip surface along the chosen axis.
+        available_margin = margins[axis]
+        offset = rng.uniform(0.0, available_margin)
+        coord[axis] = fingertip_local_center[axis] + sign * (fingertip_half[axis] + offset)
+
+        # Clamp to remain inside the body bbox.
+        coord = np.clip(coord, -body_half + 1e-4, body_half - 1e-4)
+        samples_local[idx] = coord
+
+    samples_world = body_center[None, :] + samples_local @ body_basis.T
+    return samples_world.astype(np.float32)
+
+
+def _generate_body_query_points(
+    body_bboxes: Sequence[Optional[Dict[str, np.ndarray]]],
+    fingertip_bboxes: Sequence[Optional[Dict[str, np.ndarray]]],
+    total_samples: int = 500,
+    max_frames: int = 3,
+) -> np.ndarray:
+    """Generate query points from early frames by sampling the body bbox near the fingertip."""
+    if total_samples <= 0 or not body_bboxes or not fingertip_bboxes:
+        return np.zeros((0, 4), dtype=np.float32)
+
+    frames = min(max_frames, len(body_bboxes), len(fingertip_bboxes))
+    if frames <= 0:
+        return np.zeros((0, 4), dtype=np.float32)
+
+    rng = np.random.default_rng()
+    queries: List[np.ndarray] = []
+    collected = 0
+    per_frame = max(1, int(np.ceil(total_samples / frames)))
+
+    for t in range(frames):
+        if collected >= total_samples:
+            break
+        body_bbox = body_bboxes[t]
+        fingertip_bbox = fingertip_bboxes[t]
+        if body_bbox is None or fingertip_bbox is None:
+            continue
+        remaining = total_samples - collected
+        samples_needed = min(remaining, per_frame)
+        samples_world = _sample_points_near_fingertip(
+            body_bbox,
+            fingertip_bbox,
+            samples_needed,
+            rng=rng,
+        )
+        if samples_world.size == 0:
+            continue
+        timestamps = np.full((samples_world.shape[0], 1), float(t), dtype=np.float32)
+        queries.append(np.hstack([timestamps, samples_world]))
+        collected += samples_world.shape[0]
+
+    if not queries:
+        return np.zeros((0, 4), dtype=np.float32)
+
+    query_points = np.concatenate(queries, axis=0)
+    if query_points.shape[0] > total_samples:
+        # Evenly subsample to the requested total.
+        indices = np.linspace(0, query_points.shape[0] - 1, total_samples, dtype=int)
+        query_points = query_points[indices]
+
+    return query_points.astype(np.float32)
+
+
 def _track_gripper_with_mvtracker(
     rgbs: torch.Tensor,
     depths: torch.Tensor,
@@ -787,19 +910,33 @@ def _track_gripper_with_mvtracker(
     for bbox_name, bboxes in bbox_types:
         if bboxes is None or len(bboxes) == 0:
             continue
-        
-        # Generate query points from first bbox
-        query_points_list = []
-        for t, bbox in enumerate(bboxes):
-            if bbox is not None:
+
+        query_points_np: np.ndarray
+        if (
+            bbox_name == "body"
+            and body_bboxes is not None
+            and fingertip_bboxes is not None
+        ):
+            query_points_np = _generate_body_query_points(
+                body_bboxes=body_bboxes,
+                fingertip_bboxes=fingertip_bboxes,
+                total_samples=500,
+                max_frames=3,
+            )
+        else:
+            query_points_collected = []
+            for t, bbox in enumerate(bboxes):
+                if bbox is None:
+                    continue
                 qp = _generate_query_points_from_bbox(bbox, timestamp=t, num_points=8)
-                query_points_list.append(qp)
-        
-        if not query_points_list:
+                if qp.size:
+                    query_points_collected.append(qp)
+            query_points_np = query_points_collected[0] if query_points_collected else np.zeros((0, 4), dtype=np.float32)
+
+        if query_points_np.size == 0:
             continue
-        
-        # Use query points from first frame
-        query_points = torch.from_numpy(query_points_list[0]).float()
+
+        query_points = torch.from_numpy(query_points_np).float()
         result[f"{bbox_name}_query_points"] = query_points.clone().detach().cpu()
         
         print(f"  Tracking {bbox_name} bbox with {len(query_points)} query points...")
