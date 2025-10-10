@@ -625,6 +625,7 @@ class MonocularToMultiViewAdapter(nn.Module):
         # Call the 2D tracker for each view
         traj_e_per_view = {}
         vis_e_per_view = {}
+        traj_pixels_per_view = {}
         for view_idx in range(num_views):
             track_mask = query_points_best_visibility_view[batch_idx] == view_idx
             if track_mask.sum() == 0:
@@ -657,10 +658,10 @@ class MonocularToMultiViewAdapter(nn.Module):
                 queries_with_z=view_query_points_with_z,
                 queries_xyz_worldspace=view_query_points_xyz_worldspace,
             )
-            view_traj_e = results["traj_2d"]
+            view_traj_pixels = results["traj_2d"]
             view_vis_e = results["vis"]
 
-            if save_debug_logs and view_traj_e is not None:
+            if save_debug_logs and view_traj_pixels is not None:
                 visualizer = Visualizer(
                     save_dir=debug_logs_path,
                     pad_value=16,
@@ -670,7 +671,7 @@ class MonocularToMultiViewAdapter(nn.Module):
                 )
                 visualizer.visualize(
                     video=view_rgbs[None].cpu(),
-                    tracks=view_traj_e[None].cpu(),
+                    tracks=view_traj_pixels[None].cpu(),
                     visibility=view_vis_e[None].cpu(),
                     filename=f"view_{view_idx}.mp4",
                     query_frame=query_points_t[batch_idx, :, 0][track_mask][None],
@@ -679,12 +680,12 @@ class MonocularToMultiViewAdapter(nn.Module):
 
             # Project the trajectories to the world space
             if "traj_3d_worldspace" in results:
-                view_traj_e = results["traj_3d_worldspace"]
+                view_traj_world = results["traj_3d_worldspace"]
             else:
                 if "traj_z" in results:
                     view_camera_z = results["traj_z"]
                 else:
-                    view_camera_z = bilinear_sampler(view_depths, view_traj_e.reshape(num_frames, -1, 1, 2))[:, 0, :, :]
+                    view_camera_z = bilinear_sampler(view_depths, view_traj_pixels.reshape(num_frames, -1, 1, 2))[:, 0, :, :]
 
                 view_intrs = intrs[batch_idx, view_idx]
                 view_extrs = extrs[batch_idx, view_idx]
@@ -692,8 +693,8 @@ class MonocularToMultiViewAdapter(nn.Module):
                 view_extrs_square = torch.eye(4).to(view_extrs.device)[None].repeat(num_frames, 1, 1)
                 view_extrs_square[:, :3, :] = view_extrs
                 extrs_inv = torch.inverse(view_extrs_square.float())
-                view_traj_e = pixel_xy_and_camera_z_to_world_space(
-                    pixel_xy=view_traj_e[..., :].float(),
+                view_traj_world = pixel_xy_and_camera_z_to_world_space(
+                    pixel_xy=view_traj_pixels[..., :].float(),
                     camera_z=view_camera_z.float(),
                     intrs_inv=intrs_inv,
                     extrs_inv=extrs_inv,
@@ -701,15 +702,17 @@ class MonocularToMultiViewAdapter(nn.Module):
 
             # Set the trajectory to (0,0,0) for the timesteps before the query timestep
             for point_idx, t in enumerate(query_points_t[batch_idx, :, :].squeeze(-1)[track_mask]):
-                view_traj_e[:t, point_idx, :] = 0.0
+                view_traj_world[:t, point_idx, :] = 0.0
 
-            traj_e_per_view[view_idx] = view_traj_e[None]
+            traj_e_per_view[view_idx] = view_traj_world[None]
             vis_e_per_view[view_idx] = view_vis_e[None]
+            traj_pixels_per_view[view_idx] = view_traj_pixels[None]
 
         # Merging the results from all views
         views_to_keep = list(traj_e_per_view.keys())
         traj_e = torch.cat([traj_e_per_view[view_idx] for view_idx in views_to_keep], dim=2)
         vis_e = torch.cat([vis_e_per_view[view_idx] for view_idx in views_to_keep], dim=2)
+        traj_pixels = torch.cat([traj_pixels_per_view[view_idx] for view_idx in views_to_keep], dim=2)
 
         # Sort the traj_e and vis_e based on the original indices, since concatenating the results from all views
         # will first put the results from the first view, then the results from the second view, and so on.
@@ -727,9 +730,15 @@ class MonocularToMultiViewAdapter(nn.Module):
         # Use the inv_sort_inds to sort the traj_e and vis_e
         traj_e = traj_e[:, :, inv_sort_inds]
         vis_e = vis_e[:, :, inv_sort_inds]
+        traj_pixels = traj_pixels[:, :, inv_sort_inds]
 
         # Save to results
-        results = {"traj_e": traj_e, "vis_e": vis_e}
+        results = {
+            "traj_e": traj_e,
+            "vis_e": vis_e,
+            "traj_pixels": traj_pixels,
+            "traj_pixels_view": query_points_best_visibility_view[batch_idx : batch_idx + 1].to(torch.long),
+        }
         return results
 
 
