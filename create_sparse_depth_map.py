@@ -3123,6 +3123,7 @@ def save_and_visualize(
     # Log MVTracker results if available
     if mvtracker_results is not None:
         print("[INFO] Logging MVTracker results to Rerun...")
+        datapoint_idx = 0
         tracker_backend = mvtracker_results.get("tracker_backend", "tracker")
         backend_label = tracker_backend.replace("/", "_")
         track_specs = [
