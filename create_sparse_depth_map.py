@@ -1237,6 +1237,7 @@ def _export_gripper_bbox_videos(
     extrs: np.ndarray,
     bboxes: Optional[List[Optional[Dict[str, np.ndarray]]]],
     camera_ids: Sequence[str],
+    clip_fps: float,
 ) -> None:
     """Export videos with gripper bounding boxes overlaid on RGB frames."""
     if bboxes is None or len(bboxes) == 0 or all(b is None for b in bboxes):
@@ -1246,7 +1247,11 @@ def _export_gripper_bbox_videos(
     video_dir = Path(args.out_dir) / "bbox_videos"
     video_dir.mkdir(parents=True, exist_ok=True)
 
-    fps = getattr(args, "bbox_video_fps", 30.0)
+    fps_override = getattr(args, "bbox_video_fps", None)
+    if fps_override is not None and fps_override > 0:
+        fps = float(fps_override)
+    else:
+        fps = float(clip_fps if clip_fps > 0 else 30.0)
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     edges = [(0, 1), (1, 2), (2, 3), (3, 0), (4, 5), (5, 6), (6, 7), (7, 4), (0, 4), (1, 5), (2, 6), (3, 7)]
     color = (0, 165, 255)
@@ -1343,8 +1348,6 @@ def _export_tracking_videos(
     fps_override = getattr(args, "track_video_fps", None)
     if fps_override is not None and fps_override > 0:
         video_fps = float(fps_override)
-    elif getattr(args, "bbox_video_fps", None):
-        video_fps = float(args.bbox_video_fps)
     else:
         video_fps = float(clip_fps if clip_fps > 0 else 30.0)
 
@@ -3077,6 +3080,7 @@ def save_and_visualize(
                 extrs,
                 robot_gripper_boxes,
                 final_cam_ids,
+                clip_fps,
             )
         except Exception as exc:
             print(f"[WARN] Failed to export bounding box videos: {exc}")
