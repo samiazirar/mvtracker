@@ -1106,14 +1106,13 @@ def _track_gripper(
             result[f"{bbox_name}_query_points"] = query_points.clone().detach().cpu()
             print(f"  ✓ {bbox_name} tracking complete: {tracker_result['traj_e'].shape}")
 
-            frame_indices_np = frame_indices.cpu().numpy()
-
-            tracks_pixels_tensor = tracker_result.get("traj_pixels")
-            tracks_pixels_views = tracker_result.get("traj_pixels_view")
-            if tracks_pixels_tensor is not None and tracks_pixels_views is not None:
-                tracks_pixels_np = tracks_pixels_tensor.squeeze(0).cpu().numpy()
-                view_assign = tracks_pixels_views.squeeze(0).cpu().numpy().astype(int)
+            traj_pixels_tensor = tracker_result.get("traj_pixels")
+            traj_pixels_view_tensor = tracker_result.get("traj_pixels_view")
+            if traj_pixels_tensor is not None and traj_pixels_view_tensor is not None:
+                tracks_pixels_np = traj_pixels_tensor.squeeze(0).cpu().numpy()  # [T, N, 2]
+                view_assign = traj_pixels_view_tensor.squeeze(0).cpu().numpy().astype(int)  # [N]
                 vis_np = vis_batch.squeeze(0).cpu().numpy()
+                frame_indices_np = frame_indices.cpu().numpy()
                 per_view: Dict[int, Dict[str, Any]] = {}
                 for view_idx in np.unique(view_assign):
                     if view_idx < 0:
@@ -1134,7 +1133,7 @@ def _track_gripper(
             print(f"  ✗ Failed to track {bbox_name}: {e}")
             result[f"{bbox_name}_tracks"] = None
             result[f"{bbox_name}_vis"] = None
-
+    
     return result
 
 
@@ -1262,7 +1261,7 @@ def _export_gripper_bbox_videos(
     extrs: np.ndarray,
     bboxes: Optional[List[Optional[Dict[str, np.ndarray]]]],
     camera_ids: Sequence[str],
-    clip_fps: float,
+    video_fps: float,
 ) -> None:
     """Export videos with gripper bounding boxes overlaid on RGB frames."""
     if bboxes is None or len(bboxes) == 0 or all(b is None for b in bboxes):
@@ -1272,11 +1271,7 @@ def _export_gripper_bbox_videos(
     video_dir = Path(args.out_dir) / "bbox_videos"
     video_dir.mkdir(parents=True, exist_ok=True)
 
-    fps_override = getattr(args, "bbox_video_fps", None)
-    if fps_override is not None and fps_override > 0:
-        fps = float(fps_override)
-    else:
-        fps = float(clip_fps if clip_fps > 0 else 30.0)
+    fps = float(video_fps if video_fps > 0 else 30.0)
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     edges = [(0, 1), (1, 2), (2, 3), (3, 0), (4, 5), (5, 6), (6, 7), (7, 4), (0, 4), (1, 5), (2, 6), (3, 7)]
     color = (0, 165, 255)
@@ -1353,6 +1348,7 @@ def _export_tracking_videos(
     camera_ids: Sequence[str],
     track_sets: Sequence[Dict[str, Any]],
     clip_fps: float,
+    video_fps: float,
 ) -> None:
     """Export per-camera RGB videos with tracking overlays."""
     if not track_sets:
@@ -1370,51 +1366,19 @@ def _export_tracking_videos(
     video_root = Path(args.out_dir) / "track_videos"
     video_root.mkdir(parents=True, exist_ok=True)
 
-    fps_override = getattr(args, "track_video_fps", None)
-    if fps_override is not None and fps_override > 0:
-        video_fps = float(fps_override)
-    else:
-        video_fps = float(clip_fps if clip_fps > 0 else 30.0)
+    video_fps = float(video_fps if video_fps > 0 else 30.0)
 
     point_radius = int(getattr(args, "track_video_point_radius", 3))
     line_thickness = int(getattr(args, "track_video_line_thickness", 1))
 
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-
     time_colors_bgr = (matplotlib.colormaps["turbo"](np.linspace(0.0, 1.0, max(1, num_frames)))[:, :3] * 255.0).astype(np.uint8)[:, ::-1]
-
-    def _blended_color(time_color: np.ndarray, base_color: Optional[np.ndarray]) -> Tuple[int, int, int]:
-        if base_color is None or base_color.size == 0:
-            return tuple(int(c) for c in time_color)
-        return tuple(int(0.7 * time_color[i] + 0.3 * base_color[i]) for i in range(3))
 
     for track_cfg in track_sets:
         name = track_cfg.get("name", "tracks")
         kind = track_cfg.get("kind", "3d")
         track_dir = video_root / name
         track_dir.mkdir(parents=True, exist_ok=True)
-
-        if kind == "3d":
-            tracks_world = np.asarray(track_cfg.get("tracks_world"), dtype=np.float32)
-            vis = np.asarray(track_cfg.get("vis"), dtype=np.float32)
-            colors_bgr = np.asarray(track_cfg.get("colors_bgr"), dtype=np.uint8)
-            start_frames = np.asarray(track_cfg.get("start_frames"), dtype=np.int64)
-            if tracks_world.ndim != 3 or vis.ndim != 2:
-                print(f"[WARN] Skipping track video '{name}': invalid 3D track shapes {tracks_world.shape}, {vis.shape}")
-                continue
-            if colors_bgr.size == 0:
-                cmap = matplotlib.colormaps["gist_rainbow"]
-                palette = cmap(np.linspace(0.0, 1.0, max(1, tracks_world.shape[2])))[:, :3]
-                colors_rgb = (palette * 255.0).astype(np.uint8)
-                colors_bgr = colors_rgb[:, ::-1]
-            if start_frames.size == 0:
-                start_frames = np.zeros((tracks_world.shape[2],), dtype=np.int64)
-
-        elif kind == "2d":
-            per_view = track_cfg.get("per_view") or {}
-        else:
-            print(f"[WARN] Skipping track video '{name}': unknown track type '{kind}'.")
-            continue
 
         for ci in range(num_cams):
             cam_id = str(camera_ids[ci]) if camera_ids is not None and ci < len(camera_ids) else str(ci)
@@ -1430,63 +1394,76 @@ def _export_tracking_videos(
                 continue
 
             if kind == "3d":
-                num_points = tracks_world.shape[2]
-                prev_pixels = np.full((num_points, 2), np.nan, dtype=np.float32)
+                tracks_world = np.asarray(track_cfg.get("tracks_world"), dtype=np.float32)
+                vis_world = np.asarray(track_cfg.get("vis"), dtype=np.float32)
+                colors_bgr = np.asarray(track_cfg.get("colors_bgr"), dtype=np.uint8)
+                start_frames = np.asarray(track_cfg.get("start_frames"), dtype=np.int64)
+                if tracks_world.ndim != 3 or vis_world.ndim != 2:
+                    writer.release()
+                    print(f"[WARN] Skipping track video '{name}': invalid 3D track shapes {tracks_world.shape}, {vis_world.shape}")
+                    continue
+                if colors_bgr.size == 0:
+                    cmap = matplotlib.colormaps["gist_rainbow"]
+                    palette = cmap(np.linspace(0.0, 1.0, max(1, tracks_world.shape[2])))[:, :3]
+                    colors_bgr = (palette * 255.0).astype(np.uint8)[:, ::-1]
+                if start_frames.size == 0:
+                    start_frames = np.zeros((tracks_world.shape[2],), dtype=np.int64)
+                prev_pixels = np.full((tracks_world.shape[2], 2), np.nan, dtype=np.float32)
             else:
+                per_view = track_cfg.get("per_view") or {}
                 view_entry = per_view.get(ci)
                 if not view_entry:
                     writer.release()
                     continue
                 pixels_view = np.asarray(view_entry.get("pixels"), dtype=np.float32)
                 vis_view = np.asarray(view_entry.get("vis"), dtype=np.float32)
-                start_frames_view = np.asarray(view_entry.get("start_frames"), dtype=np.int64)
-                colors_view = np.asarray(view_entry.get("colors_bgr"), dtype=np.uint8)
+                start_frames = np.asarray(view_entry.get("start_frames"), dtype=np.int64)
+                colors_bgr = np.asarray(view_entry.get("colors_bgr"), dtype=np.uint8)
                 if pixels_view.size == 0 or vis_view.size == 0:
                     writer.release()
                     continue
-                if colors_view.size == 0:
+                if colors_bgr.size == 0:
                     cmap = matplotlib.colormaps["gist_rainbow"]
                     palette = cmap(np.linspace(0.0, 1.0, max(1, pixels_view.shape[1])))[:, :3]
-                    colors_rgb = (palette * 255.0).astype(np.uint8)
-                    colors_view = colors_rgb[:, ::-1]
-                if start_frames_view.size == 0:
-                    start_frames_view = np.zeros((pixels_view.shape[1],), dtype=np.int64)
+                    colors_bgr = (palette * 255.0).astype(np.uint8)[:, ::-1]
+                if start_frames.size == 0:
+                    start_frames = np.zeros((pixels_view.shape[1],), dtype=np.int64)
                 prev_pixels = np.full((pixels_view.shape[1], 2), np.nan, dtype=np.float32)
 
             for ti in range(num_frames):
                 frame_rgb = rgbs[ci, ti]
                 frame_bgr = np.ascontiguousarray(frame_rgb[:, :, ::-1])
+                tint_color = time_colors_bgr[ti]
 
                 if kind == "3d":
                     pixels, depth_valid = _project_points_to_pixels(tracks_world[ti], intrs[ci, ti], extrs[ci, ti])
-                    visibility = (vis[ti] > 0.5) & depth_valid & (ti >= start_frames)
-                    base_colors = colors_bgr
+                    visibility = (vis_world[ti] > 0.5) & depth_valid & (ti >= start_frames)
                 else:
                     pixels = pixels_view[ti]
-                    visibility = (vis_view[ti] > 0.5) & (ti >= start_frames_view)
-                    base_colors = colors_view
-
-                time_color = time_colors_bgr[ti]
+                    visibility = (vis_view[ti] > 0.5) & (ti >= start_frames)
 
                 for idx in range(pixels.shape[0]):
-                    if not visibility[idx]:
-                        prev_pixels[idx, :] = np.nan
+                    if idx >= visibility.shape[0] or not visibility[idx]:
+                        if idx < prev_pixels.shape[0]:
+                            prev_pixels[idx, :] = np.nan
                         continue
 
                     px, py = float(pixels[idx, 0]), float(pixels[idx, 1])
                     if not (0 <= px < width and 0 <= py < height):
-                        prev_pixels[idx, :] = np.nan
+                        if idx < prev_pixels.shape[0]:
+                            prev_pixels[idx, :] = np.nan
                         continue
 
-                    base_color = base_colors[idx] if base_colors.ndim == 2 and base_colors.shape[0] > idx else None
-                    color = _blended_color(time_color, base_color)
+                    base_color = colors_bgr[idx] if colors_bgr.ndim == 2 and colors_bgr.shape[0] > idx else colors_bgr
+                    draw_color = tuple(int(0.7 * tint_color[c] + 0.3 * base_color[c]) for c in range(3))
                     pt = (int(round(px)), int(round(py)))
-                    cv2.circle(frame_bgr, pt, point_radius, color, thickness=-1, lineType=cv2.LINE_AA)
+                    cv2.circle(frame_bgr, pt, point_radius, draw_color, thickness=-1, lineType=cv2.LINE_AA)
 
-                    if not np.isnan(prev_pixels[idx, 0]):
+                    if idx < prev_pixels.shape[0] and not np.isnan(prev_pixels[idx, 0]):
                         prev_pt = (int(round(prev_pixels[idx, 0])), int(round(prev_pixels[idx, 1])))
-                        cv2.line(frame_bgr, prev_pt, pt, color, thickness=line_thickness, lineType=cv2.LINE_AA)
-                    prev_pixels[idx, :] = (px, py)
+                        cv2.line(frame_bgr, prev_pt, pt, draw_color, thickness=line_thickness, lineType=cv2.LINE_AA)
+                    if idx < prev_pixels.shape[0]:
+                        prev_pixels[idx, :] = (px, py)
 
                 writer.write(frame_bgr)
 
@@ -2940,6 +2917,15 @@ def save_and_visualize(
         duration_ms = float(timestamps[-1] - timestamps[0])
         if duration_ms > 0.0:
             clip_fps = max(1e-6, (frame_count - 1) / (duration_ms / 1000.0))
+    default_fps = clip_fps if clip_fps > 0 else (getattr(args, "sync_fps", 0.0) if getattr(args, "sync_fps", 0.0) > 0 else 30.0)
+    bbox_override = getattr(args, "bbox_video_fps", None)
+    bbox_video_fps = float(bbox_override) if bbox_override and bbox_override > 0 else default_fps
+    track_override = getattr(args, "track_video_fps", None)
+    track_video_fps = float(track_override) if track_override and track_override > 0 else default_fps
+    print(
+        f"[DEBUG] clip_fps={clip_fps:.3f} fps | bbox_video_fps={bbox_video_fps:.3f} fps | track_video_fps={track_video_fps:.3f} fps"
+    )
+    effective_fps = default_fps
     # Convert to channels-first format for NPZ
     rgbs_final = np.moveaxis(rgbs, -1, 2)
     depths_final = depths[:, :, None, :, :]
@@ -2982,7 +2968,6 @@ def save_and_visualize(
         rh20t_root = configs_path.parent.parent if configs_path.parent.name == "configs" else configs_path.parent
 
         # Log robot points separately (they survive better than going through reprojection)
-        effective_fps = clip_fps if clip_fps > 0 else 30.0
         if robot_debug_points is not None and len(robot_debug_points) > 0:
             fps = effective_fps
             print(f"[INFO] Logging {len(robot_debug_points)} robot point clouds to Rerun...")
@@ -2990,7 +2975,7 @@ def save_and_visualize(
                 if pts is None or pts.size == 0:
                     continue
                 cols = robot_debug_colors[idx] if robot_debug_colors and idx < len(robot_debug_colors) else None
-                rr.set_time_seconds("frame", idx / fps)
+                rr.set_time_seconds("frame", idx / fps if fps > 0 else float(idx))
                 # Log to top-level robot entity for easy toggling (NOT under sequence-0)
                 rr.log(
                     f"robot",
@@ -3010,7 +2995,7 @@ def save_and_visualize(
                 for idx, box in enumerate(robot_gripper_boxes):
                     if not box:
                         continue
-                    rr.set_time_seconds("frame", idx / fps)
+                    rr.set_time_seconds("frame", idx / fps if fps > 0 else float(idx))
                     centers = np.asarray(box["center"], dtype=np.float32)[None, :]
                     half_sizes = np.asarray(box["half_sizes"], dtype=np.float32)[None, :]
                     rr.log(
@@ -3030,7 +3015,7 @@ def save_and_visualize(
                 for idx, box in enumerate(robot_gripper_body_boxes):
                     if not box:
                         continue
-                    rr.set_time_seconds("frame", idx / fps)
+                    rr.set_time_seconds("frame", idx / fps if fps > 0 else float(idx))
                     centers = np.asarray(box["center"], dtype=np.float32)[None, :]
                     half_sizes = np.asarray(box["half_sizes"], dtype=np.float32)[None, :]
                     rr.log(
@@ -3050,7 +3035,7 @@ def save_and_visualize(
                 for idx, box in enumerate(robot_gripper_fingertip_boxes):
                     if not box:
                         continue
-                    rr.set_time_seconds("frame", idx / fps)
+                    rr.set_time_seconds("frame", idx / fps if fps > 0 else float(idx))
                     centers = np.asarray(box["center"], dtype=np.float32)[None, :]
                     half_sizes = np.asarray(box["half_sizes"], dtype=np.float32)[None, :]
                     rr.log(
@@ -3071,7 +3056,7 @@ def save_and_visualize(
                 for idx, pts in enumerate(robot_gripper_pad_points):
                     if pts is None or len(pts) == 0:
                         continue
-                    rr.set_time_seconds("frame", idx / fps)
+                    rr.set_time_seconds("frame", idx / fps if fps > 0 else float(idx))
                     cols = np.tile(np.array([[255, 0, 255]], dtype=np.uint8), (len(pts), 1))
                     rr.log(
                         "robot/gripper_pad_points",
@@ -3080,7 +3065,7 @@ def save_and_visualize(
         
         # Log TCP points from API (cyan spheres)
         if robot_tcp_points:
-            fps = clip_fps if clip_fps > 0 else (args.sync_fps if args.sync_fps > 0 else 30.0)
+            fps = default_fps
             valid_pts = any(pt is not None and len(pt) == 3 for pt in robot_tcp_points)
             if valid_pts:
                 count = sum(1 for pt in robot_tcp_points if pt is not None and len(pt) == 3)
@@ -3089,7 +3074,7 @@ def save_and_visualize(
                 for idx, pt in enumerate(robot_tcp_points):
                     if pt is None or len(pt) != 3:
                         continue
-                    rr.set_time_seconds("frame", idx / fps)
+                    rr.set_time_seconds("frame", idx / fps if fps > 0 else float(idx))
                     # Log as a single cyan point with larger radius
                     rr.log(
                         "points/tcp_point",
@@ -3102,7 +3087,7 @@ def save_and_visualize(
         
         # Log object points from API (yellow spheres)
         if robot_object_points:
-            fps = clip_fps if clip_fps > 0 else (args.sync_fps if args.sync_fps > 0 else 30.0)
+            fps = default_fps
             valid_pts = any(pt is not None and len(pt) == 3 for pt in robot_object_points)
             if valid_pts:
                 count = sum(1 for pt in robot_object_points if pt is not None and len(pt) == 3)
@@ -3110,7 +3095,7 @@ def save_and_visualize(
                 for idx, pt in enumerate(robot_object_points):
                     if pt is None or len(pt) != 3:
                         continue
-                    rr.set_time_seconds("frame", idx / fps)
+                    rr.set_time_seconds("frame", idx / fps if fps > 0 else float(idx))
                     # Log as a single yellow point
                     rr.log(
                         "points/object_point",
@@ -3130,7 +3115,7 @@ def save_and_visualize(
                 extrs,
                 robot_gripper_boxes,
                 final_cam_ids,
-                clip_fps,
+                bbox_video_fps,
             )
         except Exception as exc:
             print(f"[WARN] Failed to export bounding box videos: {exc}")
@@ -3224,9 +3209,31 @@ def save_and_visualize(
             color_rgb_arr = np.array(color_rgb, dtype=np.uint8)
             colors_bgr = np.tile(color_rgb_arr[::-1], (num_points, 1))
 
+            time_colors_rgb = (matplotlib.colormaps["turbo"](np.linspace(0.0, 1.0, max(1, num_frames)))[:, :3] * 255.0).astype(np.uint8)
+            time_fps = clip_fps if clip_fps > 0 else default_fps
+            tracks_np = tracks_batch.squeeze(0).cpu().numpy()
+            vis_np = vis_batch.squeeze(0).cpu().numpy()
+            rr.log(
+                f"sequence-{datapoint_idx}/tracks/{predictor_name}/time_colored",
+                rr.Clear(recursive=True),
+            )
+            for t in range(num_frames):
+                visible_mask = vis_np[t] > 0.5
+                if not visible_mask.any():
+                    continue
+                rr.set_time_seconds("frame", t / time_fps if time_fps > 0 else float(t))
+                rr.log(
+                    f"sequence-{datapoint_idx}/tracks/{predictor_name}/time_colored",
+                    rr.Points3D(
+                        positions=tracks_np[t, visible_mask].astype(np.float32),
+                        colors=time_colors_rgb[t][None, :].repeat(visible_mask.sum(), axis=0),
+                        radii=np.full(visible_mask.sum(), 0.01, dtype=np.float32),
+                    ),
+                )
+
             track_video_specs.append(
                 {
-                    "name": f"{backend_label}_{track_name}",
+                    "name": f"{predictor_name}",
                     "kind": "3d",
                     "tracks_world": tracks_batch.squeeze(0).cpu().numpy(),
                     "vis": vis_batch.squeeze(0).cpu().numpy(),
@@ -3235,38 +3242,19 @@ def save_and_visualize(
                 }
             )
 
-            time_colors_rgb = (matplotlib.colormaps["turbo"](np.linspace(0.0, 1.0, max(1, num_frames)))[:, :3] * 255.0).astype(np.uint8)
-            tracks_np = tracks_batch.squeeze(0).cpu().numpy()
-            vis_np = vis_batch.squeeze(0).cpu().numpy()
-            for t in range(num_frames):
-                visible_mask = vis_np[t] > 0.5
-                if not visible_mask.any():
-                    continue
-                rr.set_time_seconds("frame", t / clip_fps if clip_fps > 0 else float(t))
-                rr.log(
-                    f"sequence-0/tracks/{predictor_name}/time_colored",
-                    rr.Points3D(
-                        positions=tracks_np[t, visible_mask].astype(np.float32),
-                        colors=np.tile(time_colors_rgb[t], (visible_mask.sum(), 1)),
-                        radii=np.full(visible_mask.sum(), 0.01, dtype=np.float32),
-                    ),
-                )
-
             per_view_pixels = mvtracker_results.get(f"{track_name}_tracks_pixels_per_view")
             if per_view_pixels:
-                vis_np = vis_batch.squeeze(0).cpu().numpy()
-                frame_indices_np = frame_indices.cpu().numpy()
                 per_view_entries: Dict[int, Dict[str, Any]] = {}
                 for view_idx, view_data in per_view_pixels.items():
-                    pixels = np.asarray(view_data.get("pixels"), dtype=np.float32)
+                    pixels_view = np.asarray(view_data.get("pixels"), dtype=np.float32)
                     vis_view = np.asarray(view_data.get("vis"), dtype=np.float32)
                     start_frames_view = np.asarray(view_data.get("start_frames"), dtype=np.int64)
                     indices_view = np.asarray(view_data.get("indices"), dtype=np.int64)
-                    if pixels.size == 0 or vis_view.size == 0:
+                    if pixels_view.size == 0 or vis_view.size == 0:
                         continue
                     color_subset = colors_bgr[indices_view] if indices_view.size else colors_bgr
                     per_view_entries[int(view_idx)] = {
-                        "pixels": pixels,
+                        "pixels": pixels_view,
                         "vis": vis_view,
                         "start_frames": start_frames_view,
                         "colors_bgr": color_subset,
@@ -3274,7 +3262,7 @@ def save_and_visualize(
                 if per_view_entries:
                     track_video_specs.append(
                         {
-                            "name": f"{backend_label}_{track_name}_2d",
+                            "name": f"{predictor_name}_2d",
                             "kind": "2d",
                             "per_view": per_view_entries,
                         }
@@ -3294,7 +3282,7 @@ def save_and_visualize(
     # Log SAM results if available
     if sam_results is not None and "object_masks" in sam_results:
         print("[INFO] Logging SAM segmentation masks to Rerun...")
-        fps = clip_fps if clip_fps > 0 else (args.sync_fps if args.sync_fps > 0 else 30.0)
+        fps = default_fps
         object_masks = sam_results["object_masks"]
         
         # Log masks as segmentation images

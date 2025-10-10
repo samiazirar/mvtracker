@@ -731,13 +731,15 @@ class MonocularToMultiViewAdapter(nn.Module):
         traj_e = traj_e[:, :, inv_sort_inds]
         vis_e = vis_e[:, :, inv_sort_inds]
         traj_pixels = traj_pixels[:, :, inv_sort_inds]
+        view_assign_sorted = query_points_best_visibility_view[batch_idx][sort_inds]
+        view_assign_sorted = view_assign_sorted[inv_sort_inds]
 
         # Save to results
         results = {
             "traj_e": traj_e,
             "vis_e": vis_e,
             "traj_pixels": traj_pixels,
-            "traj_pixels_view": query_points_best_visibility_view[batch_idx : batch_idx + 1].to(torch.long),
+            "traj_pixels_view": view_assign_sorted[None].to(torch.long),
         }
         return results
 
