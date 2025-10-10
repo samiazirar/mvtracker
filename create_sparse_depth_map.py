@@ -120,6 +120,8 @@ MIN_CONTACT_LENGTH = 0.015
 CONTACT_WIDTH_SCALE_FALLBACK = 0.65
 CONTACT_HEIGHT_SCALE_FALLBACK = 0.45
 
+GLOBAL_RNG = np.random.default_rng(42)
+
 # --- Utility Functions ---
 # Functions for mathematical transformations, gripper bounding box computation, and 3D geometry handling.
 
@@ -717,8 +719,101 @@ def _generate_query_points_from_bbox(
     # Add timestamp column
     timestamps = np.full((len(corners), 1), float(timestamp), dtype=np.float32)
     query_points = np.hstack([timestamps, corners])
-    
+
     return query_points
+
+
+def _sample_points_within_bbox(
+    points_world: np.ndarray,
+    bbox: Optional[Dict[str, np.ndarray]],
+    margin: float,
+    surface: Optional[str] = None,
+    surface_margin: float = 0.01,
+) -> np.ndarray:
+    """Return points from `points_world` that lie inside (or near) the bbox."""
+    if bbox is None or points_world.size == 0:
+        return np.empty((0, 3), dtype=np.float32)
+
+    center = np.asarray(bbox["center"], dtype=np.float32)
+    half_sizes = np.asarray(bbox["half_sizes"], dtype=np.float32)
+    basis = bbox.get("basis")
+    if basis is None:
+        quat = bbox.get("quat_xyzw")
+        if quat is None:
+            return np.empty((0, 3), dtype=np.float32)
+        basis = _quaternion_xyzw_to_rotation_matrix(np.asarray(quat, dtype=np.float32))
+    basis = np.asarray(basis, dtype=np.float32)
+
+    local = (points_world - center[None, :]) @ basis
+    within = np.all(np.abs(local) <= (half_sizes + margin), axis=1)
+
+    if surface == "positive_z":
+        within &= local[:, 2] >= (half_sizes[2] - surface_margin)
+    elif surface == "negative_z":
+        within &= local[:, 2] <= (-half_sizes[2] + surface_margin)
+    elif surface == "mid_z":
+        within &= np.abs(local[:, 2]) <= surface_margin
+
+    return points_world[within]
+
+
+def _random_sample_points(points: np.ndarray, max_points: int) -> np.ndarray:
+    """Randomly select up to `max_points` rows from `points`."""
+    if points.shape[0] <= max_points:
+        return points.astype(np.float32, copy=False)
+    idx = GLOBAL_RNG.choice(points.shape[0], size=max_points, replace=False)
+    return points[idx].astype(np.float32, copy=False)
+
+
+def _extract_points_for_bbox(
+    points_world: np.ndarray,
+    bbox: Optional[Dict[str, np.ndarray]],
+    max_samples: int,
+    margins: Sequence[float],
+    surface: Optional[str] = None,
+    surface_margin: float = 0.01,
+) -> np.ndarray:
+    """Extract up to `max_samples` points from the cloud near the bbox."""
+    for margin in margins:
+        subset = _sample_points_within_bbox(
+            points_world,
+            bbox,
+            margin=margin,
+            surface=surface,
+            surface_margin=surface_margin,
+        )
+        if subset.shape[0] > 0:
+            return _random_sample_points(subset, max_samples)
+    return np.empty((0, 3), dtype=np.float32)
+
+
+def _generate_query_points_from_samples(
+    samples_per_frame: Sequence[Optional[np.ndarray]],
+    total_samples: int,
+    max_frames: Optional[int] = None,
+) -> np.ndarray:
+    """Generate query points [t, x, y, z] from sampled point clouds."""
+    if not samples_per_frame:
+        return np.empty((0, 4), dtype=np.float32)
+
+    frame_limit = len(samples_per_frame) if max_frames is None else min(len(samples_per_frame), max_frames)
+    collected: List[np.ndarray] = []
+    for t in range(frame_limit):
+        pts = samples_per_frame[t]
+        if pts is None or pts.size == 0:
+            continue
+        pts = np.asarray(pts, dtype=np.float32)
+        timestamps = np.full((pts.shape[0], 1), float(t), dtype=np.float32)
+        collected.append(np.hstack([timestamps, pts]))
+
+    if not collected:
+        return np.empty((0, 4), dtype=np.float32)
+
+    stacked = np.concatenate(collected, axis=0)
+    if stacked.shape[0] <= total_samples:
+        return stacked.astype(np.float32, copy=False)
+    idx = GLOBAL_RNG.choice(stacked.shape[0], size=total_samples, replace=False)
+    return stacked[idx].astype(np.float32, copy=False)
 
 
 def _sample_points_near_fingertip(
@@ -886,6 +981,7 @@ def _track_gripper(
     gripper_bboxes: Optional[List[Dict[str, np.ndarray]]],
     body_bboxes: Optional[List[Dict[str, np.ndarray]]],
     fingertip_bboxes: Optional[List[Dict[str, np.ndarray]]],
+    point_samples: Optional[Dict[str, Sequence[Optional[np.ndarray]]]] = None,
     device: str = "cuda",
 ) -> Dict[str, Optional[torch.Tensor]]:
     """
@@ -921,31 +1017,59 @@ def _track_gripper(
         ("fingertip", fingertip_bboxes),
     ]
     
+    sample_config = {
+        "gripper": (128, 3),
+        "body": (500, 3),
+        "fingertip": (128, 3),
+    }
+
     for bbox_name, bboxes in bbox_types:
         if bboxes is None or len(bboxes) == 0:
             continue
 
-        query_points_np: np.ndarray
-        if (
-            bbox_name == "body"
-            and body_bboxes is not None
-            and fingertip_bboxes is not None
-        ):
-            query_points_np = _generate_body_query_points(
-                body_bboxes=body_bboxes,
-                fingertip_bboxes=fingertip_bboxes,
-                total_samples=500,
-                max_frames=3,
+        total_samples, frames_limit = sample_config.get(bbox_name, (128, 3))
+        query_points_np = np.empty((0, 4), dtype=np.float32)
+
+        samples_per_frame = None
+        if point_samples is not None:
+            samples_per_frame = point_samples.get(bbox_name)
+            if samples_per_frame is not None:
+                has_samples = any((pts is not None and np.asarray(pts).size > 0) for pts in samples_per_frame)
+                if not has_samples:
+                    samples_per_frame = None
+
+        if samples_per_frame is not None:
+            query_points_np = _generate_query_points_from_samples(
+                samples_per_frame,
+                total_samples=total_samples,
+                max_frames=frames_limit,
             )
-        else:
-            query_points_collected = []
-            for t, bbox in enumerate(bboxes):
-                if bbox is None:
-                    continue
-                qp = _generate_query_points_from_bbox(bbox, timestamp=t, num_points=8)
-                if qp.size:
-                    query_points_collected.append(qp)
-            query_points_np = query_points_collected[0] if query_points_collected else np.zeros((0, 4), dtype=np.float32)
+
+        if query_points_np.size == 0:
+            if (
+                bbox_name == "body"
+                and body_bboxes is not None
+                and fingertip_bboxes is not None
+            ):
+                query_points_np = _generate_body_query_points(
+                    body_bboxes=body_bboxes,
+                    fingertip_bboxes=fingertip_bboxes,
+                    total_samples=total_samples,
+                    max_frames=frames_limit,
+                )
+            else:
+                query_points_collected = []
+                for t, bbox in enumerate(bboxes):
+                    if bbox is None:
+                        continue
+                    qp = _generate_query_points_from_bbox(bbox, timestamp=t, num_points=8)
+                    if qp.size:
+                        query_points_collected.append(qp)
+                query_points_np = (
+                    query_points_collected[0]
+                    if query_points_collected
+                    else np.zeros((0, 4), dtype=np.float32)
+                )
 
         if query_points_np.size == 0:
             continue
@@ -2167,6 +2291,11 @@ def process_frames(
     robot_tcp_points: Optional[List[Optional[np.ndarray]]] = [] if (args.add_robot and getattr(args, "tcp_points", False)) else None
     robot_object_points: Optional[List[Optional[np.ndarray]]] = [] if getattr(args, "object_points", False) else None
 
+    track_gripper_flag = getattr(args, "track_gripper_with_mvtracker", False) or getattr(args, "track_gripper", True)
+    contact_samples_per_frame: Optional[List[Optional[np.ndarray]]] = [] if track_gripper_flag else None
+    body_samples_per_frame: Optional[List[Optional[np.ndarray]]] = [] if track_gripper_flag else None
+    fingertip_samples_per_frame: Optional[List[Optional[np.ndarray]]] = [] if track_gripper_flag else None
+
     color_lookup_low = [list_frames(cdir / 'color') for cdir in cam_dirs_low]
     depth_lookup_low = [list_frames(cdir / 'depth') for cdir in cam_dirs_low]
 
@@ -2467,49 +2596,73 @@ def process_frames(
                     else:
                         print("[WARN] Could not compute gripper bbox for this frame")
                     
-                    # Align bboxes with point cloud if requested
-                    if getattr(args, "align_bbox_with_points", True) and combined_pcd is not None:
-                        # Extract points and colors from point cloud
-                        pcd_points = np.asarray(combined_pcd.points, dtype=np.float32)
-                        pcd_colors = np.asarray(combined_pcd.colors, dtype=np.float32) if combined_pcd.has_colors() else None
-                        
-                        if len(pcd_points) > 0:
-                            search_radius_scale = getattr(args, "align_bbox_search_radius_scale", 2.0)
-                            
-                            # Align contact bbox
-                            if bbox_entry_for_frame is not None:
-                                aligned_bbox = _align_bbox_with_point_cloud_com(
-                                    bbox=bbox_entry_for_frame,
-                                    points=pcd_points,
-                                    colors=pcd_colors,
-                                    search_radius_scale=search_radius_scale,
-                                )
-                                if aligned_bbox is not None:
-                                    bbox_entry_for_frame = aligned_bbox
-                                    if ti == 0:
-                                        print(f"[INFO] Aligned contact bbox with point cloud COM")
-                            
-                            # Align body bbox
-                            if full_bbox_for_frame is not None:
-                                aligned_body = _align_bbox_with_point_cloud_com(
-                                    bbox=full_bbox_for_frame,
-                                    points=pcd_points,
-                                    colors=pcd_colors,
-                                    search_radius_scale=search_radius_scale,
-                                )
-                                if aligned_body is not None:
-                                    full_bbox_for_frame = aligned_body
-                            
-                            # Align fingertip bbox
-                            if fingertip_bbox_for_frame is not None:
-                                aligned_fingertip = _align_bbox_with_point_cloud_com(
-                                    bbox=fingertip_bbox_for_frame,
-                                    points=pcd_points,
-                                    colors=pcd_colors,
-                                    search_radius_scale=search_radius_scale,
-                                )
-                                if aligned_fingertip is not None:
-                                    fingertip_bbox_for_frame = aligned_fingertip
+                    points_world_np = np.asarray(combined_pcd.points, dtype=np.float32)
+                    colors_world_np = np.asarray(combined_pcd.colors, dtype=np.float32) if combined_pcd.has_colors() else None
+
+                    if getattr(args, "align_bbox_with_points", True) and points_world_np.size > 0:
+                        search_radius_scale = getattr(args, "align_bbox_search_radius_scale", 2.0)
+
+                        # Align contact bbox
+                        if bbox_entry_for_frame is not None:
+                            aligned_bbox = _align_bbox_with_point_cloud_com(
+                                bbox=bbox_entry_for_frame,
+                                points=points_world_np,
+                                colors=colors_world_np,
+                                search_radius_scale=search_radius_scale,
+                            )
+                            if aligned_bbox is not None:
+                                bbox_entry_for_frame = aligned_bbox
+                                if ti == 0:
+                                    print(f"[INFO] Aligned contact bbox with point cloud COM")
+
+                        # Align body bbox
+                        if full_bbox_for_frame is not None:
+                            aligned_body = _align_bbox_with_point_cloud_com(
+                                bbox=full_bbox_for_frame,
+                                points=points_world_np,
+                                colors=colors_world_np,
+                                search_radius_scale=search_radius_scale,
+                            )
+                            if aligned_body is not None:
+                                full_bbox_for_frame = aligned_body
+
+                        # Align fingertip bbox
+                        if fingertip_bbox_for_frame is not None:
+                            aligned_fingertip = _align_bbox_with_point_cloud_com(
+                                bbox=fingertip_bbox_for_frame,
+                                points=points_world_np,
+                                colors=colors_world_np,
+                                search_radius_scale=search_radius_scale,
+                            )
+                            if aligned_fingertip is not None:
+                                fingertip_bbox_for_frame = aligned_fingertip
+
+                    if contact_samples_per_frame is not None:
+                        contact_samples = _extract_points_for_bbox(
+                            points_world_np,
+                            bbox_entry_for_frame,
+                            max_samples=64,
+                            margins=[0.002, 0.005, 0.01],
+                        )
+                        contact_samples_per_frame.append(contact_samples if contact_samples.size else None)
+
+                        body_samples = _extract_points_for_bbox(
+                            points_world_np,
+                            full_bbox_for_frame,
+                            max_samples=500,
+                            margins=[0.005, 0.01, 0.02],
+                            surface="positive_z",
+                            surface_margin=0.025,
+                        )
+                        body_samples_per_frame.append(body_samples if body_samples.size else None)
+
+                        fingertip_samples = _extract_points_for_bbox(
+                            points_world_np,
+                            fingertip_bbox_for_frame,
+                            max_samples=64,
+                            margins=[0.002, 0.005, 0.01],
+                        )
+                        fingertip_samples_per_frame.append(fingertip_samples if fingertip_samples.size else None)
 
                 if robot_gripper_pad_points is not None:
                     pad_pts_for_frame = _compute_gripper_pad_points(robot_model, robot_conf)
@@ -2627,6 +2780,13 @@ def process_frames(
             robot_gripper_body_boxes.append(full_bbox_for_frame)
         if robot_gripper_fingertip_boxes is not None:
             robot_gripper_fingertip_boxes.append(fingertip_bbox_for_frame)
+        if contact_samples_per_frame is not None:
+            if len(contact_samples_per_frame) < ti + 1:
+                contact_samples_per_frame.append(None)
+            if len(body_samples_per_frame) < ti + 1:
+                body_samples_per_frame.append(None)
+            if len(fingertip_samples_per_frame) < ti + 1:
+                fingertip_samples_per_frame.append(None)
         if robot_gripper_pad_points is not None:
             # Ensure we append even if None to keep timeline alignment
             robot_gripper_pad_points.append(pad_pts_for_frame)
@@ -2675,6 +2835,14 @@ def process_frames(
             if robot_debug_colors is not None:
                 robot_debug_colors.append(debug_cols)
 
+    gripper_point_samples = None
+    if contact_samples_per_frame is not None:
+        gripper_point_samples = {
+            "gripper": contact_samples_per_frame,
+            "body": body_samples_per_frame,
+            "fingertip": fingertip_samples_per_frame,
+        }
+
     return (
         rgbs_out,
         depths_out,
@@ -2688,6 +2856,7 @@ def process_frames(
         robot_gripper_pad_points,
         robot_tcp_points,
         robot_object_points,
+        gripper_point_samples,
     )
 
 def save_and_visualize(
@@ -2707,6 +2876,7 @@ def save_and_visualize(
     robot_gripper_pad_points=None,
     robot_tcp_points=None,
     robot_object_points=None,
+    gripper_point_samples=None,
     mvtracker_results=None,
     sam_results=None,
 ):
@@ -3380,7 +3550,8 @@ def main():
      robot_gripper_fingertip_boxes,
      robot_gripper_pad_points,
      robot_tcp_points,
-     robot_object_points) = process_frames(
+     robot_object_points,
+     gripper_point_samples) = process_frames(
         args,
         scene_low,
         scene_high,
@@ -3419,6 +3590,7 @@ def main():
                     gripper_bboxes=robot_gripper_boxes,
                     body_bboxes=robot_gripper_body_boxes,
                     fingertip_bboxes=robot_gripper_fingertip_boxes,
+                    point_samples=gripper_point_samples,
                     device=device,
                 )
                 print("[INFO] ✓ Gripper tracking complete")
@@ -3513,6 +3685,7 @@ def main():
         robot_gripper_pad_points,
         robot_tcp_points,
         robot_object_points,
+        gripper_point_samples,
         mvtracker_results=mvtracker_results,
         sam_results=sam_results,
     )
