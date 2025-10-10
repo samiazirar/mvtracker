@@ -50,6 +50,8 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 # Importing libraries for numerical computation, image processing, 3D data handling, and progress tracking.
 import numpy as np
 import torch
+import torch.nn as nn
+import matplotlib
 from PIL import Image
 import cv2
 import open3d as o3d
@@ -58,6 +60,11 @@ from tqdm import tqdm
 
 # --- Project-Specific Imports ---
 # Importing utilities and configurations specific to the RH20T dataset and robot model.
+from mvtracker.models.core.monocular_baselines import (
+    CoTrackerOfflineWrapper,
+    CoTrackerOnlineWrapper,
+    MonocularToMultiViewAdapter,
+)
 from mvtracker.utils.visualizer_rerun import log_pointclouds_to_rerun, log_tracks_to_rerun
 from RH20T.rh20t_api.configurations import get_conf_from_dir_name, load_conf
 from RH20T.rh20t_api.scene import RH20TScene
@@ -837,7 +844,41 @@ def _generate_body_query_points(
     return query_points.astype(np.float32)
 
 
-def _track_gripper_with_mvtracker(
+def _load_gripper_tracker(
+    tracker_name: str,
+    device: str,
+) -> Optional[nn.Module]:
+    """Load the requested tracker backend."""
+    tracker_name = tracker_name.lower()
+    try:
+        if tracker_name == "mvtracker":
+            model = torch.hub.load(
+                "ethz-vlg/mvtracker",
+                "mvtracker",
+                pretrained=True,
+                device=device,
+            )
+            model.eval()
+            return model
+        if tracker_name == "cotracker3_online":
+            base = CoTrackerOnlineWrapper(model_name="cotracker3_online")
+        elif tracker_name == "cotracker3_offline":
+            base = CoTrackerOfflineWrapper(model_name="cotracker3_offline")
+        else:
+            print(f"[WARN] Unsupported tracker '{tracker_name}'.")
+            return None
+        base = base.to(device)
+        base.eval()
+        wrapper = MonocularToMultiViewAdapter(base).to(device)
+        wrapper.eval()
+        return wrapper
+    except Exception as exc:
+        print(f"[WARN] Failed to load tracker '{tracker_name}': {exc}")
+        return None
+
+
+def _track_gripper(
+    tracker_name: str,
     rgbs: torch.Tensor,
     depths: torch.Tensor,
     intrs: torch.Tensor,
@@ -848,39 +889,12 @@ def _track_gripper_with_mvtracker(
     device: str = "cuda",
 ) -> Dict[str, Optional[torch.Tensor]]:
     """
-    Track gripper bboxes using MVTracker.
-    
-    Invokes MVTracker three times:
-    1. For contact bbox (orange)
-    2. For body bbox (red)
-    3. For fingertip bbox (blue)
-    
-    Args:
-        rgbs: [V, T, C, H, W] RGB images (uint8 0-255)
-        depths: [V, T, 1, H, W] depth maps
-        intrs: [V, T, 3, 3] intrinsics
-        extrs: [V, T, 3, 4] extrinsics
-        gripper_bboxes: List of T contact bboxes
-        body_bboxes: List of T body bboxes
-        fingertip_bboxes: List of T fingertip bboxes
-        device: Device for inference
-        
-    Returns:
-        Dictionary with tracks and visibility for each bbox type
+    Track gripper bboxes using the requested tracker backend.
     """
-    print("[INFO] Tracking gripper with MVTracker (3 invocations)...")
-    
-    # Load MVTracker model
-    try:
-        mvtracker = torch.hub.load(
-            "ethz-vlg/mvtracker",
-            "mvtracker",
-            pretrained=True,
-            device=device,
-        )
-        mvtracker.eval()
-    except Exception as e:
-        print(f"[WARN] Failed to load MVTracker: {e}")
+    tracker_name = tracker_name.lower()
+    print(f"[INFO] Tracking gripper with '{tracker_name}' backend...")
+    tracker_model = _load_gripper_tracker(tracker_name, device=device)
+    if tracker_model is None:
         return {
             "gripper_tracks": None,
             "gripper_vis": None,
@@ -889,7 +903,7 @@ def _track_gripper_with_mvtracker(
             "fingertip_tracks": None,
             "fingertip_vis": None,
         }
-    
+
     result = {
         "gripper_tracks": None,
         "gripper_vis": None,
@@ -940,17 +954,28 @@ def _track_gripper_with_mvtracker(
         result[f"{bbox_name}_query_points"] = query_points.clone().detach().cpu()
         
         print(f"  Tracking {bbox_name} bbox with {len(query_points)} query points...")
-        
+
+        rgbs_input = rgbs[None].to(device).float() / 255.0
+        depths_input = depths[None].to(device).float()
+        intrs_input = intrs[None].to(device).float()
+        extrs_input = extrs[None].to(device).float()
+
+        tracker_kwargs: Dict[str, torch.Tensor]
+        if tracker_name == "mvtracker":
+            tracker_kwargs = {"query_points_3d": query_points[None].to(device)}
+        else:
+            tracker_kwargs = {"query_points": query_points[None].to(device)}
+
         try:
             with torch.no_grad():
-                tracker_result = mvtracker(
-                    rgbs=rgbs[None].to(device).float() / 255.0,
-                    depths=depths[None].to(device).float(),
-                    intrs=intrs[None].to(device).float(),
-                    extrs=extrs[None].to(device).float(),
-                    query_points_3d=query_points[None].to(device),
+                tracker_result = tracker_model(
+                    rgbs=rgbs_input,
+                    depths=depths_input,
+                    intrs=intrs_input,
+                    extrs=extrs_input,
+                    **tracker_kwargs,
                 )
-            
+
             result[f"{bbox_name}_tracks"] = tracker_result["traj_e"].cpu()
             result[f"{bbox_name}_vis"] = tracker_result["vis_e"].cpu()
             result[f"{bbox_name}_query_points"] = query_points.clone().detach().cpu()
@@ -2968,10 +2993,8 @@ def save_and_visualize(
                 memory_lightweight_logging=False,
             )
 
-            cmap = matplotlib.colormaps["gist_rainbow"]
-            palette = cmap(np.linspace(0.0, 1.0, max(1, num_points)))[:, :3]
-            colors_rgb = (palette * 255.0).astype(np.uint8)
-            colors_bgr = colors_rgb[:, ::-1]
+            color_rgb_arr = np.array(color_rgb, dtype=np.uint8)
+            colors_bgr = np.tile(color_rgb_arr[::-1], (num_points, 1))
 
             track_video_specs.append(
                 {
@@ -3206,7 +3229,19 @@ def main():
         "--track-gripper-with-mvtracker",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help="Track gripper bboxes using MVTracker (invoked 3 times for contact/body/fingertip).",
+        help="Deprecated alias for --track-gripper --tracker mvtracker. Kept for backwards compatibility.",
+    )
+    parser.add_argument(
+        "--track-gripper",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable gripper tracking pipeline.",
+    )
+    parser.add_argument(
+        "--tracker",
+        choices=["mvtracker", "cotracker3_online", "cotracker3_offline"],
+        default="mvtracker",
+        help="Tracker backend to use for gripper tracking.",
     )
     parser.add_argument(
         "--track-objects-with-sam",
@@ -3359,18 +3394,24 @@ def main():
 
     # --- Step 2.5: Track gripper with MVTracker if requested ---
     mvtracker_results = None
+    track_gripper_flag = getattr(args, "track_gripper", True)
     if getattr(args, "track_gripper_with_mvtracker", False):
+        track_gripper_flag = True
+        args.tracker = "mvtracker"
+    if track_gripper_flag:
+        tracker_name = getattr(args, "tracker", "mvtracker")
         if robot_gripper_boxes or robot_gripper_body_boxes or robot_gripper_fingertip_boxes:
-            print("[INFO] Invoking MVTracker for gripper tracking...")
+            print(f"[INFO] Invoking gripper tracker ({tracker_name})...")
             try:
                 # Convert to torch tensors
                 rgbs_torch = torch.from_numpy(rgbs).permute(0, 1, 4, 2, 3)  # [V, T, H, W, 3] -> [V, T, 3, H, W]
                 depths_torch = torch.from_numpy(depths).unsqueeze(2)  # [V, T, H, W] -> [V, T, 1, H, W]
                 intrs_torch = torch.from_numpy(intrs)  # [V, T, 3, 3]
                 extrs_torch = torch.from_numpy(extrs)  # [V, T, 3, 4]
-                
+
                 device = "cuda" if torch.cuda.is_available() else "cpu"
-                mvtracker_results = _track_gripper_with_mvtracker(
+                mvtracker_results = _track_gripper(
+                    tracker_name=tracker_name,
                     rgbs=rgbs_torch,
                     depths=depths_torch,
                     intrs=intrs_torch,
@@ -3380,12 +3421,12 @@ def main():
                     fingertip_bboxes=robot_gripper_fingertip_boxes,
                     device=device,
                 )
-                print("[INFO] ✓ MVTracker tracking complete")
+                print("[INFO] ✓ Gripper tracking complete")
             except Exception as e:
-                print(f"[WARN] MVTracker failed: {e}")
+                print(f"[WARN] Gripper tracking failed: {e}")
                 mvtracker_results = None
         else:
-            print("[WARN] --track-gripper-with-mvtracker enabled but no bboxes computed. Enable --gripper-bbox.")
+            print("[WARN] Gripper tracking requested but no bboxes computed. Enable --gripper-bbox.")
 
     # --- Step 2.6: Track contact objects with SAM if requested ---
     sam_results = None
