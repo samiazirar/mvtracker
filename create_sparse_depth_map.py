@@ -2532,6 +2532,13 @@ def save_and_visualize(
     sam_results=None,
 ):
     """Saves the processed data to an NPZ file and generates a Rerun visualization."""
+    timestamps = np.asarray(timestamps)
+    frame_count = int(timestamps.size)
+    clip_fps = getattr(args, "sync_fps", 0.0) if getattr(args, "sync_fps", 0.0) > 0 else 30.0
+    if frame_count > 1:
+        duration_ms = float(timestamps[-1] - timestamps[0])
+        if duration_ms > 0.0:
+            clip_fps = max(1e-6, (frame_count - 1) / (duration_ms / 1000.0))
     # Convert to channels-first format for NPZ
     rgbs_final = np.moveaxis(rgbs, -1, 2)
     depths_final = depths[:, :, None, :, :]
@@ -2728,7 +2735,6 @@ def save_and_visualize(
     # Log MVTracker results if available
     if mvtracker_results is not None:
         print("[INFO] Logging MVTracker results to Rerun...")
-        fps = args.sync_fps if args.sync_fps > 0 else 30.0
         track_specs = [
             ("gripper", [255, 165, 0], 0),
             ("body", [255, 0, 0], 1),
@@ -2747,11 +2753,39 @@ def save_and_visualize(
             vis_tensor = vis if isinstance(vis, torch.Tensor) else torch.from_numpy(np.asarray(vis))
             query_tensor = query_points if isinstance(query_points, torch.Tensor) else torch.from_numpy(np.asarray(query_points))
 
-            try:
-                num_frames, num_points = tracks_tensor.shape[:2]
-            except ValueError:
-                print(f"[WARN] Unexpected track tensor shape for '{track_name}'; skipping logging.")
+            if tracks_tensor.dim() == 3:
+                tracks_batch = tracks_tensor.unsqueeze(0)
+            elif tracks_tensor.dim() == 4:
+                tracks_batch = tracks_tensor
+            else:
+                print(f"[WARN] Unexpected track tensor shape for '{track_name}' ({tuple(tracks_tensor.shape)}); skipping logging.")
                 continue
+
+            if vis_tensor.dim() == 2:
+                vis_batch = vis_tensor.unsqueeze(0)
+            elif vis_tensor.dim() == 3:
+                vis_batch = vis_tensor
+            else:
+                print(f"[WARN] Unexpected visibility tensor shape for '{track_name}' ({tuple(vis_tensor.shape)}); skipping logging.")
+                continue
+
+            tracks_batch = tracks_batch.to(torch.float32)
+            vis_batch = vis_batch.to(torch.float32)
+
+            if query_tensor.dim() == 3 and query_tensor.shape[0] == 1:
+                query_tensor = query_tensor[0]
+            query_tensor = query_tensor.to(torch.float32)
+            if query_tensor.dim() != 2 or query_tensor.shape[1] != 4:
+                print(f"[WARN] Unexpected query tensor shape for '{track_name}' ({tuple(query_tensor.shape)}); skipping logging.")
+                continue
+
+            if frame_count > 0:
+                frame_indices = query_tensor[:, 0].round().to(torch.long)
+                frame_indices = torch.clamp(frame_indices, 0, frame_count - 1)
+                query_tensor[:, 0] = frame_indices.to(torch.float32)
+
+            num_frames = tracks_batch.shape[1]
+            num_points = tracks_batch.shape[2]
 
             print(f"  Logging {track_name} tracks: {num_frames} frames, {num_points} points")
 
@@ -2761,12 +2795,12 @@ def save_and_visualize(
                 predictor_name=f"mvtracker_{track_name}",
                 gt_trajectories_3d_worldspace=None,
                 gt_visibilities_any_view=None,
-                query_points_3d=query_tensor.unsqueeze(0).to(torch.float32),
-                pred_trajectories=tracks_tensor.unsqueeze(0).to(torch.float32),
-                pred_visibilities=vis_tensor.unsqueeze(0).to(torch.float32),
+                query_points_3d=query_tensor.unsqueeze(0),
+                pred_trajectories=tracks_batch,
+                pred_visibilities=vis_batch,
                 per_track_results=None,
                 radii_scale=1.0,
-                fps=fps,
+                fps=clip_fps,
                 sphere_radius_crop=None,
                 sphere_center_crop=None,
                 log_per_interval_results=False,
