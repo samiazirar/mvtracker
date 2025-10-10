@@ -3278,6 +3278,7 @@ def save_and_visualize(
                 camera_ids=final_cam_ids,
                 track_sets=track_video_specs,
                 clip_fps=clip_fps,
+                video_fps=track_video_fps,
             )
     
     # Log SAM results if available
