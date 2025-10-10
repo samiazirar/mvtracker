@@ -972,83 +972,6 @@ def _load_gripper_tracker(
         return None
 
 
-def _track_cotracker_2d_only(
-    rgbs: np.ndarray,
-    grid_size: int = 20,
-    device: str = "cuda",
-) -> Dict[str, Any]:
-    """
-    Run CoTracker in 2D-only mode on each camera view independently.
-    
-    Args:
-        rgbs: RGB images [V, T, H, W, 3] numpy array
-        grid_size: Grid size for CoTracker sampling
-        device: Device to run on
-        
-    Returns:
-        Dictionary with per-view 2D tracking results
-    """
-    print(f"[INFO] Running CoTracker 2D-only mode (grid_size={grid_size})...")
-    
-    # Load CoTracker model
-    try:
-        cotracker_model = CoTrackerOfflineWrapper(
-            model_name="cotracker3_offline",
-            grid_size=grid_size,
-        )
-        cotracker_model = cotracker_model.to(device)
-        cotracker_model.eval()
-    except Exception as e:
-        print(f"[ERROR] Failed to load CoTracker model: {e}")
-        return {"per_view": {}}
-    
-    V, T, H, W, C = rgbs.shape
-    per_view_results = {}
-    
-    for view_idx in range(V):
-        print(f"  Processing view {view_idx + 1}/{V}...")
-        
-        # Get RGB for this view [T, H, W, 3]
-        view_rgbs = rgbs[view_idx]
-        
-        # Convert to tensor and normalize [T, 3, H, W]
-        view_rgbs_tensor = torch.from_numpy(view_rgbs).permute(2, 0, 1).unsqueeze(0)  # [1, 3, T, H, W]
-        view_rgbs_tensor = view_rgbs_tensor.permute(0, 2, 1, 3, 4)[0]  # [T, 3, H, W]
-        view_rgbs_tensor = view_rgbs_tensor.to(device).float()
-        
-        # No queries - CoTracker will use grid sampling
-        # Call forward with grid_size (queries will be None, model samples grid)
-        try:
-            with torch.no_grad():
-                result = cotracker_model(
-                    rgbs=view_rgbs_tensor,
-                    queries=None,  # Let CoTracker sample grid automatically
-                )
-            
-            tracks_2d = result["traj_2d"]  # [T, N, 2]
-            vis = result["vis"]  # [T, N]
-            
-            # Store results for this view
-            per_view_results[view_idx] = {
-                "tracks_2d": tracks_2d.cpu().numpy(),  # [T, N, 2]
-                "vis": vis.cpu().numpy(),  # [T, N]
-                "start_frames": np.zeros(tracks_2d.shape[1], dtype=np.int64),  # All start at frame 0
-            }
-            
-            print(f"    ✓ Tracked {tracks_2d.shape[1]} points across {T} frames")
-            
-        except Exception as e:
-            print(f"    ✗ Failed to track view {view_idx}: {e}")
-            import traceback
-            traceback.print_exc()
-            continue
-    
-    return {
-        "tracker_backend": "cotracker2d_only",
-        "per_view": per_view_results,
-    }
-
-
 def _track_gripper(
     tracker_name: str,
     rgbs: torch.Tensor,
@@ -1188,10 +1111,8 @@ def _track_gripper(
             if traj_pixels_tensor is not None and traj_pixels_view_tensor is not None:
                 tracks_pixels_np = traj_pixels_tensor.squeeze(0).cpu().numpy()  # [T, N, 2]
                 view_assign = traj_pixels_view_tensor.squeeze(0).cpu().numpy().astype(int)  # [N]
-                vis_tensor = tracker_result["vis_e"]
-                vis_np = vis_tensor.squeeze(0).cpu().numpy()
-                # Extract frame indices from query points
-                frame_indices_np = query_points[:, 0].cpu().numpy().astype(np.int64)
+                vis_np = vis_batch.squeeze(0).cpu().numpy()
+                frame_indices_np = frame_indices.cpu().numpy()
                 per_view: Dict[int, Dict[str, Any]] = {}
                 for view_idx in np.unique(view_assign):
                     if view_idx < 0:
@@ -3048,13 +2969,13 @@ def save_and_visualize(
 
         # Log robot points separately (they survive better than going through reprojection)
         if robot_debug_points is not None and len(robot_debug_points) > 0:
+            fps = effective_fps
             print(f"[INFO] Logging {len(robot_debug_points)} robot point clouds to Rerun...")
             for idx, pts in enumerate(robot_debug_points):
                 if pts is None or pts.size == 0:
                     continue
                 cols = robot_debug_colors[idx] if robot_debug_colors and idx < len(robot_debug_colors) else None
-                # Use frame index directly (not scaled by FPS) for consistent timing
-                rr.set_time_sequence("frame", idx)
+                rr.set_time_seconds("frame", idx / fps if fps > 0 else float(idx))
                 # Log to top-level robot entity for easy toggling (NOT under sequence-0)
                 rr.log(
                     f"robot",
@@ -3069,11 +2990,12 @@ def save_and_visualize(
         if robot_gripper_boxes:
             valid_box_count = sum(1 for box in robot_gripper_boxes if box)
             if valid_box_count > 0:
+                fps = effective_fps
                 print(f"[INFO] Logging {valid_box_count} gripper bounding boxes to Rerun...")
                 for idx, box in enumerate(robot_gripper_boxes):
                     if not box:
                         continue
-                    rr.set_time_sequence("frame", idx)
+                    rr.set_time_seconds("frame", idx / fps if fps > 0 else float(idx))
                     centers = np.asarray(box["center"], dtype=np.float32)[None, :]
                     half_sizes = np.asarray(box["half_sizes"], dtype=np.float32)[None, :]
                     rr.log(
@@ -3088,11 +3010,12 @@ def save_and_visualize(
         if robot_gripper_body_boxes:
             valid_box_count = sum(1 for box in robot_gripper_body_boxes if box)
             if valid_box_count > 0:
+                fps = effective_fps
                 print(f"[INFO] Logging {valid_box_count} gripper BODY bounding boxes to Rerun...")
                 for idx, box in enumerate(robot_gripper_body_boxes):
                     if not box:
                         continue
-                    rr.set_time_sequence("frame", idx)
+                    rr.set_time_seconds("frame", idx / fps if fps > 0 else float(idx))
                     centers = np.asarray(box["center"], dtype=np.float32)[None, :]
                     half_sizes = np.asarray(box["half_sizes"], dtype=np.float32)[None, :]
                     rr.log(
@@ -3107,11 +3030,12 @@ def save_and_visualize(
         if robot_gripper_fingertip_boxes:
             valid_box_count = sum(1 for box in robot_gripper_fingertip_boxes if box)
             if valid_box_count > 0:
+                fps = effective_fps
                 print(f"[INFO] Logging {valid_box_count} gripper FINGERTIP bounding boxes to Rerun...")
                 for idx, box in enumerate(robot_gripper_fingertip_boxes):
                     if not box:
                         continue
-                    rr.set_time_sequence("frame", idx)
+                    rr.set_time_seconds("frame", idx / fps if fps > 0 else float(idx))
                     centers = np.asarray(box["center"], dtype=np.float32)[None, :]
                     half_sizes = np.asarray(box["half_sizes"], dtype=np.float32)[None, :]
                     rr.log(
@@ -3124,6 +3048,7 @@ def save_and_visualize(
                         ),
                     )
         if robot_gripper_pad_points:
+            fps = effective_fps
             valid_pts = any(pts is not None and len(pts) > 0 for pts in robot_gripper_pad_points)
             if valid_pts:
                 count = sum(1 for pts in robot_gripper_pad_points if pts is not None and len(pts) > 0)
@@ -3131,7 +3056,7 @@ def save_and_visualize(
                 for idx, pts in enumerate(robot_gripper_pad_points):
                     if pts is None or len(pts) == 0:
                         continue
-                    rr.set_time_sequence("frame", idx)
+                    rr.set_time_seconds("frame", idx / fps if fps > 0 else float(idx))
                     cols = np.tile(np.array([[255, 0, 255]], dtype=np.uint8), (len(pts), 1))
                     rr.log(
                         "robot/gripper_pad_points",
@@ -3140,6 +3065,7 @@ def save_and_visualize(
         
         # Log TCP points from API (cyan spheres)
         if robot_tcp_points:
+            fps = default_fps
             valid_pts = any(pt is not None and len(pt) == 3 for pt in robot_tcp_points)
             if valid_pts:
                 count = sum(1 for pt in robot_tcp_points if pt is not None and len(pt) == 3)
@@ -3148,7 +3074,7 @@ def save_and_visualize(
                 for idx, pt in enumerate(robot_tcp_points):
                     if pt is None or len(pt) != 3:
                         continue
-                    rr.set_time_sequence("frame", idx)
+                    rr.set_time_seconds("frame", idx / fps if fps > 0 else float(idx))
                     # Log as a single cyan point with larger radius
                     rr.log(
                         "points/tcp_point",
@@ -3161,6 +3087,7 @@ def save_and_visualize(
         
         # Log object points from API (yellow spheres)
         if robot_object_points:
+            fps = default_fps
             valid_pts = any(pt is not None and len(pt) == 3 for pt in robot_object_points)
             if valid_pts:
                 count = sum(1 for pt in robot_object_points if pt is not None and len(pt) == 3)
@@ -3168,7 +3095,7 @@ def save_and_visualize(
                 for idx, pt in enumerate(robot_object_points):
                     if pt is None or len(pt) != 3:
                         continue
-                    rr.set_time_sequence("frame", idx)
+                    rr.set_time_seconds("frame", idx / fps if fps > 0 else float(idx))
                     # Log as a single yellow point
                     rr.log(
                         "points/object_point",
@@ -3195,192 +3122,152 @@ def save_and_visualize(
     
     # Log MVTracker results if available
     if mvtracker_results is not None:
-        print("[INFO] Logging tracking results to Rerun...")
+        print("[INFO] Logging MVTracker results to Rerun...")
         datapoint_idx = 0
         tracker_backend = mvtracker_results.get("tracker_backend", "tracker")
         backend_label = tracker_backend.replace("/", "_")
+        track_specs = [
+            ("gripper", [255, 165, 0], 0),
+            ("body", [255, 0, 0], 1),
+            ("fingertip", [0, 0, 255], 2),
+        ]
         track_video_specs: List[Dict[str, Any]] = []
-        
-        # Check if this is CoTracker 2D-only mode
-        per_view_data = mvtracker_results.get("per_view")
-        if per_view_data is not None and tracker_backend == "cotracker2d_only":
-            # CoTracker 2D-only mode - create 2D tracking videos only
-            print(f"[INFO] Processing CoTracker 2D-only results for {len(per_view_data)} views...")
-            
-            # Create per-view entries for video export
-            per_view_entries: Dict[int, Dict[str, Any]] = {}
-            for view_idx, view_data in per_view_data.items():
-                tracks_2d = view_data.get("tracks_2d")  # [T, N, 2]
-                vis = view_data.get("vis")  # [T, N]
-                start_frames = view_data.get("start_frames")  # [N]
-                
-                if tracks_2d is None or vis is None:
+
+        for track_name, color_rgb, method_id in track_specs:
+            tracks = mvtracker_results.get(f"{track_name}_tracks")
+            vis = mvtracker_results.get(f"{track_name}_vis")
+            query_points = mvtracker_results.get(f"{track_name}_query_points")
+
+            if tracks is None or vis is None or query_points is None:
+                continue
+
+            tracks_tensor = tracks if isinstance(tracks, torch.Tensor) else torch.from_numpy(np.asarray(tracks))
+            vis_tensor = vis if isinstance(vis, torch.Tensor) else torch.from_numpy(np.asarray(vis))
+            query_tensor = query_points if isinstance(query_points, torch.Tensor) else torch.from_numpy(np.asarray(query_points))
+
+            if tracks_tensor.dim() == 3:
+                tracks_batch = tracks_tensor.unsqueeze(0)
+            elif tracks_tensor.dim() == 4:
+                tracks_batch = tracks_tensor
+            else:
+                print(f"[WARN] Unexpected track tensor shape for '{track_name}' ({tuple(tracks_tensor.shape)}); skipping logging.")
+                continue
+
+            if vis_tensor.dim() == 2:
+                vis_batch = vis_tensor.unsqueeze(0)
+            elif vis_tensor.dim() == 3:
+                vis_batch = vis_tensor
+            else:
+                print(f"[WARN] Unexpected visibility tensor shape for '{track_name}' ({tuple(vis_tensor.shape)}); skipping logging.")
+                continue
+
+            tracks_batch = tracks_batch.to(torch.float32)
+            vis_batch = vis_batch.to(torch.float32)
+
+            if query_tensor.dim() == 3 and query_tensor.shape[0] == 1:
+                query_tensor = query_tensor[0]
+            query_tensor = query_tensor.to(torch.float32)
+            if query_tensor.dim() != 2 or query_tensor.shape[1] != 4:
+                print(f"[WARN] Unexpected query tensor shape for '{track_name}' ({tuple(query_tensor.shape)}); skipping logging.")
+                continue
+
+            if frame_count > 0:
+                frame_indices = query_tensor[:, 0].round().to(torch.long)
+                frame_indices = torch.clamp(frame_indices, 0, frame_count - 1)
+                query_tensor[:, 0] = frame_indices.to(torch.float32)
+            else:
+                frame_indices = torch.zeros((query_tensor.shape[0],), dtype=torch.long)
+
+            num_frames = tracks_batch.shape[1]
+            num_points = tracks_batch.shape[2]
+
+            print(f"  Logging {track_name} tracks: {num_frames} frames, {num_points} points")
+
+            predictor_name = f"{backend_label}_{track_name}"
+
+            log_tracks_to_rerun(
+                dataset_name="rh20t_reprojection",
+                datapoint_idx=0,
+                predictor_name=predictor_name,
+                gt_trajectories_3d_worldspace=None,
+                gt_visibilities_any_view=None,
+                query_points_3d=query_tensor.unsqueeze(0),
+                pred_trajectories=tracks_batch,
+                pred_visibilities=vis_batch,
+                per_track_results=None,
+                radii_scale=1.0,
+                fps=clip_fps,
+                sphere_radius_crop=None,
+                sphere_center_crop=None,
+                log_per_interval_results=False,
+                max_tracks_to_log=None,
+                track_batch_size=max(1, num_points),
+                method_id=method_id,
+                color_per_method_id={method_id: tuple(color_rgb)},
+                memory_lightweight_logging=False,
+            )
+
+            color_rgb_arr = np.array(color_rgb, dtype=np.uint8)
+            colors_bgr = np.tile(color_rgb_arr[::-1], (num_points, 1))
+
+            time_colors_rgb = (matplotlib.colormaps["turbo"](np.linspace(0.0, 1.0, max(1, num_frames)))[:, :3] * 255.0).astype(np.uint8)
+            time_fps = clip_fps if clip_fps > 0 else default_fps
+            tracks_np = tracks_batch.squeeze(0).cpu().numpy()
+            vis_np = vis_batch.squeeze(0).cpu().numpy()
+            rr.log(
+                f"sequence-{datapoint_idx}/tracks/{predictor_name}/time_colored",
+                rr.Clear(recursive=True),
+            )
+            for t in range(num_frames):
+                visible_mask = vis_np[t] > 0.5
+                if not visible_mask.any():
                     continue
-                
-                num_points = tracks_2d.shape[1]
-                
-                # Create rainbow colors for tracks
-                cmap = matplotlib.colormaps["gist_rainbow"]
-                palette = cmap(np.linspace(0.0, 1.0, max(1, num_points)))[:, :3]
-                colors_bgr = (palette * 255.0).astype(np.uint8)[:, ::-1]
-                
-                per_view_entries[int(view_idx)] = {
-                    "pixels": tracks_2d,  # [T, N, 2]
-                    "vis": vis,  # [T, N]
-                    "start_frames": start_frames,  # [N]
-                    "colors_bgr": colors_bgr,  # [N, 3]
-                }
-                
-                print(f"  View {view_idx}: {num_points} tracks")
-            
-            if per_view_entries:
-                track_video_specs.append({
-                    "name": f"cotracker2d_only",
-                    "kind": "2d",
-                    "per_view": per_view_entries,
-                })
-        else:
-            # Standard MVTracker 3D tracking mode
-            track_specs = [
-                ("gripper", [255, 165, 0], 0),
-                ("body", [255, 0, 0], 1),
-                ("fingertip", [0, 0, 255], 2),
-            ]
-
-            for track_name, color_rgb, method_id in track_specs:
-                tracks = mvtracker_results.get(f"{track_name}_tracks")
-                vis = mvtracker_results.get(f"{track_name}_vis")
-                query_points = mvtracker_results.get(f"{track_name}_query_points")
-
-                if tracks is None or vis is None or query_points is None:
-                    continue
-
-                tracks_tensor = tracks if isinstance(tracks, torch.Tensor) else torch.from_numpy(np.asarray(tracks))
-                vis_tensor = vis if isinstance(vis, torch.Tensor) else torch.from_numpy(np.asarray(vis))
-                query_tensor = query_points if isinstance(query_points, torch.Tensor) else torch.from_numpy(np.asarray(query_points))
-
-                if tracks_tensor.dim() == 3:
-                    tracks_batch = tracks_tensor.unsqueeze(0)
-                elif tracks_tensor.dim() == 4:
-                    tracks_batch = tracks_tensor
-                else:
-                    print(f"[WARN] Unexpected track tensor shape for '{track_name}' ({tuple(tracks_tensor.shape)}); skipping logging.")
-                    continue
-
-                if vis_tensor.dim() == 2:
-                    vis_batch = vis_tensor.unsqueeze(0)
-                elif vis_tensor.dim() == 3:
-                    vis_batch = vis_tensor
-                else:
-                    print(f"[WARN] Unexpected visibility tensor shape for '{track_name}' ({tuple(vis_tensor.shape)}); skipping logging.")
-                    continue
-
-                tracks_batch = tracks_batch.to(torch.float32)
-                vis_batch = vis_batch.to(torch.float32)
-
-                if query_tensor.dim() == 3 and query_tensor.shape[0] == 1:
-                    query_tensor = query_tensor[0]
-                query_tensor = query_tensor.to(torch.float32)
-                if query_tensor.dim() != 2 or query_tensor.shape[1] != 4:
-                    print(f"[WARN] Unexpected query tensor shape for '{track_name}' ({tuple(query_tensor.shape)}); skipping logging.")
-                    continue
-
-                if frame_count > 0:
-                    frame_indices = query_tensor[:, 0].round().to(torch.long)
-                    frame_indices = torch.clamp(frame_indices, 0, frame_count - 1)
-                    query_tensor[:, 0] = frame_indices.to(torch.float32)
-                else:
-                    frame_indices = torch.zeros((query_tensor.shape[0],), dtype=torch.long)
-
-                num_frames = tracks_batch.shape[1]
-                num_points = tracks_batch.shape[2]
-
-                print(f"  Logging {track_name} tracks: {num_frames} frames, {num_points} points")
-
-                predictor_name = f"{backend_label}_{track_name}"
-
-                log_tracks_to_rerun(
-                    dataset_name="rh20t_reprojection",
-                    datapoint_idx=0,
-                    predictor_name=predictor_name,
-                    gt_trajectories_3d_worldspace=None,
-                    gt_visibilities_any_view=None,
-                    query_points_3d=query_tensor.unsqueeze(0),
-                    pred_trajectories=tracks_batch,
-                    pred_visibilities=vis_batch,
-                    per_track_results=None,
-                    radii_scale=1.0,
-                    fps=clip_fps,
-                    sphere_radius_crop=None,
-                    sphere_center_crop=None,
-                    log_per_interval_results=False,
-                    max_tracks_to_log=None,
-                    track_batch_size=max(1, num_points),
-                    method_id=method_id,
-                    color_per_method_id={method_id: tuple(color_rgb)},
-                    memory_lightweight_logging=False,
-                )
-
-                color_rgb_arr = np.array(color_rgb, dtype=np.uint8)
-                colors_bgr = np.tile(color_rgb_arr[::-1], (num_points, 1))
-
-                time_colors_rgb = (matplotlib.colormaps["turbo"](np.linspace(0.0, 1.0, max(1, num_frames)))[:, :3] * 255.0).astype(np.uint8)
-                tracks_np = tracks_batch.squeeze(0).cpu().numpy()
-                vis_np = vis_batch.squeeze(0).cpu().numpy()
+                rr.set_time_seconds("frame", t / time_fps if time_fps > 0 else float(t))
                 rr.log(
                     f"sequence-{datapoint_idx}/tracks/{predictor_name}/time_colored",
-                    rr.Clear(recursive=True),
+                    rr.Points3D(
+                        positions=tracks_np[t, visible_mask].astype(np.float32),
+                        colors=time_colors_rgb[t][None, :].repeat(visible_mask.sum(), axis=0),
+                        radii=np.full(visible_mask.sum(), 0.01, dtype=np.float32),
+                    ),
                 )
-                for t in range(num_frames):
-                    visible_mask = vis_np[t] > 0.5
-                    if not visible_mask.any():
+
+            track_video_specs.append(
+                {
+                    "name": f"{predictor_name}",
+                    "kind": "3d",
+                    "tracks_world": tracks_batch.squeeze(0).cpu().numpy(),
+                    "vis": vis_batch.squeeze(0).cpu().numpy(),
+                    "start_frames": frame_indices.cpu().numpy().astype(np.int64),
+                    "colors_bgr": colors_bgr,
+                }
+            )
+
+            per_view_pixels = mvtracker_results.get(f"{track_name}_tracks_pixels_per_view")
+            if per_view_pixels:
+                per_view_entries: Dict[int, Dict[str, Any]] = {}
+                for view_idx, view_data in per_view_pixels.items():
+                    pixels_view = np.asarray(view_data.get("pixels"), dtype=np.float32)
+                    vis_view = np.asarray(view_data.get("vis"), dtype=np.float32)
+                    start_frames_view = np.asarray(view_data.get("start_frames"), dtype=np.int64)
+                    indices_view = np.asarray(view_data.get("indices"), dtype=np.int64)
+                    if pixels_view.size == 0 or vis_view.size == 0:
                         continue
-                    rr.set_time_sequence("frame", t)
-                    rr.log(
-                        f"sequence-{datapoint_idx}/tracks/{predictor_name}/time_colored",
-                        rr.Points3D(
-                            positions=tracks_np[t, visible_mask].astype(np.float32),
-                            colors=time_colors_rgb[t][None, :].repeat(visible_mask.sum(), axis=0),
-                            radii=np.full(visible_mask.sum(), 0.01, dtype=np.float32),
-                        ),
-                    )
-
-                track_video_specs.append(
-                    {
-                        "name": f"{predictor_name}",
-                        "kind": "3d",
-                        "tracks_world": tracks_batch.squeeze(0).cpu().numpy(),
-                        "vis": vis_batch.squeeze(0).cpu().numpy(),
-                        "start_frames": frame_indices.cpu().numpy().astype(np.int64),
-                        "colors_bgr": colors_bgr,
+                    color_subset = colors_bgr[indices_view] if indices_view.size else colors_bgr
+                    per_view_entries[int(view_idx)] = {
+                        "pixels": pixels_view,
+                        "vis": vis_view,
+                        "start_frames": start_frames_view,
+                        "colors_bgr": color_subset,
                     }
-                )
-
-                per_view_pixels = mvtracker_results.get(f"{track_name}_tracks_pixels_per_view")
-                if per_view_pixels:
-                    per_view_entries: Dict[int, Dict[str, Any]] = {}
-                    for view_idx, view_data in per_view_pixels.items():
-                        pixels_view = np.asarray(view_data.get("pixels"), dtype=np.float32)
-                        vis_view = np.asarray(view_data.get("vis"), dtype=np.float32)
-                        start_frames_view = np.asarray(view_data.get("start_frames"), dtype=np.int64)
-                        indices_view = np.asarray(view_data.get("indices"), dtype=np.int64)
-                        if pixels_view.size == 0 or vis_view.size == 0:
-                            continue
-                        color_subset = colors_bgr[indices_view] if indices_view.size else colors_bgr
-                        per_view_entries[int(view_idx)] = {
-                            "pixels": pixels_view,
-                            "vis": vis_view,
-                            "start_frames": start_frames_view,
-                            "colors_bgr": color_subset,
+                if per_view_entries:
+                    track_video_specs.append(
+                        {
+                            "name": f"{predictor_name}_2d",
+                            "kind": "2d",
+                            "per_view": per_view_entries,
                         }
-                    if per_view_entries:
-                        track_video_specs.append(
-                            {
-                                "name": f"{predictor_name}_2d",
-                                "kind": "2d",
-                                "per_view": per_view_entries,
-                            }
-                        )
+                    )
 
         if track_video_specs and getattr(args, "export_track_video", True):
             _export_tracking_videos(
@@ -3397,6 +3284,7 @@ def save_and_visualize(
     # Log SAM results if available
     if sam_results is not None and "object_masks" in sam_results:
         print("[INFO] Logging SAM segmentation masks to Rerun...")
+        fps = default_fps
         object_masks = sam_results["object_masks"]
         
         # Log masks as segmentation images
@@ -3407,7 +3295,7 @@ def save_and_visualize(
             if mask is None:
                 continue
             
-            rr.set_time_sequence("frame", t)
+            rr.set_time_seconds("frame", t / fps)
             
             # Convert boolean mask to uint8 (0 or 255)
             mask_uint8 = (mask.astype(np.uint8) * 255)
@@ -3614,15 +3502,9 @@ def main():
     )
     parser.add_argument(
         "--tracker",
-        choices=["mvtracker", "cotracker3_online", "cotracker3_offline", "cotracker2d_only"],
+        choices=["mvtracker", "cotracker3_online", "cotracker3_offline"],
         default="mvtracker",
         help="Tracker backend to use for gripper tracking.",
-    )
-    parser.add_argument(
-        "--cotracker-grid-size",
-        type=int,
-        default=20,
-        help="Grid size for CoTracker (2D-only mode). Higher = more dense tracking.",
     )
     parser.add_argument(
         "--track-objects-with-sam",
@@ -3780,26 +3662,8 @@ def main():
     if getattr(args, "track_gripper_with_mvtracker", False):
         track_gripper_flag = True
         args.tracker = "mvtracker"
-    
-    # Check if we're doing CoTracker 2D-only mode
-    tracker_name = getattr(args, "tracker", "mvtracker")
-    if tracker_name == "cotracker2d_only":
-        print("[INFO] Running CoTracker 2D-only mode...")
-        try:
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-            grid_size = getattr(args, "cotracker_grid_size", 20)
-            mvtracker_results = _track_cotracker_2d_only(
-                rgbs=rgbs,
-                grid_size=grid_size,
-                device=device,
-            )
-            print("[INFO] ✓ CoTracker 2D-only tracking complete")
-        except Exception as e:
-            print(f"[WARN] CoTracker 2D tracking failed: {e}")
-            import traceback
-            traceback.print_exc()
-            mvtracker_results = None
-    elif track_gripper_flag:
+    if track_gripper_flag:
+        tracker_name = getattr(args, "tracker", "mvtracker")
         if robot_gripper_boxes or robot_gripper_body_boxes or robot_gripper_fingertip_boxes:
             print(f"[INFO] Invoking gripper tracker ({tracker_name})...")
             try:

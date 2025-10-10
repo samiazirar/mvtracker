@@ -29,4 +29,7 @@ python create_sparse_depth_map.py \
   "${@}"
 
 cp ./data/high_res_filtered/task_0065_user_0010_scene_0009_cfg_0004_reprojected.rrd /data/rh20t_api
+
+cp -r  ./data /data/rh20t_api
+
 #--no-color-alignment-check \
