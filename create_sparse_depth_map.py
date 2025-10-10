@@ -1139,6 +1139,160 @@ def _export_gripper_bbox_videos(
         print(f"[INFO] Wrote bbox overlay video: {video_path}")
 
 
+def _project_points_to_pixels(
+    points_world: np.ndarray,
+    intr: np.ndarray,
+    extr: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Project 3D world points into image pixel coordinates."""
+    points_world = np.asarray(points_world, dtype=np.float32)
+    if points_world.ndim != 2 or points_world.shape[1] != 3 or points_world.size == 0:
+        return np.zeros((0, 2), dtype=np.float32), np.zeros((0,), dtype=bool)
+
+    intr = np.asarray(intr, dtype=np.float32)
+    extr = np.asarray(extr, dtype=np.float32)
+
+    ones = np.ones((points_world.shape[0], 1), dtype=np.float32)
+    homo = np.concatenate([points_world, ones], axis=1)
+    cam = (extr @ homo.T).T  # [N, 3]
+    z = cam[:, 2]
+    valid = z > 1e-6
+    pixels = np.zeros((points_world.shape[0], 2), dtype=np.float32)
+    if np.any(valid):
+        proj = (intr @ cam[valid].T).T
+        denom = np.maximum(proj[:, 2:3], 1e-6)
+        pixels_valid = proj[:, :2] / denom
+        pixels[valid] = pixels_valid
+    return pixels, valid
+
+
+def _export_tracking_videos(
+    args,
+    rgbs: np.ndarray,
+    intrs: np.ndarray,
+    extrs: np.ndarray,
+    camera_ids: Sequence[str],
+    track_sets: Sequence[Dict[str, Any]],
+    clip_fps: float,
+) -> None:
+    """Export per-camera RGB videos with tracking overlays."""
+    if not track_sets:
+        return
+
+    rgbs = np.asarray(rgbs)
+    intrs = np.asarray(intrs)
+    extrs = np.asarray(extrs)
+    num_cams = rgbs.shape[0]
+    num_frames = rgbs.shape[1] if rgbs.ndim >= 2 else 0
+
+    if num_cams == 0 or num_frames == 0:
+        return
+
+    video_root = Path(args.out_dir) / "track_videos"
+    video_root.mkdir(parents=True, exist_ok=True)
+
+    fps_override = getattr(args, "track_video_fps", None)
+    if fps_override is not None and fps_override > 0:
+        video_fps = float(fps_override)
+    elif getattr(args, "bbox_video_fps", None):
+        video_fps = float(args.bbox_video_fps)
+    else:
+        video_fps = float(clip_fps if clip_fps > 0 else 30.0)
+
+    point_radius = int(getattr(args, "track_video_point_radius", 3))
+    line_thickness = int(getattr(args, "track_video_line_thickness", 1))
+
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+
+    for track_cfg in track_sets:
+        name = track_cfg.get("name", "tracks")
+        kind = track_cfg.get("kind", "3d")
+        colors_bgr = np.asarray(track_cfg.get("colors_bgr"), dtype=np.uint8)
+        start_frames = np.asarray(track_cfg.get("start_frames"), dtype=np.int64)
+
+        if kind == "3d":
+            tracks_world = np.asarray(track_cfg.get("tracks_world"), dtype=np.float32)
+            vis = np.asarray(track_cfg.get("vis"), dtype=np.float32)
+            if tracks_world.ndim != 3 or vis.ndim != 2:
+                print(f"[WARN] Skipping track video '{name}': invalid 3D track shapes {tracks_world.shape}, {vis.shape}")
+                continue
+        elif kind == "2d":
+            tracks_pixels = np.asarray(track_cfg.get("tracks_pixels"), dtype=np.float32)
+            vis = np.asarray(track_cfg.get("vis"), dtype=np.float32)
+            if tracks_pixels.ndim != 4:
+                print(f"[WARN] Skipping track video '{name}': invalid 2D track shape {tracks_pixels.shape}")
+                continue
+        else:
+            print(f"[WARN] Skipping track video '{name}': unknown track type '{kind}'.")
+            continue
+
+        num_points = int(colors_bgr.shape[0]) if colors_bgr.size else (tracks_world.shape[2] if kind == "3d" else tracks_pixels.shape[2])
+        if colors_bgr.size == 0:
+            cmap = matplotlib.colormaps["gist_rainbow"]
+            palette = cmap(np.linspace(0.0, 1.0, max(1, num_points)))[:, :3]
+            colors_rgb = (palette * 255.0).astype(np.uint8)
+            colors_bgr = colors_rgb[:, ::-1]
+
+        if start_frames.size == 0:
+            start_frames = np.zeros((num_points,), dtype=np.int64)
+
+        track_dir = video_root / name
+        track_dir.mkdir(parents=True, exist_ok=True)
+
+        for ci in range(num_cams):
+            cam_id = str(camera_ids[ci]) if camera_ids is not None and ci < len(camera_ids) else str(ci)
+            frame_shape = rgbs[ci, 0].shape
+            if len(frame_shape) != 3:
+                continue
+            height, width = frame_shape[0], frame_shape[1]
+
+            video_path = track_dir / f"{args.task_folder.name}_cam_{cam_id}_{name}.mp4"
+            writer = cv2.VideoWriter(str(video_path), fourcc, video_fps, (width, height))
+            if not writer.isOpened():
+                print(f"[WARN] Could not open video writer for {video_path}.")
+                continue
+
+            prev_pixels = np.full((num_points, 2), np.nan, dtype=np.float32)
+
+            for ti in range(num_frames):
+                frame_rgb = rgbs[ci, ti]
+                frame_bgr = np.ascontiguousarray(frame_rgb[:, :, ::-1])
+
+                if kind == "3d":
+                    pixels, depth_valid = _project_points_to_pixels(tracks_world[ti], intrs[ci, ti], extrs[ci, ti])
+                    visibility = (vis[ti] > 0.5) & depth_valid & (ti >= start_frames)
+                else:  # 2d
+                    pixels = tracks_pixels[ci, ti]
+                    visibility = (vis[ci, ti] > 0.5) if vis.ndim == 4 else np.ones((num_points,), dtype=bool)
+                    visibility = visibility & (ti >= start_frames)
+
+                for idx in range(num_points):
+                    if idx >= pixels.shape[0]:
+                        continue
+                    if not visibility[idx]:
+                        prev_pixels[idx, :] = np.nan
+                        continue
+
+                    px, py = float(pixels[idx, 0]), float(pixels[idx, 1])
+                    if not (0 <= px < width and 0 <= py < height):
+                        prev_pixels[idx, :] = np.nan
+                        continue
+
+                    color = tuple(int(c) for c in colors_bgr[idx])
+                    pt = (int(round(px)), int(round(py)))
+                    cv2.circle(frame_bgr, pt, point_radius, color, thickness=-1, lineType=cv2.LINE_AA)
+
+                    if not np.isnan(prev_pixels[idx, 0]):
+                        prev_pt = (int(round(prev_pixels[idx, 0])), int(round(prev_pixels[idx, 1])))
+                        cv2.line(frame_bgr, prev_pt, pt, color, thickness=line_thickness, lineType=cv2.LINE_AA)
+                    prev_pixels[idx, :] = (px, py)
+
+                writer.write(frame_bgr)
+
+            writer.release()
+            print(f"[INFO] Wrote tracking overlay video: {video_path}")
+
+
 @dataclass
 class SyncResult:
     """Container for synchronized timeline information."""
@@ -2740,6 +2894,7 @@ def save_and_visualize(
             ("body", [255, 0, 0], 1),
             ("fingertip", [0, 0, 255], 2),
         ]
+        track_video_specs: List[Dict[str, Any]] = []
 
         for track_name, color_rgb, method_id in track_specs:
             tracks = mvtracker_results.get(f"{track_name}_tracks")
@@ -2783,6 +2938,8 @@ def save_and_visualize(
                 frame_indices = query_tensor[:, 0].round().to(torch.long)
                 frame_indices = torch.clamp(frame_indices, 0, frame_count - 1)
                 query_tensor[:, 0] = frame_indices.to(torch.float32)
+            else:
+                frame_indices = torch.zeros((query_tensor.shape[0],), dtype=torch.long)
 
             num_frames = tracks_batch.shape[1]
             num_points = tracks_batch.shape[2]
@@ -2809,6 +2966,33 @@ def save_and_visualize(
                 method_id=method_id,
                 color_per_method_id={method_id: tuple(color_rgb)},
                 memory_lightweight_logging=False,
+            )
+
+            cmap = matplotlib.colormaps["gist_rainbow"]
+            palette = cmap(np.linspace(0.0, 1.0, max(1, num_points)))[:, :3]
+            colors_rgb = (palette * 255.0).astype(np.uint8)
+            colors_bgr = colors_rgb[:, ::-1]
+
+            track_video_specs.append(
+                {
+                    "name": f"mvtracker_{track_name}",
+                    "kind": "3d",
+                    "tracks_world": tracks_batch.squeeze(0).cpu().numpy(),
+                    "vis": vis_batch.squeeze(0).cpu().numpy(),
+                    "start_frames": frame_indices.cpu().numpy().astype(np.int64),
+                    "colors_bgr": colors_bgr,
+                }
+            )
+
+        if track_video_specs and getattr(args, "export_track_video", True):
+            _export_tracking_videos(
+                args=args,
+                rgbs=rgbs,
+                intrs=intrs,
+                extrs=extrs,
+                camera_ids=final_cam_ids,
+                track_sets=track_video_specs,
+                clip_fps=clip_fps,
             )
     
     # Log SAM results if available
@@ -2975,6 +3159,30 @@ def main():
         type=float,
         default=30.0,
         help="Frame rate used when exporting gripper bounding box videos (requires --export-bbox-video).",
+    )
+    parser.add_argument(
+        "--export-track-video",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Export per-camera RGB videos with tracking overlays when tracking results are available.",
+    )
+    parser.add_argument(
+        "--track-video-fps",
+        type=float,
+        default=None,
+        help="Override FPS used for tracking overlay videos (defaults to bbox video FPS or the clip FPS).",
+    )
+    parser.add_argument(
+        "--track-video-point-radius",
+        type=int,
+        default=3,
+        help="Radius in pixels for drawing tracked points in tracking overlay videos.",
+    )
+    parser.add_argument(
+        "--track-video-line-thickness",
+        type=int,
+        default=1,
+        help="Line thickness (pixels) for connecting track points frame-to-frame in tracking overlay videos.",
     )
     parser.add_argument(
         "--debug-mode",
