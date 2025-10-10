@@ -1111,8 +1111,10 @@ def _track_gripper(
             if traj_pixels_tensor is not None and traj_pixels_view_tensor is not None:
                 tracks_pixels_np = traj_pixels_tensor.squeeze(0).cpu().numpy()  # [T, N, 2]
                 view_assign = traj_pixels_view_tensor.squeeze(0).cpu().numpy().astype(int)  # [N]
-                vis_np = vis_batch.squeeze(0).cpu().numpy()
-                frame_indices_np = frame_indices.cpu().numpy()
+                vis_tensor = tracker_result["vis_e"]
+                vis_np = vis_tensor.squeeze(0).cpu().numpy()
+                # Extract frame indices from query points
+                frame_indices_np = query_points[:, 0].cpu().numpy().astype(np.int64)
                 per_view: Dict[int, Dict[str, Any]] = {}
                 for view_idx in np.unique(view_assign):
                     if view_idx < 0:
@@ -2969,13 +2971,13 @@ def save_and_visualize(
 
         # Log robot points separately (they survive better than going through reprojection)
         if robot_debug_points is not None and len(robot_debug_points) > 0:
-            fps = effective_fps
             print(f"[INFO] Logging {len(robot_debug_points)} robot point clouds to Rerun...")
             for idx, pts in enumerate(robot_debug_points):
                 if pts is None or pts.size == 0:
                     continue
                 cols = robot_debug_colors[idx] if robot_debug_colors and idx < len(robot_debug_colors) else None
-                rr.set_time_seconds("frame", idx / fps if fps > 0 else float(idx))
+                # Use frame index directly (not scaled by FPS) for consistent timing
+                rr.set_time_sequence("frame", idx)
                 # Log to top-level robot entity for easy toggling (NOT under sequence-0)
                 rr.log(
                     f"robot",
@@ -2990,12 +2992,11 @@ def save_and_visualize(
         if robot_gripper_boxes:
             valid_box_count = sum(1 for box in robot_gripper_boxes if box)
             if valid_box_count > 0:
-                fps = effective_fps
                 print(f"[INFO] Logging {valid_box_count} gripper bounding boxes to Rerun...")
                 for idx, box in enumerate(robot_gripper_boxes):
                     if not box:
                         continue
-                    rr.set_time_seconds("frame", idx / fps if fps > 0 else float(idx))
+                    rr.set_time_sequence("frame", idx)
                     centers = np.asarray(box["center"], dtype=np.float32)[None, :]
                     half_sizes = np.asarray(box["half_sizes"], dtype=np.float32)[None, :]
                     rr.log(
@@ -3010,12 +3011,11 @@ def save_and_visualize(
         if robot_gripper_body_boxes:
             valid_box_count = sum(1 for box in robot_gripper_body_boxes if box)
             if valid_box_count > 0:
-                fps = effective_fps
                 print(f"[INFO] Logging {valid_box_count} gripper BODY bounding boxes to Rerun...")
                 for idx, box in enumerate(robot_gripper_body_boxes):
                     if not box:
                         continue
-                    rr.set_time_seconds("frame", idx / fps if fps > 0 else float(idx))
+                    rr.set_time_sequence("frame", idx)
                     centers = np.asarray(box["center"], dtype=np.float32)[None, :]
                     half_sizes = np.asarray(box["half_sizes"], dtype=np.float32)[None, :]
                     rr.log(
@@ -3030,12 +3030,11 @@ def save_and_visualize(
         if robot_gripper_fingertip_boxes:
             valid_box_count = sum(1 for box in robot_gripper_fingertip_boxes if box)
             if valid_box_count > 0:
-                fps = effective_fps
                 print(f"[INFO] Logging {valid_box_count} gripper FINGERTIP bounding boxes to Rerun...")
                 for idx, box in enumerate(robot_gripper_fingertip_boxes):
                     if not box:
                         continue
-                    rr.set_time_seconds("frame", idx / fps if fps > 0 else float(idx))
+                    rr.set_time_sequence("frame", idx)
                     centers = np.asarray(box["center"], dtype=np.float32)[None, :]
                     half_sizes = np.asarray(box["half_sizes"], dtype=np.float32)[None, :]
                     rr.log(
@@ -3048,7 +3047,6 @@ def save_and_visualize(
                         ),
                     )
         if robot_gripper_pad_points:
-            fps = effective_fps
             valid_pts = any(pts is not None and len(pts) > 0 for pts in robot_gripper_pad_points)
             if valid_pts:
                 count = sum(1 for pts in robot_gripper_pad_points if pts is not None and len(pts) > 0)
@@ -3056,7 +3054,7 @@ def save_and_visualize(
                 for idx, pts in enumerate(robot_gripper_pad_points):
                     if pts is None or len(pts) == 0:
                         continue
-                    rr.set_time_seconds("frame", idx / fps if fps > 0 else float(idx))
+                    rr.set_time_sequence("frame", idx)
                     cols = np.tile(np.array([[255, 0, 255]], dtype=np.uint8), (len(pts), 1))
                     rr.log(
                         "robot/gripper_pad_points",
@@ -3065,7 +3063,6 @@ def save_and_visualize(
         
         # Log TCP points from API (cyan spheres)
         if robot_tcp_points:
-            fps = default_fps
             valid_pts = any(pt is not None and len(pt) == 3 for pt in robot_tcp_points)
             if valid_pts:
                 count = sum(1 for pt in robot_tcp_points if pt is not None and len(pt) == 3)
@@ -3074,7 +3071,7 @@ def save_and_visualize(
                 for idx, pt in enumerate(robot_tcp_points):
                     if pt is None or len(pt) != 3:
                         continue
-                    rr.set_time_seconds("frame", idx / fps if fps > 0 else float(idx))
+                    rr.set_time_sequence("frame", idx)
                     # Log as a single cyan point with larger radius
                     rr.log(
                         "points/tcp_point",
@@ -3087,7 +3084,6 @@ def save_and_visualize(
         
         # Log object points from API (yellow spheres)
         if robot_object_points:
-            fps = default_fps
             valid_pts = any(pt is not None and len(pt) == 3 for pt in robot_object_points)
             if valid_pts:
                 count = sum(1 for pt in robot_object_points if pt is not None and len(pt) == 3)
@@ -3095,7 +3091,7 @@ def save_and_visualize(
                 for idx, pt in enumerate(robot_object_points):
                     if pt is None or len(pt) != 3:
                         continue
-                    rr.set_time_seconds("frame", idx / fps if fps > 0 else float(idx))
+                    rr.set_time_sequence("frame", idx)
                     # Log as a single yellow point
                     rr.log(
                         "points/object_point",
@@ -3211,7 +3207,6 @@ def save_and_visualize(
             colors_bgr = np.tile(color_rgb_arr[::-1], (num_points, 1))
 
             time_colors_rgb = (matplotlib.colormaps["turbo"](np.linspace(0.0, 1.0, max(1, num_frames)))[:, :3] * 255.0).astype(np.uint8)
-            time_fps = clip_fps if clip_fps > 0 else default_fps
             tracks_np = tracks_batch.squeeze(0).cpu().numpy()
             vis_np = vis_batch.squeeze(0).cpu().numpy()
             rr.log(
@@ -3222,7 +3217,7 @@ def save_and_visualize(
                 visible_mask = vis_np[t] > 0.5
                 if not visible_mask.any():
                     continue
-                rr.set_time_seconds("frame", t / time_fps if time_fps > 0 else float(t))
+                rr.set_time_sequence("frame", t)
                 rr.log(
                     f"sequence-{datapoint_idx}/tracks/{predictor_name}/time_colored",
                     rr.Points3D(
@@ -3284,7 +3279,6 @@ def save_and_visualize(
     # Log SAM results if available
     if sam_results is not None and "object_masks" in sam_results:
         print("[INFO] Logging SAM segmentation masks to Rerun...")
-        fps = default_fps
         object_masks = sam_results["object_masks"]
         
         # Log masks as segmentation images
@@ -3295,7 +3289,7 @@ def save_and_visualize(
             if mask is None:
                 continue
             
-            rr.set_time_seconds("frame", t / fps)
+            rr.set_time_sequence("frame", t)
             
             # Convert boolean mask to uint8 (0 or 255)
             mask_uint8 = (mask.astype(np.uint8) * 255)
