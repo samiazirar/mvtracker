@@ -581,6 +581,19 @@ def _align_bbox_with_point_cloud_com(
         "basis": aligned_basis,
     }
 
+
+def _ensure_basis(box: Dict[str, np.ndarray]) -> Optional[np.ndarray]:
+    """Return a 3x3 rotation basis for a bbox, preferring stored basis over quaternion."""
+    basis = box.get("basis")
+    if basis is not None:
+        basis_arr = np.asarray(basis, dtype=np.float32)
+        if basis_arr.shape == (3, 3):
+            return basis_arr
+    quat = box.get("quat_xyzw")
+    if quat is None:
+        return None
+    return _quaternion_xyzw_to_rotation_matrix(np.asarray(quat, dtype=np.float32))
+
 def _compute_bbox_corners_world(bbox: Dict[str, np.ndarray]) -> Optional[np.ndarray]:
     """Compute the 3D corners of a bounding box in world coordinates."""
     basis = bbox.get("basis")
@@ -2163,6 +2176,27 @@ def save_and_visualize(
                             colors=np.array([[255, 128, 0]], dtype=np.uint8),
                         ),
                     )
+                    basis = _ensure_basis(box)
+                    if basis is not None:
+                        axis = basis[:, 2].astype(np.float32, copy=False)
+                        axis /= np.linalg.norm(axis) + 1e-12
+                        half_vec = np.asarray(box["half_sizes"], dtype=np.float32)
+                        center_vec = np.asarray(box["center"], dtype=np.float32)
+                        endpoints = np.stack(
+                            [
+                                center_vec - axis * half_vec[2],
+                                center_vec + axis * half_vec[2],
+                            ],
+                            axis=0,
+                        )[None, :, :]
+                        rr.log(
+                            "robot/gripper_bbox_centerline",
+                            rr.LineStrips3D(
+                                strips=endpoints.astype(np.float32, copy=False),
+                                colors=np.array([[255, 128, 0]], dtype=np.uint8),
+                                radii=0.002,
+                            ),
+                        )
         if robot_gripper_body_boxes:
             valid_box_count = sum(1 for box in robot_gripper_body_boxes if box)
             if valid_box_count > 0:
@@ -2183,6 +2217,27 @@ def save_and_visualize(
                             colors=np.array([[255, 0, 0]], dtype=np.uint8),
                         ),
                     )
+                    basis = _ensure_basis(box)
+                    if basis is not None:
+                        axis = basis[:, 2].astype(np.float32, copy=False)
+                        axis /= np.linalg.norm(axis) + 1e-12
+                        half_vec = np.asarray(box["half_sizes"], dtype=np.float32)
+                        center_vec = np.asarray(box["center"], dtype=np.float32)
+                        endpoints = np.stack(
+                            [
+                                center_vec - axis * half_vec[2],
+                                center_vec + axis * half_vec[2],
+                            ],
+                            axis=0,
+                        )[None, :, :]
+                        rr.log(
+                            "robot/gripper_bbox_body_centerline",
+                            rr.LineStrips3D(
+                                strips=endpoints.astype(np.float32, copy=False),
+                                colors=np.array([[255, 0, 0]], dtype=np.uint8),
+                                radii=0.002,
+                            ),
+                        )
         if robot_gripper_fingertip_boxes:
             valid_box_count = sum(1 for box in robot_gripper_fingertip_boxes if box)
             if valid_box_count > 0:
@@ -2203,6 +2258,27 @@ def save_and_visualize(
                             colors=np.array([[0, 0, 255]], dtype=np.uint8),  # Blue color
                         ),
                     )
+                    basis = _ensure_basis(box)
+                    if basis is not None:
+                        axis = basis[:, 2].astype(np.float32, copy=False)
+                        axis /= np.linalg.norm(axis) + 1e-12
+                        half_vec = np.asarray(box["half_sizes"], dtype=np.float32)
+                        center_vec = np.asarray(box["center"], dtype=np.float32)
+                        endpoints = np.stack(
+                            [
+                                center_vec - axis * half_vec[2],
+                                center_vec + axis * half_vec[2],
+                            ],
+                            axis=0,
+                        )[None, :, :]
+                        rr.log(
+                            "robot/gripper_bbox_fingertip_centerline",
+                            rr.LineStrips3D(
+                                strips=endpoints.astype(np.float32, copy=False),
+                                colors=np.array([[0, 0, 255]], dtype=np.uint8),
+                                radii=0.002,
+                            ),
+                        )
         if robot_gripper_pad_points:
             fps = 30.0
             valid_pts = any(pts is not None and len(pts) > 0 for pts in robot_gripper_pad_points)
