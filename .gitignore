@@ -63,3 +63,7 @@ data/
 pytorch3d
 pytorch3d/
 pytorch3d/*
+
+sam2
+sam2/
+sam2/*
