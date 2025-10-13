@@ -19,7 +19,10 @@ python create_sparse_depth_map.py \
   --export-bbox-video \
   --tcp-points \
   --object-points \
+  --gripper-body-height-m 0.06 \
   --gripper-body-width-m 0.05 \
+  --align-bbox-with-points \
+  --align-bbox-search-radius-scale 2.0 \
   "${@}"
 
 cp ./data/high_res_filtered/task_0065_user_0010_scene_0009_cfg_0004_reprojected.rrd /data/rh20t_api
