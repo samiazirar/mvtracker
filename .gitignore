@@ -67,3 +67,5 @@ pytorch3d/*
 sam2
 sam2/
 sam2/*
+
+create_sparse_depth_map_novel.py
