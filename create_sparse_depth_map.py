@@ -2178,23 +2178,46 @@ def save_and_visualize(
                     )
                     basis = _ensure_basis(box)
                     if basis is not None:
-                        axis = basis[:, 2].astype(np.float32, copy=False)
-                        axis /= np.linalg.norm(axis) + 1e-12
-                        half_vec = np.asarray(box["half_sizes"], dtype=np.float32)
+                        axes = np.asarray(basis, dtype=np.float32)
+                        half_sizes_vec = np.asarray(box["half_sizes"], dtype=np.float32)
                         center_vec = np.asarray(box["center"], dtype=np.float32)
-                        endpoints = np.stack(
-                            [
-                                center_vec - axis * half_vec[2],
-                                center_vec + axis * half_vec[2],
-                            ],
-                            axis=0,
-                        )[None, :, :]
+
+                        approach_axis = axes[:, 2]
+                        approach_axis_norm = np.linalg.norm(approach_axis) + 1e-12
+                        approach_axis = approach_axis / approach_axis_norm
+                        origin = center_vec - approach_axis * half_sizes_vec[2]
+                        vector = approach_axis * (half_sizes_vec[2] * 2.0)
                         rr.log(
                             "robot/gripper_bbox_centerline",
-                            rr.LineStrips3D(
-                                strips=endpoints.astype(np.float32, copy=False),
+                            rr.Arrows3D(
+                                origins=origin[np.newaxis, :],
+                                vectors=vector[np.newaxis, :],
                                 colors=np.array([[255, 128, 0]], dtype=np.uint8),
-                                radii=0.002,
+                                radii=0.004,
+                            ),
+                        )
+                        up_axis = axes[:, 1]
+                        up_axis_norm = np.linalg.norm(up_axis) + 1e-12
+                        up_axis = up_axis / up_axis_norm
+                        rr.log(
+                            "robot/gripper_bbox_axis_height",
+                            rr.Arrows3D(
+                                origins=center_vec[np.newaxis, :],
+                                vectors=(up_axis * half_sizes_vec[1])[np.newaxis, :],
+                                colors=np.array([[0, 200, 0]], dtype=np.uint8),
+                                radii=0.003,
+                            ),
+                        )
+                        width_axis = axes[:, 0]
+                        width_axis_norm = np.linalg.norm(width_axis) + 1e-12
+                        width_axis = width_axis / width_axis_norm
+                        rr.log(
+                            "robot/gripper_bbox_axis_width",
+                            rr.Arrows3D(
+                                origins=center_vec[np.newaxis, :],
+                                vectors=(width_axis * half_sizes_vec[0])[np.newaxis, :],
+                                colors=np.array([[0, 150, 255]], dtype=np.uint8),
+                                radii=0.003,
                             ),
                         )
         if robot_gripper_body_boxes:
@@ -2219,23 +2242,46 @@ def save_and_visualize(
                     )
                     basis = _ensure_basis(box)
                     if basis is not None:
-                        axis = basis[:, 2].astype(np.float32, copy=False)
-                        axis /= np.linalg.norm(axis) + 1e-12
-                        half_vec = np.asarray(box["half_sizes"], dtype=np.float32)
+                        axes = np.asarray(basis, dtype=np.float32)
+                        half_sizes_vec = np.asarray(box["half_sizes"], dtype=np.float32)
                         center_vec = np.asarray(box["center"], dtype=np.float32)
-                        endpoints = np.stack(
-                            [
-                                center_vec - axis * half_vec[2],
-                                center_vec + axis * half_vec[2],
-                            ],
-                            axis=0,
-                        )[None, :, :]
+
+                        approach_axis = axes[:, 2]
+                        approach_axis_norm = np.linalg.norm(approach_axis) + 1e-12
+                        approach_axis = approach_axis / approach_axis_norm
+                        origin = center_vec - approach_axis * half_sizes_vec[2]
+                        vector = approach_axis * (half_sizes_vec[2] * 2.0)
                         rr.log(
                             "robot/gripper_bbox_body_centerline",
-                            rr.LineStrips3D(
-                                strips=endpoints.astype(np.float32, copy=False),
+                            rr.Arrows3D(
+                                origins=origin[np.newaxis, :],
+                                vectors=vector[np.newaxis, :],
                                 colors=np.array([[255, 0, 0]], dtype=np.uint8),
-                                radii=0.002,
+                                radii=0.004,
+                            ),
+                        )
+                        up_axis = axes[:, 1]
+                        up_axis_norm = np.linalg.norm(up_axis) + 1e-12
+                        up_axis = up_axis / up_axis_norm
+                        rr.log(
+                            "robot/gripper_bbox_body_axis_height",
+                            rr.Arrows3D(
+                                origins=center_vec[np.newaxis, :],
+                                vectors=(up_axis * half_sizes_vec[1])[np.newaxis, :],
+                                colors=np.array([[0, 200, 0]], dtype=np.uint8),
+                                radii=0.003,
+                            ),
+                        )
+                        width_axis = axes[:, 0]
+                        width_axis_norm = np.linalg.norm(width_axis) + 1e-12
+                        width_axis = width_axis / width_axis_norm
+                        rr.log(
+                            "robot/gripper_bbox_body_axis_width",
+                            rr.Arrows3D(
+                                origins=center_vec[np.newaxis, :],
+                                vectors=(width_axis * half_sizes_vec[0])[np.newaxis, :],
+                                colors=np.array([[0, 150, 255]], dtype=np.uint8),
+                                radii=0.003,
                             ),
                         )
         if robot_gripper_fingertip_boxes:
@@ -2260,23 +2306,46 @@ def save_and_visualize(
                     )
                     basis = _ensure_basis(box)
                     if basis is not None:
-                        axis = basis[:, 2].astype(np.float32, copy=False)
-                        axis /= np.linalg.norm(axis) + 1e-12
-                        half_vec = np.asarray(box["half_sizes"], dtype=np.float32)
+                        axes = np.asarray(basis, dtype=np.float32)
+                        half_sizes_vec = np.asarray(box["half_sizes"], dtype=np.float32)
                         center_vec = np.asarray(box["center"], dtype=np.float32)
-                        endpoints = np.stack(
-                            [
-                                center_vec - axis * half_vec[2],
-                                center_vec + axis * half_vec[2],
-                            ],
-                            axis=0,
-                        )[None, :, :]
+
+                        approach_axis = axes[:, 2]
+                        approach_axis_norm = np.linalg.norm(approach_axis) + 1e-12
+                        approach_axis = approach_axis / approach_axis_norm
+                        origin = center_vec - approach_axis * half_sizes_vec[2]
+                        vector = approach_axis * (half_sizes_vec[2] * 2.0)
                         rr.log(
                             "robot/gripper_bbox_fingertip_centerline",
-                            rr.LineStrips3D(
-                                strips=endpoints.astype(np.float32, copy=False),
+                            rr.Arrows3D(
+                                origins=origin[np.newaxis, :],
+                                vectors=vector[np.newaxis, :],
                                 colors=np.array([[0, 0, 255]], dtype=np.uint8),
-                                radii=0.002,
+                                radii=0.004,
+                            ),
+                        )
+                        up_axis = axes[:, 1]
+                        up_axis_norm = np.linalg.norm(up_axis) + 1e-12
+                        up_axis = up_axis / up_axis_norm
+                        rr.log(
+                            "robot/gripper_bbox_fingertip_axis_height",
+                            rr.Arrows3D(
+                                origins=center_vec[np.newaxis, :],
+                                vectors=(up_axis * half_sizes_vec[1])[np.newaxis, :],
+                                colors=np.array([[0, 200, 0]], dtype=np.uint8),
+                                radii=0.003,
+                            ),
+                        )
+                        width_axis = axes[:, 0]
+                        width_axis_norm = np.linalg.norm(width_axis) + 1e-12
+                        width_axis = width_axis / width_axis_norm
+                        rr.log(
+                            "robot/gripper_bbox_fingertip_axis_width",
+                            rr.Arrows3D(
+                                origins=center_vec[np.newaxis, :],
+                                vectors=(width_axis * half_sizes_vec[0])[np.newaxis, :],
+                                colors=np.array([[0, 150, 255]], dtype=np.uint8),
+                                radii=0.003,
                             ),
                         )
         if robot_gripper_pad_points:
