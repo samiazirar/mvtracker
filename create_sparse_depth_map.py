@@ -423,6 +423,7 @@ def _compute_gripper_body_bbox(
     robot_conf: Optional[Any],
     ref_bbox: Optional[Dict[str, np.ndarray]],
     body_width_m: Optional[float] = None,
+    body_height_m: Optional[float] = None,
     body_length_m: Optional[float] = None,
 ) -> Optional[Dict[str, np.ndarray]]:
     """Compute a larger gripper body bbox with fixed width, sharing the same frame as the contact bbox."""
@@ -442,13 +443,17 @@ def _compute_gripper_body_bbox(
     length_m = body_length_m if body_length_m is not None else dims["length"]
     # Keep the same vertical size as contact bbox
     contact_half_sizes = ref_bbox["half_sizes"]
-    height_m = float(contact_half_sizes[1] * 2.0)
+    if body_height_m is not None:
+        height_m = float(body_height_m)
+    else:
+        height_m = float(contact_half_sizes[1] * 2.0)
     half_sizes = np.array([width_m / 2.0, height_m / 2.0, length_m / 2.0], dtype=np.float32)
     
     # Share the same basis as contact bbox
     basis = ref_bbox.get("basis")
     if basis is None:
         return None
+    basis = np.asarray(basis, dtype=np.float32)
     
     # Position body box to share the same front face as contact box
     # Get the contact box's front face position (pad_midpoint)
@@ -466,6 +471,7 @@ def _compute_gripper_body_bbox(
         "center": center.astype(np.float32),
         "half_sizes": half_sizes.astype(np.float32),
         "quat_xyzw": quat,
+        "basis": basis,
     }
 
 
@@ -513,6 +519,67 @@ def _compute_gripper_pad_points(
     if not points:
         return None
     return np.stack(points, axis=0).astype(np.float32)
+
+
+def _align_bbox_with_point_cloud_com(
+    bbox: Dict[str, np.ndarray],
+    points: np.ndarray,
+    colors: Optional[np.ndarray] = None,
+    search_radius_scale: float = 2.0,
+    min_points_required: int = 10,
+) -> Optional[Dict[str, np.ndarray]]:
+    """Align a bbox with the center of mass of nearby point-cloud samples (x/y translation, planar rotation)."""
+    if bbox is None or points is None or len(points) == 0:
+        return bbox
+
+    points = np.asarray(points, dtype=np.float32)
+    if points.shape[0] < min_points_required:
+        return bbox
+
+    center = np.asarray(bbox["center"], dtype=np.float32)
+    half_sizes = np.asarray(bbox["half_sizes"], dtype=np.float32)
+    basis = np.asarray(bbox.get("basis", np.eye(3, dtype=np.float32)), dtype=np.float32)
+
+    bbox_diagonal = np.linalg.norm(half_sizes * 2.0)
+    search_radius = bbox_diagonal * search_radius_scale
+
+    distances = np.linalg.norm(points - center[None, :], axis=1)
+    nearby_mask = distances <= search_radius
+    nearby_points = points[nearby_mask]
+    if nearby_points.shape[0] < min_points_required:
+        return bbox
+
+    com = np.mean(nearby_points, axis=0).astype(np.float32)
+    aligned_center = center.copy()
+    aligned_center[0] = com[0]
+    aligned_center[1] = com[1]
+
+    points_xy = nearby_points[:, :2] - com[:2]
+    if points_xy.shape[0] >= 3:
+        cov = np.cov(points_xy.T)
+        try:
+            eigenvalues, eigenvectors = np.linalg.eigh(cov)
+            idx = np.argsort(eigenvalues)[::-1]
+            eigenvectors = eigenvectors[:, idx]
+            aligned_basis = basis.copy()
+            aligned_basis[:2, 0] = eigenvectors[:, 0]
+            aligned_basis[:2, 1] = eigenvectors[:, 1]
+            aligned_basis[:, 0] /= np.linalg.norm(aligned_basis[:, 0]) + 1e-12
+            aligned_basis[:, 1] /= np.linalg.norm(aligned_basis[:, 1]) + 1e-12
+            aligned_quat = _rotation_matrix_to_xyzw(aligned_basis)
+        except np.linalg.LinAlgError:
+            aligned_basis = basis
+            aligned_quat = bbox["quat_xyzw"]
+    else:
+        aligned_basis = basis
+        aligned_quat = bbox["quat_xyzw"]
+
+    return {
+        "center": aligned_center,
+        "half_sizes": half_sizes,
+        "quat_xyzw": aligned_quat,
+        "basis": aligned_basis,
+    }
 
 def _compute_bbox_corners_world(bbox: Dict[str, np.ndarray]) -> Optional[np.ndarray]:
     """Compute the 3D corners of a bounding box in world coordinates."""
@@ -1754,13 +1821,19 @@ def process_frames(
                     full_bbox_for_frame = base_full_bbox
                     if robot_gripper_body_boxes is not None and bbox_entry_for_frame is not None:
                         body_width_override = getattr(args, "gripper_body_width_m", None)
+                        body_height_override = getattr(args, "gripper_body_height_m", None)
                         body_length_override = getattr(args, "gripper_body_length_m", None)
-                        if body_width_override is not None or body_length_override is not None:
+                        if (
+                            body_width_override is not None
+                            or body_height_override is not None
+                            or body_length_override is not None
+                        ):
                             full_bbox_for_frame = _compute_gripper_body_bbox(
                                 robot_model,
                                 robot_conf,
                                 bbox_entry_for_frame,
                                 body_width_m=body_width_override,
+                                body_height_m=body_height_override,
                                 body_length_m=body_length_override,
                             )
                     elif robot_gripper_body_boxes is None and full_bbox_for_frame is not None:
@@ -1879,6 +1952,47 @@ def process_frames(
                                     remap_colors[vidx] = combined_colors[idx[0]]
                                 mesh_pcd.colors = o3d.utility.Vector3dVector(remap_colors)
                         combined_pcd = mesh_pcd
+
+        points_world_np: Optional[np.ndarray] = None
+        colors_world_np: Optional[np.ndarray] = None
+        if combined_pcd.has_points():
+            points_world_np = np.asarray(combined_pcd.points, dtype=np.float32)
+            if combined_pcd.has_colors():
+                colors_world_np = np.asarray(combined_pcd.colors, dtype=np.float32)
+
+        if (
+            getattr(args, "align_bbox_with_points", True)
+            and points_world_np is not None
+            and points_world_np.size > 0
+        ):
+            search_radius_scale = getattr(args, "align_bbox_search_radius_scale", 2.0)
+            if bbox_entry_for_frame is not None:
+                aligned_contact = _align_bbox_with_point_cloud_com(
+                    bbox_entry_for_frame,
+                    points_world_np,
+                    colors=colors_world_np,
+                    search_radius_scale=search_radius_scale,
+                )
+                if aligned_contact is not None:
+                    bbox_entry_for_frame = aligned_contact
+            if full_bbox_for_frame is not None:
+                aligned_body = _align_bbox_with_point_cloud_com(
+                    full_bbox_for_frame,
+                    points_world_np,
+                    colors=colors_world_np,
+                    search_radius_scale=search_radius_scale,
+                )
+                if aligned_body is not None:
+                    full_bbox_for_frame = aligned_body
+            if fingertip_bbox_for_frame is not None:
+                aligned_tip = _align_bbox_with_point_cloud_com(
+                    fingertip_bbox_for_frame,
+                    points_world_np,
+                    colors=colors_world_np,
+                    search_radius_scale=search_radius_scale,
+                )
+                if aligned_tip is not None:
+                    fingertip_bbox_for_frame = aligned_tip
 
         if robot_gripper_boxes is not None:
             robot_gripper_boxes.append(bbox_entry_for_frame)
@@ -2254,6 +2368,12 @@ def main():
         help="Body bbox width along jaw-separation axis (full size, fixed across frames).",
     )
     parser.add_argument(
+        "--gripper-body-height-m",
+        type=float,
+        default=None,
+        help="Body bbox thickness along the pad-normal axis (full size).",
+    )
+    parser.add_argument(
         "--gripper-body-length-m",
         type=float,
         default=None,
@@ -2300,6 +2420,18 @@ def main():
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Enable additional debug outputs such as red robot point overlays in Rerun.",
+    )
+    parser.add_argument(
+        "--align-bbox-with-points",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Align gripper bboxes with nearby point cloud COM (disable with --no-align-bbox-with-points).",
+    )
+    parser.add_argument(
+        "--align-bbox-search-radius-scale",
+        type=float,
+        default=2.0,
+        help="Scale factor for alignment search radius relative to bbox diagonal.",
     )
     args = parser.parse_args()
 
