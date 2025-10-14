@@ -106,7 +106,7 @@ CONTACT_SURFACE_PRESETS = {
 DEFAULT_CONTACT_SURFACE = {"length": 0.042, "height": 0.02, "clearance": 0.004}
 
 # Minimum dimensions for contact width and length.
-MIN_CONTACT_WIDTH = 0.008
+MIN_CONTACT_WIDTH = 0.0001
 MIN_CONTACT_LENGTH = 0.015
 
 # Fallback scaling factors for contact width and height.
@@ -218,7 +218,7 @@ def _compute_gripper_bbox(
     gripper_width_mm: Optional[float],
     contact_height_m: Optional[float] = None,
     contact_length_m: Optional[float] = None,
-    tcp_transform: Optional[np.ndarray] = None,
+    tcp_transform: Optional[np.ndarray] = None, #not used smh
 ) -> Tuple[Optional[Dict[str, np.ndarray]], Optional[Dict[str, np.ndarray]], Optional[Dict[str, np.ndarray]]]:
     """Estimate contact bbox, full gripper bbox, and fingertip bbox aligned with the jaw frame."""
     # Bail out immediately if we have no robot configuration to describe the gripper.
@@ -233,33 +233,24 @@ def _compute_gripper_bbox(
     # Candidate finger link names to check for transform matrices.
     candidate_links = GRIPPER_LINK_CANDIDATES.get(robot_type, [])
     # Fallback end-effector link name if finger links are not available.
+
+    #Not used
     ee_link = ROBOT_EE_LINK_MAP.get(robot_type)
 
-    # `tf_matrix` will store the transform we ultimately base the boxes on.
-    tf_matrix = None
-    if fk_map:
-        # Prefer whichever candidate link we can find first in the FK cache.
-        for link_name in candidate_links:
-            if link_name in fk_map:
-                tf_matrix = fk_map[link_name].matrix()
-                break
-        # If none of the candidate links are present, try the end-effector link instead.
-        if tf_matrix is None and ee_link and ee_link in fk_map:
-            tf_matrix = fk_map[ee_link].matrix()
-    # If FK did not give us anything, fall back to the provided TCP transform.
-    if tf_matrix is None and tcp_transform is not None:
-        tf_matrix = tcp_transform
-    # Without any transform we cannot place bounding boxes.
-    if tf_matrix is None:
+    # 1. Consolidate all possible links we might use from the FK map.
+    all_possible_links = candidate_links + ([ee_link] if ee_link else [])
+
+    # 2. Check if the fk_map exists and contains at least one of our needed links.
+    # The `fk_map and ...` prevents errors if fk_map is None.
+    has_usable_fk = fk_map and any(link in fk_map for link in all_possible_links)
+
+    # 3. If we have NEITHER a usable FK link NOR a tcp_transform, we cannot continue.
+    if not has_usable_fk and tcp_transform is None:
+        print("[Warning] No usable FK link data or TCP transform available; cannot compute gripper bbox.")
         return None, None, None
 
-    # Force the transform into a float32 numpy array for consistent math downstream.
-    tf_matrix = np.asarray(tf_matrix, dtype=np.float32)
     # FK matrices are expressed in the world frame; keep both rotation and translation so all boxes stay world-aligned.
     # Extract the rotation submatrix that defines the gripper orientation.
-    rotation = tf_matrix[:3, :3]
-    # Extract the translation vector so we know where the gripper sits in space.
-    translation = tf_matrix[:3, 3].astype(np.float32)
 
     # Resolve gripper geometry to determine nominal pad and body dimensions.
     # Get the configured gripper name so we can look up size presets.
@@ -326,6 +317,7 @@ def _compute_gripper_bbox(
 
     # If both pads available, derive a stable coordinate frame directly from their transforms
     if left_pos is not None and right_pos is not None:
+        print("[Info] Both gripper pad transforms available; computing gripper frame from finger pads.")
         # Width axis: from right to left (jaw separation direction)
         # Difference between pad centers gives the opening direction vector.
         width_vec = left_pos - right_pos
@@ -372,6 +364,7 @@ def _compute_gripper_bbox(
         # Recompute approach to guarantee orthogonality after any numeric drift from averaging pad transforms.
         
     elif left_tf is not None:
+        print("[Warning] Only left gripper pad transform available; using left pad frame directly.")
         # Fallback: use only left pad
         # Use the left pad pose directly when the right pad is unavailable.
         pad_midpoint = left_tf[:3, 3].astype(np.float32)
@@ -382,6 +375,7 @@ def _compute_gripper_bbox(
         height_axis = left_tf[:3, 1].astype(np.float32)  # Y-axis of pad frame
         measured_width = None
     elif right_tf is not None:
+        print("[Warning] Only right gripper pad transform available; negating X axis to maintain left-to-right convention.")
         # Fallback: use only right pad
         # Use right pad pose when only that side is known.
         pad_midpoint = right_tf[:3, 3].astype(np.float32)
@@ -391,6 +385,7 @@ def _compute_gripper_bbox(
         height_axis = right_tf[:3, 1].astype(np.float32)  # Y-axis of pad frame
         measured_width = None
     else:
+        print("[Warning] No gripper pad transforms available; cannot compute gripper bbox.")
         # No pad transforms available
         # Without any finger pose we cannot build a reasonable frame.
         return None, None, None
@@ -398,7 +393,8 @@ def _compute_gripper_bbox(
     # Calculate contact width from measured or commanded gripper width
     # Collect all available width candidates before choosing the tightest value.
     width_candidates = []
-    if measured_width is not None:
+    if measured_width is not None and gripper_width_mm is None:
+        #use measured width only if no commanded width is given
         width_candidates.append(measured_width)
     if gripper_width_mm is not None:
         width_candidates.append(max(gripper_width_mm / 1000.0, MIN_CONTACT_WIDTH))
@@ -407,7 +403,6 @@ def _compute_gripper_bbox(
     else:
         width_m = dims["default_width"] * CONTACT_WIDTH_SCALE_FALLBACK
     width_m = max(width_m - 2.0 * clearance, MIN_CONTACT_WIDTH)
-
     # Assemble the oriented box with half-extents
     # Compose the rotation matrix whose columns define the gripper's width/height/approach directions.
     # Stack axis vectors into a rotation matrix consistent with our constructed frame.
@@ -436,7 +431,7 @@ def _compute_gripper_bbox(
     
     # Full box shares the same front face position
     # Position the full body box using the same logic but with its own depth.
-    full_center = (pad_midpoint + approach_axis * full_half_sizes[2]).astype(np.float32)
+    full_center = (pad_midpoint - approach_axis * full_half_sizes[2]).astype(np.float32)
 
     # Create a third bbox (blue) positioned at the TOP of the body bbox (opposite side from orange)
     # Same size as contact bbox (orange), but positioned inside the red body bbox
@@ -527,7 +522,7 @@ def _compute_gripper_body_bbox(
     # So: body_center = front_face + approach_axis * body_half_sizes[2]
     front_face = contact_center - approach_axis * contact_half_sizes[2]
     # March forward along the approach axis so the larger body box shares the same fingertip plane.
-    center = (front_face + approach_axis * half_sizes[2]).astype(np.float32)
+    center = (front_face - approach_axis * half_sizes[2]).astype(np.float32)
     
     quat = _rotation_matrix_to_xyzw(basis)
     return {
