@@ -2321,13 +2321,14 @@ def process_frames(
         if robot_object_points is not None:
             robot_object_points.append(obj_pt_for_frame)
         
-        # Extract query points (sensor points inside the contact bbox)
+        # Extract query points (sensor points inside the gripper body bbox)
         if query_points is not None:
-            if bbox_entry_for_frame is not None and points_world_np is not None and points_world_np.size > 0:
-                # Extract points inside the contact bbox (red bbox)
+            query_bbox = full_bbox_for_frame if full_bbox_for_frame is not None else bbox_entry_for_frame
+            if query_bbox is not None and points_world_np is not None and points_world_np.size > 0:
+                # Extract points inside the gripper body bbox (red bbox)
                 inside_pts, inside_cols = _extract_points_inside_bbox(
                     points_world_np,
-                    bbox_entry_for_frame,
+                    query_bbox,
                     colors=colors_world_np,
                 )
                 query_points.append(inside_pts if inside_pts is not None and inside_pts.size > 0 else None)
