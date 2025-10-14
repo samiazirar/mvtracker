@@ -2915,6 +2915,7 @@ def main():
         default=0.05,
         help="Radius of TCP point spheres in meters.",
     )
+    #TODO check if used lul
     parser.add_argument(
         "--object-points",
         action=argparse.BooleanOptionalAction,
