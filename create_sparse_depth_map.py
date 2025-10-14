@@ -2709,7 +2709,8 @@ def main():
     )
 
     # --- Step 3: Save and Visualize ---
-    rr.init("RH20T_Reprojection_Frameworks", spawn=False)
+    rr.init("RH20T_Reprojection_Frameworks", spawn=True)
+
     per_cam_for_npz = per_cam_high_sel if per_cam_high_sel is not None else per_cam_low_sel
     save_and_visualize(
         args,
