@@ -63,6 +63,8 @@ from RH20T.rh20t_api.configurations import get_conf_from_dir_name, load_conf
 from RH20T.rh20t_api.scene import RH20TScene
 from RH20T.utils.robot import RobotModel
 
+# TODO: find unused stuff and eithe remove or implement
+# TODO: First unused stuff: implement tcp usage or remove it
 # --- Constants ---
 # Precompiled regex for extracting numbers from filenames.
 NUM_RE = re.compile(r"(\d+)")
@@ -431,7 +433,7 @@ def _compute_gripper_bbox(
     
     # Full box shares the same front face position
     # Position the full body box using the same logic but with its own depth.
-    full_center = (pad_midpoint - approach_axis * full_half_sizes[2]).astype(np.float32)
+    full_center = (pad_midpoint + approach_axis * full_half_sizes[2]).astype(np.float32)
 
     # Create a third bbox (blue) positioned at the TOP of the body bbox (opposite side from orange)
     # Same size as contact bbox (orange), but positioned inside the red body bbox
@@ -522,7 +524,7 @@ def _compute_gripper_body_bbox(
     # So: body_center = front_face + approach_axis * body_half_sizes[2]
     front_face = contact_center - approach_axis * contact_half_sizes[2]
     # March forward along the approach axis so the larger body box shares the same fingertip plane.
-    center = (front_face - approach_axis * half_sizes[2]).astype(np.float32)
+    center = (front_face + approach_axis * half_sizes[2]).astype(np.float32)
     
     quat = _rotation_matrix_to_xyzw(basis)
     return {
@@ -586,6 +588,7 @@ def _align_bbox_with_point_cloud_com(
     search_radius_scale: float = 2.0,
     min_points_required: int = 10,
 ) -> Optional[Dict[str, np.ndarray]]:
+    raise NotImplementedError("this needs some serious fixes.")
     """Align a bbox with the center of mass of nearby point-cloud samples (x/y translation, planar rotation)."""
     if bbox is None or points is None or len(points) == 0:
         return bbox
@@ -2646,7 +2649,7 @@ def main():
     parser.add_argument(
         "--align-bbox-with-points",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=False,
         help="Align gripper bboxes with nearby point cloud COM (disable with --no-align-bbox-with-points).",
     )
     parser.add_argument(
