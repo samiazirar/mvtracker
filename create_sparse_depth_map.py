@@ -118,6 +118,7 @@ CONTACT_HEIGHT_SCALE_FALLBACK = 0.45
 # --- Utility Functions ---
 # Functions for mathematical transformations, gripper bounding box computation, and 3D geometry handling.
 
+
 def _rotation_matrix_to_xyzw(R: np.ndarray) -> np.ndarray:
     """Convert a 3x3 rotation matrix to a quaternion [x, y, z, w]."""
     # Validate the input early so downstream math can assume a proper rotation matrix.
@@ -157,6 +158,122 @@ def _rotation_matrix_to_xyzw(R: np.ndarray) -> np.ndarray:
         # Degenerate rotation: fall back to identity quaternion.
         return np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)
     return quat / norm
+
+
+def _compute_gripper_bbox_from_tcp(
+    tcp_transform: np.ndarray,
+    robot_conf: Optional[Any],
+    gripper_width_mm: Optional[float],
+    contact_height_m: Optional[float] = None,
+    contact_length_m: Optional[float] = None,
+) -> Tuple[Optional[Dict[str, np.ndarray]], Optional[Dict[str, np.ndarray]], Optional[Dict[str, np.ndarray]]]:
+    """
+    Compute gripper bbox using TCP transform from API.
+    
+    This function uses the precise TCP (Tool Center Point) pose from the robot API
+    to compute gripper bounding boxes instead of relying on forward kinematics.
+    
+    Args:
+        tcp_transform: 4x4 transformation matrix for TCP pose
+        robot_conf: Robot configuration object
+        gripper_width_mm: Gripper width in millimeters
+        contact_height_m: Override for contact bbox height
+        contact_length_m: Override for contact bbox length
+        
+    Returns:
+        Tuple of (contact_box, full_box, fingertip_box) dictionaries or (None, None, None)
+    """
+    if tcp_transform is None or robot_conf is None:
+        return None, None, None
+    
+    # Extract position and rotation from TCP transform
+    tcp_position = tcp_transform[:3, 3].astype(np.float32)
+    tcp_rotation = tcp_transform[:3, :3].astype(np.float32)
+    
+    # Get gripper dimensions
+    gripper_name = getattr(robot_conf, "gripper", "")
+    dims = DEFAULT_GRIPPER_DIMS
+    contact_preset = CONTACT_SURFACE_PRESETS.get(gripper_name, DEFAULT_CONTACT_SURFACE)
+    if gripper_name:
+        for name, values in GRIPPER_DIMENSIONS.items():
+            if name.lower() == gripper_name.lower():
+                dims = values
+                break
+    
+    # Determine contact dimensions
+    height_m = contact_height_m if contact_height_m is not None else contact_preset.get(
+        "height", dims["height"] * CONTACT_HEIGHT_SCALE_FALLBACK
+    )
+    base_length_m = contact_length_m if contact_length_m is not None else contact_preset.get(
+        "length", dims["length"] * CONTACT_HEIGHT_SCALE_FALLBACK
+    )
+    clearance = contact_preset.get("clearance", DEFAULT_CONTACT_SURFACE["clearance"])
+    
+    # Enforce minimum sizes
+    height_m = float(max(height_m, 0.005))
+    base_length_m = float(max(base_length_m, MIN_CONTACT_LENGTH))
+    base_half_length = base_length_m / 2.0
+    
+    # Calculate contact width
+    if gripper_width_mm is not None:
+        width_m = max(gripper_width_mm / 1000.0, MIN_CONTACT_WIDTH)
+    else:
+        width_m = dims["default_width"] * CONTACT_WIDTH_SCALE_FALLBACK
+    width_m = max(width_m - 2.0 * clearance, MIN_CONTACT_WIDTH)
+    
+    # Use TCP rotation as the gripper frame
+    # Assuming TCP frame follows convention: X=width, Y=height, Z=approach
+    width_axis = tcp_rotation[:, 0].astype(np.float32)
+    height_axis = tcp_rotation[:, 1].astype(np.float32)
+    approach_axis = tcp_rotation[:, 2].astype(np.float32)
+    
+    # Build basis matrix
+    basis = np.column_stack((width_axis, height_axis, approach_axis)).astype(np.float32)
+    
+    # Define half-sizes
+    contact_half_sizes = np.array(
+        [width_m / 2.0, height_m / 2.0, base_half_length],
+        dtype=np.float32,
+    )
+    full_half_sizes = np.array(
+        [
+            max(contact_half_sizes[0] + clearance, dims["default_width"] / 2.0),
+            max(contact_half_sizes[1] + clearance * 0.5, dims["height"] / 2.0),
+            max(contact_half_sizes[2] + clearance, dims["length"] / 2.0),
+        ],
+        dtype=np.float32,
+    )
+    
+    # Position bboxes relative to TCP
+    # Contact box extends forward from TCP along approach axis
+    contact_center = (tcp_position + approach_axis * contact_half_sizes[2]).astype(np.float32)
+    full_center = (tcp_position + approach_axis * full_half_sizes[2]).astype(np.float32)
+    fingertip_center = (full_center + approach_axis * (full_half_sizes[2] - contact_half_sizes[2])).astype(np.float32)
+    
+    # Convert basis to quaternion
+    quat = _rotation_matrix_to_xyzw(basis)
+    
+    # Package results
+    contact_box = {
+        "center": contact_center.astype(np.float32),
+        "half_sizes": contact_half_sizes.astype(np.float32),
+        "quat_xyzw": quat,
+        "basis": basis,
+    }
+    full_box = {
+        "center": full_center.astype(np.float32),
+        "half_sizes": full_half_sizes.astype(np.float32),
+        "quat_xyzw": quat,
+        "basis": basis,
+    }
+    fingertip_box = {
+        "center": fingertip_center.astype(np.float32),
+        "half_sizes": contact_half_sizes.astype(np.float32),
+        "quat_xyzw": quat,
+        "basis": basis,
+    }
+    
+    return contact_box, full_box, fingertip_box
 
 
 def _quaternion_xyzw_to_rotation_matrix(quat: np.ndarray) -> np.ndarray:
@@ -1908,58 +2025,56 @@ def process_frames(
                     mtl_colors=robot_mtl_colors,
                 )
                 if robot_gripper_boxes is not None:
-                    # Use API's get_tcp_aligned for precise TCP pose (more accurate than FK)
-                    #is it base ?
+                    # Determine which method to use for bbox computation
+                    use_tcp = getattr(args, "use_tcp", False)
                     tcp_transform = None
-                    try:
-                        print("Getting TCP from API...")
-                        # Get the official TCP pose from the dataset (7D: position + quaternion)
-                        # This is the pre-processed, high-fidelity pose from the robot's controller
-                        # Use scene_high if available (it has the robot data), otherwise fall back to scene_low
-                        robot_scene = scene_low if scene_low is not None else scene_high
-                        tcp_pose_7d = robot_scene.get_tcp_aligned(t_low)
-                        # Validate that we got valid data
-                        if tcp_pose_7d is not None and len(tcp_pose_7d) == 7:
-                            # Convert 7D pose [x, y, z, qx, qy, qz, qw] to 4x4 matrix
-                            tcp_transform = _pose_7d_to_matrix(tcp_pose_7d)
-                            if ti == 0:
-                                print(f"[INFO] Using API TCP pose for gripper bbox: position={tcp_pose_7d[:3]}, quat={tcp_pose_7d[3:]}")
-                        else:
-                            if ti == 0:
-                                print(f"[WARN] API returned invalid TCP data: {tcp_pose_7d}")
-                                print(f"[INFO] Falling back to FK-based TCP computation")
-                            raise ValueError("Invalid TCP data from API")
-                            
-                    except TypeError as e:
-                        if ti == 0 and "Invalid TCP data" not in str(e):
-                            print(f"[WARN] Could not get TCP from API: {e}")
-                            print(f"[INFO] Falling back to FK-based TCP computation")
-                        # Fallback to FK if API method fails
-                        if hasattr(robot_model, 'chain') and hasattr(robot_model, 'joint_sequence'):
-                            joint_map = {}
-                            for idx, joint_name in enumerate(robot_model.joint_sequence):
-                                if idx < len(robot_joint_angles):
-                                    joint_map[joint_name] = float(robot_joint_angles[idx])
-                            
-                            robot_type_str = getattr(robot_conf, "robot", None)
-                            ee_link_name = ROBOT_EE_LINK_MAP.get(robot_type_str, "ee_link")
-                            fk_result = robot_model.chain.forward_kinematics(joint_map)
-                            
-                            if ee_link_name in fk_result:
-                                tcp_transform = fk_result[ee_link_name].matrix().astype(np.float32)
-                                if ti == 0:
-                                    print(f"[INFO] Using FK-based TCP from link '{ee_link_name}'")
-                            elif ti == 0:
-                                print(f"[WARN] EE link '{ee_link_name}' not found in FK result")
                     
-                    bbox_entry_for_frame, base_full_bbox, fingertip_bbox_for_frame = _compute_gripper_bbox(
-                        robot_model,
-                        robot_conf,
-                        current_gripper_width_mm,
-                        contact_height_m=getattr(args, "gripper_bbox_contact_height_m", None),
-                        contact_length_m=getattr(args, "gripper_bbox_contact_length_m", None),
-                        tcp_transform=tcp_transform,
-                    )
+                    if use_tcp:
+                        # Use TCP-based computation
+                        try:
+                            if ti == 0:
+                                print("[INFO] Using TCP-based gripper bbox computation")
+                            # Get the official TCP pose from the dataset (7D: position + quaternion)
+                            robot_scene = scene_low if scene_low is not None else scene_high
+                            tcp_pose_7d = robot_scene.get_tcp_aligned(t_low)
+                            # Validate that we got valid data
+                            if tcp_pose_7d is not None and len(tcp_pose_7d) == 7:
+                                # Convert 7D pose [x, y, z, qx, qy, qz, qw] to 4x4 matrix
+                                tcp_transform = _pose_7d_to_matrix(tcp_pose_7d)
+                                if ti == 0:
+                                    print(f"[INFO] Using API TCP pose: position={tcp_pose_7d[:3]}, quat={tcp_pose_7d[3:]}")
+                            else:
+                                if ti == 0:
+                                    print(f"[WARN] API returned invalid TCP data: {tcp_pose_7d}")
+                                    print(f"[WARN] Cannot compute TCP-based bbox, skipping frame")
+                        except Exception as e:
+                            if ti == 0:
+                                print(f"[WARN] Could not get TCP from API: {e}")
+                                print(f"[WARN] Cannot compute TCP-based bbox, skipping frame")
+                        
+                        # Compute bbox using TCP method
+                        if tcp_transform is not None:
+                            bbox_entry_for_frame, base_full_bbox, fingertip_bbox_for_frame = _compute_gripper_bbox_from_tcp(
+                                tcp_transform=tcp_transform,
+                                robot_conf=robot_conf,
+                                gripper_width_mm=current_gripper_width_mm,
+                                contact_height_m=getattr(args, "gripper_bbox_contact_height_m", None),
+                                contact_length_m=getattr(args, "gripper_bbox_contact_length_m", None),
+                            )
+                        else:
+                            bbox_entry_for_frame, base_full_bbox, fingertip_bbox_for_frame = None, None, None
+                    else:
+                        # Use FK-based computation (default)
+                        if ti == 0:
+                            print("[INFO] Using FK-based gripper bbox computation")
+                        bbox_entry_for_frame, base_full_bbox, fingertip_bbox_for_frame = _compute_gripper_bbox(
+                            robot_model,
+                            robot_conf,
+                            current_gripper_width_mm,
+                            contact_height_m=getattr(args, "gripper_bbox_contact_height_m", None),
+                            contact_length_m=getattr(args, "gripper_bbox_contact_length_m", None),
+                            tcp_transform=None,  # Not used in FK-based computation
+                        )
                     full_bbox_for_frame = base_full_bbox
                     # if we want the griper bbox
                     if robot_gripper_body_boxes is not None and bbox_entry_for_frame is not None:
@@ -2713,6 +2828,12 @@ def main():
         type=float,
         default=2.0,
         help="Scale factor for alignment search radius relative to bbox diagonal.",
+    )
+    parser.add_argument(
+        "--use-tcp",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Use TCP (Tool Center Point) pose from API for gripper bbox computation instead of FK.",
     )
     args = parser.parse_args()
 
