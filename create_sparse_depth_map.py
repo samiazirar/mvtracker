@@ -914,6 +914,43 @@ def _extract_points_inside_bbox(
     return inside_points, inside_colors
 
 
+def _filter_points_closest_to_bbox(
+    points: np.ndarray,
+    bbox: Dict[str, np.ndarray],
+    max_points: int,
+    colors: Optional[np.ndarray] = None,
+) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+    """
+    Filter points to keep only the N closest to a bounding box center.
+    
+    Args:
+        points: Nx3 array of 3D points
+        bbox: Dictionary containing 'center' of the bbox
+        max_points: Maximum number of points to keep
+        colors: Optional Nx3 array of RGB colors (0-1 range)
+        
+    Returns:
+        Tuple of (filtered_points, filtered_colors)
+    """
+    if points is None or len(points) == 0 or bbox is None or max_points is None or max_points <= 0:
+        return points, colors
+    
+    if len(points) <= max_points:
+        return points, colors
+    
+    # Calculate distances to bbox center
+    center = np.asarray(bbox["center"], dtype=np.float32)
+    distances = np.linalg.norm(points - center[None, :], axis=1)
+    
+    # Get indices of N closest points
+    closest_indices = np.argsort(distances)[:max_points]
+    
+    filtered_points = points[closest_indices]
+    filtered_colors = None if colors is None else colors[closest_indices]
+    
+    return filtered_points, filtered_colors
+
+
 def _project_bbox_pixels(corners_world: np.ndarray, intr: np.ndarray, extr: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """Project 3D bounding box corners into 2D image pixels."""
     corners_world = np.asarray(corners_world, dtype=np.float32)
@@ -2331,6 +2368,22 @@ def process_frames(
                     query_bbox,
                     colors=colors_world_np,
                 )
+                
+                # Apply max query points limit if specified (keep N closest to blue/fingertip bbox)
+                max_query_pts = getattr(args, "max_query_points", None)
+                if max_query_pts is not None and inside_pts is not None and inside_pts.size > 0:
+                    # Use fingertip bbox (blue) as reference if available, otherwise use contact bbox
+                    reference_bbox = fingertip_bbox_for_frame if fingertip_bbox_for_frame is not None else bbox_entry_for_frame
+                    if reference_bbox is not None:
+                        inside_pts, inside_cols = _filter_points_closest_to_bbox(
+                            inside_pts,
+                            reference_bbox,
+                            max_query_pts,
+                            colors=inside_cols,
+                        )
+                        if ti == 0:
+                            print(f"[INFO] Limited query points to {len(inside_pts)} closest to fingertip bbox (max: {max_query_pts})")
+                
                 query_points.append(inside_pts if inside_pts is not None and inside_pts.size > 0 else None)
                 if query_colors is not None:
                     query_colors.append(inside_cols if inside_cols is not None and inside_cols.size > 0 else None)
@@ -2964,6 +3017,12 @@ def main():
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Visualize sensor points inside gripper bbox as magenta points in Rerun.",
+    )
+    parser.add_argument(
+        "--max-query-points",
+        type=int,
+        default=None,
+        help="Maximum number of query points to keep. When set, keeps only the N points closest to the blue bbox (fingertip). Default: None (no limit).",
     )
     args = parser.parse_args()
 
