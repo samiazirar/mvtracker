@@ -221,55 +221,79 @@ def _compute_gripper_bbox(
     tcp_transform: Optional[np.ndarray] = None,
 ) -> Tuple[Optional[Dict[str, np.ndarray]], Optional[Dict[str, np.ndarray]], Optional[Dict[str, np.ndarray]]]:
     """Estimate contact bbox, full gripper bbox, and fingertip bbox aligned with the jaw frame."""
+    # Bail out immediately if we have no robot configuration to describe the gripper.
     if robot_conf is None:
         return None, None, None
 
     # Grab the most recent FK results so we can derive pad transforms.
+    # `latest_transforms` caches forward-kinematics results keyed by link names.
     fk_map = getattr(robot_model, "latest_transforms", None) or {}
+    # Identify which robot variant we are working with to look up gripper metadata.
     robot_type = getattr(robot_conf, "robot", None)
+    # Candidate finger link names to check for transform matrices.
     candidate_links = GRIPPER_LINK_CANDIDATES.get(robot_type, [])
+    # Fallback end-effector link name if finger links are not available.
     ee_link = ROBOT_EE_LINK_MAP.get(robot_type)
 
+    # `tf_matrix` will store the transform we ultimately base the boxes on.
     tf_matrix = None
     if fk_map:
+        # Prefer whichever candidate link we can find first in the FK cache.
         for link_name in candidate_links:
             if link_name in fk_map:
                 tf_matrix = fk_map[link_name].matrix()
                 break
+        # If none of the candidate links are present, try the end-effector link instead.
         if tf_matrix is None and ee_link and ee_link in fk_map:
             tf_matrix = fk_map[ee_link].matrix()
+    # If FK did not give us anything, fall back to the provided TCP transform.
     if tf_matrix is None and tcp_transform is not None:
         tf_matrix = tcp_transform
+    # Without any transform we cannot place bounding boxes.
     if tf_matrix is None:
         return None, None, None
 
+    # Force the transform into a float32 numpy array for consistent math downstream.
     tf_matrix = np.asarray(tf_matrix, dtype=np.float32)
+    # FK matrices are expressed in the world frame; keep both rotation and translation so all boxes stay world-aligned.
+    # Extract the rotation submatrix that defines the gripper orientation.
     rotation = tf_matrix[:3, :3]
+    # Extract the translation vector so we know where the gripper sits in space.
     translation = tf_matrix[:3, 3].astype(np.float32)
 
     # Resolve gripper geometry to determine nominal pad and body dimensions.
+    # Get the configured gripper name so we can look up size presets.
     gripper_name = getattr(robot_conf, "gripper", "")
+    # Default dimensions when no specific data is found.
     dims = DEFAULT_GRIPPER_DIMS
+    # Optional preset overrides for contact surface sizing.
     contact_preset = CONTACT_SURFACE_PRESETS.get(gripper_name, DEFAULT_CONTACT_SURFACE)
     if gripper_name:
+        # Look for a case-insensitive match in the known gripper dimension table.
         for name, values in GRIPPER_DIMENSIONS.items():
             if name.lower() == gripper_name.lower():
                 dims = values
                 break
 
+    # Determine the contact pad height either from override, preset, or scaled default.
     height_m = contact_height_m if contact_height_m is not None else contact_preset.get(
         "height", dims["height"] * CONTACT_HEIGHT_SCALE_FALLBACK
     )
+    # Same logic for the length of the contact region along the approach axis.
     base_length_m = contact_length_m if contact_length_m is not None else contact_preset.get(
         "length", dims["length"] * CONTACT_HEIGHT_SCALE_FALLBACK
     )
+    # Clearance defines how much extra distance to leave between contact and body boxes.
     clearance = contact_preset.get("clearance", DEFAULT_CONTACT_SURFACE["clearance"])
 
+    # Enforce minimum size thresholds to avoid degenerate boxes.
     height_m = float(max(height_m, 0.005))
     base_length_m = float(max(base_length_m, MIN_CONTACT_LENGTH))
+    # Store half-length for convenience when building half-extents.
     base_half_length = base_length_m / 2.0
 
     def _find_link(keyword_groups):
+        # Search the FK cache for a link whose name contains all keywords in a group.
         for keywords in keyword_groups:
             for name in fk_map.keys():
                 lname = name.lower()
@@ -284,6 +308,7 @@ def _compute_gripper_bbox(
         ("left", "finger"),
         ("left", "knuckle"),
     ])
+    # Repeat the link search for the right finger side.
     right_link = _find_link([
         ("right", "inner", "finger", "pad"),
         ("right", "finger", "pad"),
@@ -292,27 +317,38 @@ def _compute_gripper_bbox(
         ("right", "knuckle"),
     ])
 
+    # Fetch homogeneous transforms for both finger pads if available.
     left_tf = fk_map[left_link].matrix().astype(np.float32) if left_link and left_link in fk_map else None
     right_tf = fk_map[right_link].matrix().astype(np.float32) if right_link and right_link in fk_map else None
+    # Extract the position components for convenience.
     left_pos = left_tf[:3, 3] if left_tf is not None else None
     right_pos = right_tf[:3, 3] if right_tf is not None else None
 
     # If both pads available, derive a stable coordinate frame directly from their transforms
     if left_pos is not None and right_pos is not None:
         # Width axis: from right to left (jaw separation direction)
+        # Difference between pad centers gives the opening direction vector.
         width_vec = left_pos - right_pos
+        # Compute the magnitude so we can normalize and measure the opening.
         width_norm = np.linalg.norm(width_vec)
         if width_norm < 1e-6:
             return None, None, None
+        # Normalized vector from right to left defines the width axis.
         width_axis = (width_vec / width_norm).astype(np.float32)
+        # `width_axis` points from the right jaw to the left jaw, matching the physical opening direction.
+        # Actual pad separation gives us the measured gripper width in meters.
         measured_width = float(width_norm)
         
         # Pad midpoint is the center point between the two finger pads
+        # Averaging pad positions yields the natural center of the grasp.
         pad_midpoint = ((left_pos + right_pos) * 0.5).astype(np.float32)
+        # Origin the frame at the midpoint so the bbox center coincides with the actual grasp center.
         
         # Approach axis: average Z-axis (forward direction) from both finger pads
         # This is stable and points toward the object being grasped
+        # Average the local Z axes for a robust approach direction.
         approach_axis = ((left_tf[:3, 2] + right_tf[:3, 2]) * 0.5).astype(np.float32)
+        # Normalize to ensure unit length.
         approach_norm = np.linalg.norm(approach_axis)
         if approach_norm < 1e-6:
             return None, None, None
@@ -320,35 +356,47 @@ def _compute_gripper_bbox(
         
         # Height axis: perpendicular to both width and approach (completes right-handed frame)
         # This should point "up" relative to gripper (from tips toward palm)
+        # Use the cross product to create the third axis of the orthonormal frame.
         height_axis = np.cross(approach_axis, width_axis).astype(np.float32)
+        # Cross product yields the palm-up direction; together the three axes form a right-handed basis.
+        # Confirm the resulting vector is valid by checking its length.
         height_norm = np.linalg.norm(height_axis)
         if height_norm < 1e-6:
             return None, None, None
         height_axis = (height_axis / height_norm).astype(np.float32)
         
         # Re-orthogonalize to ensure perfect right-handed frame
+        # Recompute approach axis using the other two to eliminate accumulated error.
         approach_axis = np.cross(width_axis, height_axis).astype(np.float32)
         approach_axis = (approach_axis / np.linalg.norm(approach_axis)).astype(np.float32)
+        # Recompute approach to guarantee orthogonality after any numeric drift from averaging pad transforms.
         
     elif left_tf is not None:
         # Fallback: use only left pad
+        # Use the left pad pose directly when the right pad is unavailable.
         pad_midpoint = left_tf[:3, 3].astype(np.float32)
+        # Pad frames follow X = width, Y = height, Z = approach in URDF convention.
+        # Read axes straight from the transform.
         width_axis = left_tf[:3, 0].astype(np.float32)  # X-axis of pad frame
         approach_axis = left_tf[:3, 2].astype(np.float32)  # Z-axis of pad frame
         height_axis = left_tf[:3, 1].astype(np.float32)  # Y-axis of pad frame
         measured_width = None
     elif right_tf is not None:
         # Fallback: use only right pad
+        # Use right pad pose when only that side is known.
         pad_midpoint = right_tf[:3, 3].astype(np.float32)
+        # Negate the local X axis so right finger coordinates produce the same left-to-right convention.
         width_axis = -right_tf[:3, 0].astype(np.float32)  # Flip X to match left orientation
         approach_axis = right_tf[:3, 2].astype(np.float32)  # Z-axis of pad frame
         height_axis = right_tf[:3, 1].astype(np.float32)  # Y-axis of pad frame
         measured_width = None
     else:
         # No pad transforms available
+        # Without any finger pose we cannot build a reasonable frame.
         return None, None, None
 
     # Calculate contact width from measured or commanded gripper width
+    # Collect all available width candidates before choosing the tightest value.
     width_candidates = []
     if measured_width is not None:
         width_candidates.append(measured_width)
@@ -361,11 +409,15 @@ def _compute_gripper_bbox(
     width_m = max(width_m - 2.0 * clearance, MIN_CONTACT_WIDTH)
 
     # Assemble the oriented box with half-extents
+    # Compose the rotation matrix whose columns define the gripper's width/height/approach directions.
+    # Stack axis vectors into a rotation matrix consistent with our constructed frame.
     basis = np.column_stack((width_axis, height_axis, approach_axis)).astype(np.float32)
+    # Half-sizes for the tightest contact box around the fingertips.
     contact_half_sizes = np.array(
         [width_m / 2.0, height_m / 2.0, base_half_length],
         dtype=np.float32,
     )
+    # Larger half-sizes for a safety box that encompasses the full gripper body.
     full_half_sizes = np.array(
         [
             max(contact_half_sizes[0] + clearance, dims["default_width"] / 2.0),
@@ -378,14 +430,18 @@ def _compute_gripper_bbox(
     # Position the contact bbox:
     # - Back face at pad midpoint (fingertips)
     # - Box extends forward from the gripper tips along the approach direction
+    # Shift the box forward along the approach axis so its rear face coincides with the fingertip plane.
+    # Move the contact box so its rear plane aligns with the fingertip surface.
     contact_center = (pad_midpoint + approach_axis * contact_half_sizes[2]).astype(np.float32)
     
     # Full box shares the same front face position
+    # Position the full body box using the same logic but with its own depth.
     full_center = (pad_midpoint + approach_axis * full_half_sizes[2]).astype(np.float32)
 
     # Create a third bbox (blue) positioned at the TOP of the body bbox (opposite side from orange)
     # Same size as contact bbox (orange), but positioned inside the red body bbox
     # so its TOP face aligns with the red bbox's TOP face (toward the palm/wrist)
+    # The fingertip overlay box mirrors the contact dimensions.
     fingertip_half_sizes = contact_half_sizes.copy()  # Same size as orange contact bbox
     
     # Position: top face aligned with body bbox top face (opposite direction from orange)
@@ -393,22 +449,28 @@ def _compute_gripper_bbox(
     # Blue bbox top should be at the same position
     # So: blue_center + approach_axis * fingertip_half_sizes[2] = full_center + approach_axis * full_half_sizes[2]
     # Therefore: blue_center = full_center + approach_axis * (full_half_sizes[2] - fingertip_half_sizes[2])
+    # Offset inward so the fingertip box shares the same top (palm-side) plane as the larger body box.
+    # Slide the fingertip box inward so its top plane matches the body box top plane.
     fingertip_center = (full_center + approach_axis * (full_half_sizes[2] - fingertip_half_sizes[2])).astype(np.float32)
 
     # Provide both tight contact box and larger safety box consumers can choose between.
+    # Convert the basis to a quaternion for downstream consumers that expect quaternion orientation.
     quat = _rotation_matrix_to_xyzw(basis)
+    # Package the contact region box.
     contact_box = {
         "center": contact_center.astype(np.float32),
         "half_sizes": contact_half_sizes.astype(np.float32),
         "quat_xyzw": quat,
         "basis": basis,
     }
+    # Package the full body box.
     full_box = {
         "center": full_center.astype(np.float32),
         "half_sizes": full_half_sizes.astype(np.float32),
         "quat_xyzw": quat,
         "basis": basis,
     }
+    # Package the fingertip overlay box.
     fingertip_box = {
         "center": fingertip_center.astype(np.float32),
         "half_sizes": fingertip_half_sizes.astype(np.float32),
@@ -464,6 +526,7 @@ def _compute_gripper_body_bbox(
     # The body box front face should be at the same position
     # So: body_center = front_face + approach_axis * body_half_sizes[2]
     front_face = contact_center - approach_axis * contact_half_sizes[2]
+    # March forward along the approach axis so the larger body box shares the same fingertip plane.
     center = (front_face + approach_axis * half_sizes[2]).astype(np.float32)
     
     quat = _rotation_matrix_to_xyzw(basis)
@@ -551,6 +614,7 @@ def _align_bbox_with_point_cloud_com(
 
     com = np.mean(nearby_points, axis=0).astype(np.float32)
     aligned_center = center.copy()
+    # Only slide the box in the plane; trust the original Z so we do not fight gravity offsets.
     aligned_center[0] = com[0]
     aligned_center[1] = com[1]
 
@@ -566,6 +630,7 @@ def _align_bbox_with_point_cloud_com(
             aligned_basis[:2, 1] = eigenvectors[:, 1]
             aligned_basis[:, 0] /= np.linalg.norm(aligned_basis[:, 0]) + 1e-12
             aligned_basis[:, 1] /= np.linalg.norm(aligned_basis[:, 1]) + 1e-12
+            # Replace yaw so the X/Y axes follow the dominant spread of nearby points.
             aligned_quat = _rotation_matrix_to_xyzw(aligned_basis)
         except np.linalg.LinAlgError:
             aligned_basis = basis
@@ -607,6 +672,7 @@ def _compute_bbox_corners_world(bbox: Dict[str, np.ndarray]) -> Optional[np.ndar
     half_sizes = np.asarray(bbox.get("half_sizes"), dtype=np.float32)
     if basis.shape != (3, 3) or center.shape != (3,) or half_sizes.shape != (3,):
         return None
+    # Columns of `basis` are the box's local X/Y/Z directions expressed in world space.
     offsets = np.array(
         [
             [-1.0, -1.0, -1.0],
@@ -621,6 +687,7 @@ def _compute_bbox_corners_world(bbox: Dict[str, np.ndarray]) -> Optional[np.ndar
         dtype=np.float32,
     )
     local = offsets * half_sizes[None, :]
+    # Rotate the canonical cube by the local basis, then translate to the world-space center.
     corners = center[None, :] + local @ basis.T
     return corners
 
@@ -637,6 +704,7 @@ def _project_bbox_pixels(corners_world: np.ndarray, intr: np.ndarray, extr: np.n
         return pixels, valid
 
     corners_h = np.concatenate([corners_world, np.ones((num, 1), dtype=np.float32)], axis=1)
+    # Extrinsics are world-to-camera; transform corners into the camera frame.
     cam = (extr @ corners_h.T).T
     z = cam[:, 2]
     valid = z > 1e-6
@@ -644,6 +712,7 @@ def _project_bbox_pixels(corners_world: np.ndarray, intr: np.ndarray, extr: np.n
         return pixels, valid
     cam_valid = cam[valid]
     proj = (intr @ cam_valid.T).T
+    # Divide by depth to land in pixel coordinates using the pinhole model.
     proj_xy = proj[:, :2] / proj[:, 2:3]
     pixels[valid] = proj_xy
     return pixels, valid
@@ -695,6 +764,7 @@ def _export_gripper_bbox_videos(
             if bbox is not None:
                 corners_world = _compute_bbox_corners_world(bbox)
                 if corners_world is not None:
+                    # Project the world-space OBB back into the current camera to draw a 2D outline.
                     pixels, valid = _project_bbox_pixels(corners_world, intrs[ci, ti], extrs[ci, ti])
                     for a, b in edges:
                         if valid[a] and valid[b]:
@@ -1252,9 +1322,11 @@ def get_synchronized_timestamps(
             idx = int(np.searchsorted(arr_sub, g))
 
             candidate_indices = []
+            # Grab the closest timestamps on or around the desired grid slot so we can apply jitter tolerance.
             if idx < arr_sub.size:
                 candidate_indices.append(start_idx + idx)
             if idx > 0:
+                # Also consider the frame just before the insertion point; it may still fall within tolerance.
                 candidate_indices.append(start_idx + idx - 1)
 
             if not candidate_indices:
@@ -1479,7 +1551,7 @@ def reproject_to_sparse_depth_cv2(
         num_points = pts_world.shape[0]
         orig_colors = np.full((num_points, 3), 128, dtype=np.uint8)  # Gray color
 
-    # Decompose extrinsics into rotation and translation vectors for OpenCV
+    # Decompose the world-to-camera matrix so OpenCV can consume its Rodrigues representation.
     R, t = E[:3, :3], E[:3, 3]
     rvec, _ = cv2.Rodrigues(R)
     tvec = t.reshape(3, 1)
@@ -1489,6 +1561,7 @@ def reproject_to_sparse_depth_cv2(
     projected_pts = projected_pts.squeeze(1)
     
     # Calculate the depth of each point relative to the new camera
+    # Re-use the same transform to express points in the camera frame for depth/Z buffering.
     pts_cam = (R @ pts_world.T + tvec).T
     depths = pts_cam[:, 2]
 
@@ -1550,6 +1623,7 @@ def process_frames(
     robot_debug_points: Optional[List[np.ndarray]] = [] if args.add_robot else None
     robot_debug_colors: Optional[List[np.ndarray]] = [] if robot_debug_points is not None else None
     robot_gripper_boxes: Optional[List[Optional[Dict[str, np.ndarray]]]] = [] if (args.add_robot and getattr(args, "gripper_bbox", False)) else None
+    # empty list if defined in args, else None
     robot_gripper_body_boxes: Optional[List[Optional[Dict[str, np.ndarray]]]] = [] if (args.add_robot and getattr(args, "gripper_body_bbox", False)) else None
     robot_gripper_fingertip_boxes: Optional[List[Optional[Dict[str, np.ndarray]]]] = [] if (args.add_robot and getattr(args, "gripper_fingertip_bbox", False)) else None
     robot_gripper_pad_points: Optional[List[Optional[np.ndarray]]] = [] if (args.add_robot and getattr(args, "gripper_pad_points", False)) else None
@@ -1692,6 +1766,7 @@ def process_frames(
             
             # Merge all individual point clouds into a single scene representation
             for pcd in pcds_per_cam:
+                # `+=` performs an in-place concatenation of geometry in Open3D, so we avoid repeated numpy conversions here.
                 combined_pcd += pcd
 
             # Add robot point cloud with current joint state if available
@@ -1832,7 +1907,9 @@ def process_frames(
                         tcp_transform=tcp_transform,
                     )
                     full_bbox_for_frame = base_full_bbox
+                    # if we want the griper bbox
                     if robot_gripper_body_boxes is not None and bbox_entry_for_frame is not None:
+                        #if size is set the override
                         body_width_override = getattr(args, "gripper_body_width_m", None)
                         body_height_override = getattr(args, "gripper_body_height_m", None)
                         body_length_override = getattr(args, "gripper_body_length_m", None)
@@ -2031,6 +2108,7 @@ def process_frames(
             else:
                 E_world_to_cam = scene_low.extrinsics_base_aligned[cid]
 
+            # Persist the world-to-camera [R|t] so downstream consumers can project the world-space point cloud.
             extrs_out[ci, ti] = E_world_to_cam[:3, :4]
             
             if args.high_res_folder:
@@ -2098,9 +2176,9 @@ def save_and_visualize(
     # Convert to channels-first format for NPZ
     rgbs_final = np.moveaxis(rgbs, -1, 2)
     depths_final = depths[:, :, None, :, :]
-    
-    per_cam_ts_arr = np.stack(per_camera_timestamps, axis=0).astype(np.int64)
 
+    per_cam_ts_arr = np.stack(per_camera_timestamps, axis=0).astype(np.int64)
+    # Persist all modalities together so downstream tools can reload the full synchronized packet.
     npz_payload = {
         'rgbs': rgbs_final,
         'depths': depths_final,
@@ -2118,6 +2196,7 @@ def save_and_visualize(
     # Generate Rerun Visualization
     if not args.no_pointcloud:
         print("[INFO] Logging data to Rerun...")
+        # Cast to tensors because the visualizer expects batched torch inputs.
         rgbs_tensor = torch.from_numpy(rgbs_final).float().unsqueeze(0)
         depths_tensor = torch.from_numpy(depths_final).float().unsqueeze(0)
         intrs_tensor = torch.from_numpy(intrs).float().unsqueeze(0)
@@ -2143,6 +2222,7 @@ def save_and_visualize(
             for idx, pts in enumerate(robot_debug_points):
                 if pts is None or pts.size == 0:
                     continue
+                # Keep robot color palette aligned with the optional debug stream.
                 cols = robot_debug_colors[idx] if robot_debug_colors and idx < len(robot_debug_colors) else None
                 rr.set_time_seconds("frame", idx / fps)
                 # Log to top-level robot entity for easy toggling (NOT under sequence-0)
@@ -2185,6 +2265,7 @@ def save_and_visualize(
                         approach_axis = axes[:, 2]
                         approach_axis_norm = np.linalg.norm(approach_axis) + 1e-12
                         approach_axis = approach_axis / approach_axis_norm
+                        # Draw helper arrows to confirm the oriented bounding box aligns with the jaw approach direction.
                         origin = center_vec - approach_axis * half_sizes_vec[2]
                         vector = approach_axis * (half_sizes_vec[2] * 2.0)
                         rr.log(
@@ -2231,6 +2312,7 @@ def save_and_visualize(
                     rr.set_time_seconds("frame", idx / fps)
                     centers = np.asarray(box["center"], dtype=np.float32)[None, :]
                     half_sizes = np.asarray(box["half_sizes"], dtype=np.float32)[None, :]
+                    # Namespace logs under "robot/..." so the inspector groups all overlays together.
                     rr.log(
                         "robot/gripper_bbox_body",
                         rr.Boxes3D(
@@ -2709,7 +2791,23 @@ def main():
     )
 
     # --- Step 3: Save and Visualize ---
-    rr.init("RH20T_Reprojection_Frameworks", spawn=True)
+    rr.init("RH20T_Reprojection_Frameworks", spawn=False)
+    # Set the desired coordinate system for the 'world' space
+    rr.log("world", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
+
+    # --- ADD THIS DIAGNOSTIC CODE ---
+    # Log visible arrows to represent the axes of the 'world' space
+    rr.log(
+        "world/axes",
+        rr.Arrows3D(
+            origins=[[0, 0, 0]],
+            vectors=[[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+            colors=[[255, 0, 0], [0, 255, 0], [0, 0, 255]] # X=Red, Y=Green, Z=Blue
+        ),
+        static=True
+    )
+    # --- END OF DIAGNOSTIC CODE ---
+
 
     per_cam_for_npz = per_cam_high_sel if per_cam_high_sel is not None else per_cam_low_sel
     save_and_visualize(
