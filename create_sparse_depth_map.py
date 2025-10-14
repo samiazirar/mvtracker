@@ -2423,6 +2423,29 @@ def save_and_visualize(
     depths_final = depths[:, :, None, :, :]
 
     per_cam_ts_arr = np.stack(per_camera_timestamps, axis=0).astype(np.int64)
+    
+    # Format and save query points if available
+    # Query points are saved in mvtracker format: [frame_index, x, y, z]
+    if query_points is not None and len(query_points) > 0:
+        formatted_query_points = []
+        for frame_idx, qpts in enumerate(query_points):
+            if qpts is not None and qpts.size > 0:
+                # Add frame index as first column: [frame_idx, x, y, z]
+                n_points = len(qpts)
+                frame_indices = np.full((n_points, 1), frame_idx, dtype=np.float32)
+                qpts_with_time = np.concatenate([frame_indices, qpts], axis=1)
+                formatted_query_points.append(qpts_with_time)
+        
+        if formatted_query_points:
+            # Concatenate all query points from all frames: shape (N_total, 4)
+            all_query_points = np.concatenate(formatted_query_points, axis=0)
+            print(f"[INFO] Formatted {len(all_query_points)} query points for saving")
+        else:
+            all_query_points = np.empty((0, 4), dtype=np.float32)
+            print("[INFO] No valid query points found")
+    else:
+        all_query_points = None
+    
     # Persist all modalities together so downstream tools can reload the full synchronized packet.
     npz_payload = {
         'rgbs': rgbs_final,
@@ -2433,6 +2456,10 @@ def save_and_visualize(
         'per_camera_timestamps': per_cam_ts_arr,
         'camera_ids': np.array(final_cam_ids, dtype=object),
     }
+    
+    # Add query points to payload if available
+    if all_query_points is not None:
+        npz_payload['query_points'] = all_query_points
 
     out_path_npz = args.out_dir / f"{args.task_folder.name}_processed.npz"
     np.savez_compressed(out_path_npz, **npz_payload)
