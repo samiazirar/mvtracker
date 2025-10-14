@@ -951,6 +951,56 @@ def _filter_points_closest_to_bbox(
     return filtered_points, filtered_colors
 
 
+def _exclude_points_inside_bbox(
+    points: np.ndarray,
+    bbox: Dict[str, np.ndarray],
+    colors: Optional[np.ndarray] = None,
+) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+    """
+    Exclude points that fall inside a bounding box (keep points outside).
+    
+    Args:
+        points: Nx3 array of 3D points in world coordinates
+        bbox: Dictionary containing 'center', 'half_sizes', and 'basis' (or 'quat_xyzw')
+        colors: Optional Nx3 array of RGB colors (0-1 range)
+        
+    Returns:
+        Tuple of (outside_points, outside_colors) where outside_points is Mx3 array
+        of points outside the bbox, and outside_colors is Mx3 array of corresponding colors
+        (or None if colors was None)
+    """
+    if points is None or len(points) == 0 or bbox is None:
+        return points, colors
+    
+    points = np.asarray(points, dtype=np.float32)
+    
+    # Get bbox parameters
+    center = np.asarray(bbox["center"], dtype=np.float32)
+    half_sizes = np.asarray(bbox["half_sizes"], dtype=np.float32)
+    
+    # Get rotation basis
+    basis = bbox.get("basis")
+    if basis is None:
+        quat = bbox.get("quat_xyzw")
+        if quat is None:
+            return points, colors
+        basis = _quaternion_xyzw_to_rotation_matrix(quat)
+    basis = np.asarray(basis, dtype=np.float32)
+    
+    # Transform points to bbox local coordinates
+    points_centered = points - center[None, :]
+    points_local = points_centered @ basis
+    
+    # Check if points are OUTSIDE the bbox (inverse of inside check)
+    # A point is outside if ANY |local_coord[i]| > half_sizes[i]
+    outside_mask = np.any(np.abs(points_local) > half_sizes[None, :], axis=1)
+    
+    outside_points = points[outside_mask]
+    outside_colors = None if colors is None else colors[outside_mask]
+    
+    return outside_points, outside_colors
+
+
 def _project_bbox_pixels(corners_world: np.ndarray, intr: np.ndarray, extr: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """Project 3D bounding box corners into 2D image pixels."""
     corners_world = np.asarray(corners_world, dtype=np.float32)
@@ -2369,6 +2419,18 @@ def process_frames(
                     colors=colors_world_np,
                 )
                 
+                # Exclude points inside gripper (blue bbox) if flag is set
+                exclude_inside = getattr(args, "exclude_inside_gripper", False)
+                if exclude_inside and inside_pts is not None and inside_pts.size > 0:
+                    if fingertip_bbox_for_frame is not None:
+                        inside_pts, inside_cols = _exclude_points_inside_bbox(
+                            inside_pts,
+                            fingertip_bbox_for_frame,
+                            colors=inside_cols,
+                        )
+                        if ti == 0:
+                            print(f"[INFO] Excluded {len(points_world_np) - len(inside_pts) if inside_pts.size > 0 else 0} points inside gripper (blue bbox)")
+                
                 # Apply max query points limit if specified (keep N closest to blue/fingertip bbox)
                 max_query_pts = getattr(args, "max_query_points", None)
                 if max_query_pts is not None and inside_pts is not None and inside_pts.size > 0:
@@ -3023,6 +3085,12 @@ def main():
         type=int,
         default=None,
         help="Maximum number of query points to keep. When set, keeps only the N points closest to the blue bbox (fingertip). Default: None (no limit).",
+    )
+    parser.add_argument(
+        "--exclude-inside-gripper",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Exclude points inside the blue bbox (fingertip) from query points. Removes gripper points. Default: False (off).",
     )
     args = parser.parse_args()
 
