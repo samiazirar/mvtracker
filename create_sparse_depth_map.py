@@ -2481,6 +2481,25 @@ def save_and_visualize(
                         f"robot_debug",
                         rr.Points3D(pts.astype(np.float32, copy=False), colors=cols),
                     )
+        
+        # Log query points (sensor points inside gripper bbox) if requested
+        if getattr(args, "visualize_query_points", False) and query_points is not None and len(query_points) > 0:
+            fps = 30.0
+            valid_query_count = sum(1 for qpts in query_points if qpts is not None and qpts.size > 0)
+            if valid_query_count > 0:
+                print(f"[INFO] Logging {valid_query_count} query point clouds to Rerun (magenta)...")
+                for idx, qpts in enumerate(query_points):
+                    if qpts is None or qpts.size == 0:
+                        continue
+                    rr.set_time_seconds("frame", idx / fps)
+                    # Log query points as magenta (original sensor points inside bbox)
+                    # Create magenta color array (255, 0, 255)
+                    magenta_colors = np.full((len(qpts), 3), [255, 0, 255], dtype=np.uint8)
+                    rr.log(
+                        "query_points",
+                        rr.Points3D(qpts.astype(np.float32, copy=False), colors=magenta_colors),
+                    )
+        
         if robot_gripper_boxes:
             valid_box_count = sum(1 for box in robot_gripper_boxes if box)
             if valid_box_count > 0:
@@ -2910,6 +2929,12 @@ def main():
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Use TCP (Tool Center Point) pose from API for gripper bbox computation instead of FK.",
+    )
+    parser.add_argument(
+        "--visualize-query-points",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Visualize sensor points inside gripper bbox as magenta points in Rerun.",
     )
     args = parser.parse_args()
 
