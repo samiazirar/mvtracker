@@ -863,6 +863,57 @@ def _compute_bbox_corners_world(bbox: Dict[str, np.ndarray]) -> Optional[np.ndar
     return corners
 
 
+def _extract_points_inside_bbox(
+    points: np.ndarray,
+    bbox: Dict[str, np.ndarray],
+    colors: Optional[np.ndarray] = None,
+) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+    """
+    Extract points that fall inside an oriented bounding box.
+    
+    Args:
+        points: Nx3 array of 3D points in world coordinates
+        bbox: Dictionary containing 'center', 'half_sizes', and 'basis' (or 'quat_xyzw')
+        colors: Optional Nx3 array of RGB colors (0-1 range)
+        
+    Returns:
+        Tuple of (inside_points, inside_colors) where inside_points is Mx3 array
+        of points inside the bbox, and inside_colors is Mx3 array of corresponding colors
+        (or None if colors was None)
+    """
+    if points is None or len(points) == 0 or bbox is None:
+        return np.empty((0, 3), dtype=np.float32), None if colors is None else np.empty((0, 3), dtype=np.float32)
+    
+    points = np.asarray(points, dtype=np.float32)
+    
+    # Get bbox parameters
+    center = np.asarray(bbox["center"], dtype=np.float32)
+    half_sizes = np.asarray(bbox["half_sizes"], dtype=np.float32)
+    
+    # Get rotation basis
+    basis = bbox.get("basis")
+    if basis is None:
+        quat = bbox.get("quat_xyzw")
+        if quat is None:
+            return np.empty((0, 3), dtype=np.float32), None if colors is None else np.empty((0, 3), dtype=np.float32)
+        basis = _quaternion_xyzw_to_rotation_matrix(quat)
+    basis = np.asarray(basis, dtype=np.float32)
+    
+    # Transform points to bbox local coordinates
+    # points_local = (points - center) @ basis
+    points_centered = points - center[None, :]
+    points_local = points_centered @ basis
+    
+    # Check if points are inside the bbox (compare with half_sizes)
+    # A point is inside if |local_coord[i]| <= half_sizes[i] for all i
+    inside_mask = np.all(np.abs(points_local) <= half_sizes[None, :], axis=1)
+    
+    inside_points = points[inside_mask]
+    inside_colors = None if colors is None else colors[inside_mask]
+    
+    return inside_points, inside_colors
+
+
 def _project_bbox_pixels(corners_world: np.ndarray, intr: np.ndarray, extr: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """Project 3D bounding box corners into 2D image pixels."""
     corners_world = np.asarray(corners_world, dtype=np.float32)
@@ -1800,6 +1851,9 @@ def process_frames(
     robot_gripper_pad_points: Optional[List[Optional[np.ndarray]]] = [] if (args.add_robot and getattr(args, "gripper_pad_points", False)) else None
     robot_tcp_points: Optional[List[Optional[np.ndarray]]] = [] if (args.add_robot and getattr(args, "tcp_points", False)) else None
     robot_object_points: Optional[List[Optional[np.ndarray]]] = [] if getattr(args, "object_points", False) else None
+    # Query points: sensor points inside the gripper bbox (contact bbox)
+    query_points: Optional[List[Optional[np.ndarray]]] = [] if (args.add_robot and getattr(args, "gripper_bbox", False)) else None
+    query_colors: Optional[List[Optional[np.ndarray]]] = [] if query_points is not None else None
 
     color_lookup_low = [list_frames(cdir / 'color') for cdir in cam_dirs_low]
     depth_lookup_low = [list_frames(cdir / 'depth') for cdir in cam_dirs_low]
@@ -2266,6 +2320,24 @@ def process_frames(
             robot_tcp_points.append(tcp_pt_for_frame)
         if robot_object_points is not None:
             robot_object_points.append(obj_pt_for_frame)
+        
+        # Extract query points (sensor points inside the contact bbox)
+        if query_points is not None:
+            if bbox_entry_for_frame is not None and points_world_np is not None and points_world_np.size > 0:
+                # Extract points inside the contact bbox (red bbox)
+                inside_pts, inside_cols = _extract_points_inside_bbox(
+                    points_world_np,
+                    bbox_entry_for_frame,
+                    colors=colors_world_np,
+                )
+                query_points.append(inside_pts if inside_pts is not None and inside_pts.size > 0 else None)
+                if query_colors is not None:
+                    query_colors.append(inside_cols if inside_cols is not None and inside_cols.size > 0 else None)
+            else:
+                # No bbox or no points - append None to keep timeline alignment
+                query_points.append(None)
+                if query_colors is not None:
+                    query_colors.append(None)
 
         # Step 2: Generate the final output data for each camera view
         for ci in range(C):
@@ -2321,6 +2393,8 @@ def process_frames(
         robot_gripper_pad_points,
         robot_tcp_points,
         robot_object_points,
+        query_points,
+        query_colors,
     )
 
 def save_and_visualize(
@@ -2340,6 +2414,8 @@ def save_and_visualize(
     robot_gripper_pad_points=None,
     robot_tcp_points=None,
     robot_object_points=None,
+    query_points=None,
+    query_colors=None,
 ):
     """Saves the processed data to an NPZ file and generates a Rerun visualization."""
     # Convert to channels-first format for NPZ
@@ -2953,7 +3029,9 @@ def main():
      robot_gripper_fingertip_boxes,
      robot_gripper_pad_points,
      robot_tcp_points,
-     robot_object_points) = process_frames(
+     robot_object_points,
+     query_points,
+     query_colors) = process_frames(
         args,
         scene_low,
         scene_high,
@@ -3002,6 +3080,8 @@ def main():
         robot_gripper_pad_points,
         robot_tcp_points,
         robot_object_points,
+        query_points,
+        query_colors,
     )
 
     if not args.no_pointcloud:
