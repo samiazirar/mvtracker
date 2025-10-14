@@ -588,7 +588,6 @@ def _align_bbox_with_point_cloud_com(
     search_radius_scale: float = 2.0,
     min_points_required: int = 10,
 ) -> Optional[Dict[str, np.ndarray]]:
-    raise NotImplementedError("this needs some serious fixes.")
     """Align a bbox with the center of mass of nearby point-cloud samples (x/y translation, planar rotation)."""
     if bbox is None or points is None or len(points) == 0:
         return bbox
@@ -596,6 +595,9 @@ def _align_bbox_with_point_cloud_com(
     points = np.asarray(points, dtype=np.float32)
     if points.shape[0] < min_points_required:
         return bbox
+
+    if colors is not None and colors.shape[0] not in (0, points.shape[0]):
+        raise NotImplementedError("this needs some serious fixes.")
 
     center = np.asarray(bbox["center"], dtype=np.float32)
     half_sizes = np.asarray(bbox["half_sizes"], dtype=np.float32)
@@ -617,25 +619,79 @@ def _align_bbox_with_point_cloud_com(
     aligned_center[1] = com[1]
 
     points_xy = nearby_points[:, :2] - com[:2]
+    approach_axis = basis[:, 2].astype(np.float32)
+    approach_norm = np.linalg.norm(approach_axis)
+    if approach_norm < 1e-12:
+        return {
+            "center": aligned_center,
+            "half_sizes": half_sizes,
+            "quat_xyzw": bbox.get("quat_xyzw"),
+            "basis": basis,
+        }
+    approach_axis /= approach_norm
+    width_axis = basis[:, 0].astype(np.float32)
+    height_axis = basis[:, 1].astype(np.float32)
+
     if points_xy.shape[0] >= 3:
         cov = np.cov(points_xy.T)
         try:
             eigenvalues, eigenvectors = np.linalg.eigh(cov)
             idx = np.argsort(eigenvalues)[::-1]
             eigenvectors = eigenvectors[:, idx]
-            aligned_basis = basis.copy()
-            aligned_basis[:2, 0] = eigenvectors[:, 0]
-            aligned_basis[:2, 1] = eigenvectors[:, 1]
-            aligned_basis[:, 0] /= np.linalg.norm(aligned_basis[:, 0]) + 1e-12
-            aligned_basis[:, 1] /= np.linalg.norm(aligned_basis[:, 1]) + 1e-12
-            # Replace yaw so the X/Y axes follow the dominant spread of nearby points.
-            aligned_quat = _rotation_matrix_to_xyzw(aligned_basis)
+            dominant_xy = eigenvectors[:, 0]
+            width_xy = width_axis[:2]
+            width_xy_norm = np.linalg.norm(width_xy)
+            dominant_norm = np.linalg.norm(dominant_xy)
+
+            if width_xy_norm > 1e-9 and dominant_norm > 1e-9:
+                current_angle = float(np.arctan2(width_xy[1], width_xy[0]))
+                target_angle = float(np.arctan2(dominant_xy[1], dominant_xy[0]))
+                delta = target_angle - current_angle
+                delta = (delta + np.pi) % (2.0 * np.pi) - np.pi
+
+                if abs(delta) > 1e-6:
+                    axis = approach_axis
+                    cos_d = np.cos(delta)
+                    sin_d = np.sin(delta)
+
+                    def _rotate(vec: np.ndarray) -> np.ndarray:
+                        # Rotate vec around axis by angle delta using Rodrigues formula.
+                        cross_part = np.cross(axis, vec)
+                        dot_part = np.dot(axis, vec)
+                        return (
+                            vec * cos_d
+                            + cross_part * sin_d
+                            + axis * dot_part * (1.0 - cos_d)
+                        ).astype(np.float32)
+
+                    width_axis = _rotate(width_axis)
+                    height_axis = _rotate(height_axis)
         except np.linalg.LinAlgError:
-            aligned_basis = basis
-            aligned_quat = bbox["quat_xyzw"]
-    else:
-        aligned_basis = basis
-        aligned_quat = bbox["quat_xyzw"]
+            pass
+
+    width_axis_norm = np.linalg.norm(width_axis)
+    if width_axis_norm < 1e-12:
+        width_axis = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        if np.isfinite(width_axis_norm) and np.abs(np.dot(width_axis, approach_axis)) > 0.9:
+            width_axis = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+    width_axis /= np.linalg.norm(width_axis) + 1e-12
+
+    # Ensure height axis stays orthogonal to both width and approach directions.
+    height_axis = height_axis - np.dot(height_axis, approach_axis) * approach_axis
+    height_axis_norm = np.linalg.norm(height_axis)
+    if height_axis_norm < 1e-12:
+        height_axis = np.cross(approach_axis, width_axis)
+    height_axis /= np.linalg.norm(height_axis) + 1e-12
+
+    approach_axis_new = np.cross(width_axis, height_axis)
+    approach_axis_new /= np.linalg.norm(approach_axis_new) + 1e-12
+
+    if np.dot(approach_axis_new, approach_axis) < 0.0:
+        approach_axis_new = -approach_axis_new
+        height_axis = -height_axis
+
+    aligned_basis = np.column_stack((width_axis, height_axis, approach_axis_new)).astype(np.float32)
+    aligned_quat = _rotation_matrix_to_xyzw(aligned_basis)
 
     return {
         "center": aligned_center,
