@@ -6,3 +6,6 @@
 add more points to the object modified and make it retain if on it gripper for contact flow
 - [ ] Source gripper meshes per robot config and integrate: WSG-50 (ipa320/schunk_modular_robotics), Robotiq 2F-85 (ros-industrial/robotiq_85_description), DH Robotics AG-95 (vendor CAD/dh_gripper_ros). Update RH20T/models URDFs or load meshes alongside robot_pcd. Leave README note with download paths/licenses.
 - remove the gripper and just track
+
+- color clustrering 
+- dbscan für gripper points
