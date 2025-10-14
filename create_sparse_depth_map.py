@@ -55,6 +55,7 @@ import cv2
 import open3d as o3d
 import rerun as rr
 from tqdm import tqdm
+from sklearn.cluster import DBSCAN
 
 # --- Project-Specific Imports ---
 # Importing utilities and configurations specific to the RH20T dataset and robot model.
@@ -999,6 +1000,62 @@ def _exclude_points_inside_bbox(
     outside_colors = None if colors is None else colors[outside_mask]
     
     return outside_points, outside_colors
+
+
+def _filter_points_by_color_cluster(
+    points: np.ndarray,
+    colors: Optional[np.ndarray] = None,
+    eps: float = 0.15,
+    min_samples: int = 10,
+) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+    """
+    Filter points using DBSCAN clustering on colors. Keeps only the largest cluster.
+    Useful for filtering out non-gripper colored points (gripper is typically black/dark).
+    
+    Args:
+        points: Nx3 array of 3D points
+        colors: Nx3 array of RGB colors (0-1 range). Required for clustering.
+        eps: Maximum distance between samples for DBSCAN (color space)
+        min_samples: Minimum samples in neighborhood for DBSCAN
+        
+    Returns:
+        Tuple of (filtered_points, filtered_colors) containing only largest cluster
+    """
+    if points is None or len(points) == 0 or colors is None or len(colors) == 0:
+        return points, colors
+    
+    if len(points) != len(colors):
+        print("[WARN] Points and colors size mismatch in color clustering; skipping filter")
+        return points, colors
+    
+    # Convert colors to numpy array if needed
+    colors_arr = np.asarray(colors, dtype=np.float32)
+    
+    # Perform DBSCAN clustering on color values
+    # eps is in color space (0-1 range), so 0.15 means colors within ~38/255 distance
+    clustering = DBSCAN(eps=eps, min_samples=min_samples).fit(colors_arr)
+    labels = clustering.labels_
+    
+    # Find the largest cluster (excluding noise which has label -1)
+    unique_labels = np.unique(labels)
+    valid_labels = unique_labels[unique_labels >= 0]  # Exclude noise (-1)
+    
+    if len(valid_labels) == 0:
+        print("[WARN] No valid clusters found in color clustering; keeping all points")
+        return points, colors
+    
+    # Count points in each cluster
+    cluster_sizes = {label: np.sum(labels == label) for label in valid_labels}
+    largest_cluster_label = max(cluster_sizes, key=cluster_sizes.get)
+    
+    # Filter to keep only largest cluster
+    cluster_mask = labels == largest_cluster_label
+    filtered_points = points[cluster_mask]
+    filtered_colors = colors_arr[cluster_mask]
+    
+    print(f"[INFO] Color clustering: kept {len(filtered_points)}/{len(points)} points from largest cluster (label {largest_cluster_label})")
+    
+    return filtered_points, filtered_colors
 
 
 def _project_bbox_pixels(corners_world: np.ndarray, intr: np.ndarray, extr: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
@@ -2431,6 +2488,16 @@ def process_frames(
                         if ti == 0:
                             print(f"[INFO] Excluded {len(points_world_np) - len(inside_pts) if inside_pts.size > 0 else 0} points inside gripper (blue bbox)")
                 
+                # Apply color clustering if specified (keep largest color cluster)
+                if getattr(args, "exclude_by_cluster", False) and inside_pts is not None and inside_pts.size > 0:
+                    original_count = len(inside_pts)
+                    inside_pts, inside_cols = _filter_points_by_color_cluster(
+                        inside_pts,
+                        inside_cols,
+                    )
+                    if ti == 0:
+                        print(f"[INFO] Filtered to largest color cluster: {len(inside_pts)} points (from {original_count})")
+                
                 # Apply max query points limit if specified (keep N closest to blue/fingertip bbox)
                 max_query_pts = getattr(args, "max_query_points", None)
                 if max_query_pts is not None and inside_pts is not None and inside_pts.size > 0:
@@ -3091,6 +3158,12 @@ def main():
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Exclude points inside the blue bbox (fingertip) from query points. Removes gripper points. Default: False (off).",
+    )
+    parser.add_argument(
+        "--exclude-by-cluster",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Use DBSCAN clustering on colors to filter query points. Keeps only largest cluster (gripper color). Default: False (off).",
     )
     args = parser.parse_args()
 
