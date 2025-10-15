@@ -435,6 +435,12 @@ def _compute_gripper_bbox(
     # Fetch homogeneous transforms for both finger pads if available.
     left_tf = fk_map[left_link].matrix().astype(np.float32) if left_link and left_link in fk_map else None
     right_tf = fk_map[right_link].matrix().astype(np.float32) if right_link and right_link in fk_map else None
+    
+    # FALLBACK: If no finger links found, try using end-effector link (e.g., for WSG-50)
+    ee_tf = None
+    if left_tf is None and right_tf is None and ee_link and ee_link in fk_map:
+        print(f"[Info] No finger pad links found; using end-effector link '{ee_link}' as gripper frame.")
+        ee_tf = fk_map[ee_link].matrix().astype(np.float32)
     # Extract the position components for convenience.
     left_pos = left_tf[:3, 3] if left_tf is not None else None
     right_pos = right_tf[:3, 3] if right_tf is not None else None
@@ -507,6 +513,16 @@ def _compute_gripper_bbox(
         width_axis = -right_tf[:3, 0].astype(np.float32)  # Flip X to match left orientation
         approach_axis = right_tf[:3, 2].astype(np.float32)  # Z-axis of pad frame
         height_axis = right_tf[:3, 1].astype(np.float32)  # Y-axis of pad frame
+        measured_width = None
+    elif ee_tf is not None:
+        print("[Info] Using end-effector link as gripper frame (no finger pads available).")
+        # Fallback: use end-effector link when no finger links are found
+        # This is common for grippers like WSG-50 where the URDF doesn't include finger details
+        pad_midpoint = ee_tf[:3, 3].astype(np.float32)
+        # Use standard EE frame convention: X = width, Y = height, Z = approach
+        width_axis = ee_tf[:3, 0].astype(np.float32)  # X-axis of EE frame
+        approach_axis = ee_tf[:3, 2].astype(np.float32)  # Z-axis of EE frame
+        height_axis = ee_tf[:3, 1].astype(np.float32)  # Y-axis of EE frame
         measured_width = None
     else:
         print("[Warning] No gripper pad transforms available; cannot compute gripper bbox.")
@@ -704,6 +720,17 @@ def _compute_gripper_pad_points(
             T = fk_map[link].matrix()
             p = T[:3, 3].astype(np.float32)
             points.append(p)
+    
+    # FALLBACK: If no finger pads found, use end-effector link
+    if not points:
+        robot_type = getattr(robot_conf, "robot", None)
+        ee_link = ROBOT_EE_LINK_MAP.get(robot_type)
+        if ee_link and ee_link in fk_map:
+            T = fk_map[ee_link].matrix()
+            p = T[:3, 3].astype(np.float32)
+            points.append(p)
+            print(f"[Info] Using end-effector link '{ee_link}' for gripper pad point.")
+    
     if not points:
         return None
     return np.stack(points, axis=0).astype(np.float32)
