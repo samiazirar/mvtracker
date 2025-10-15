@@ -13,6 +13,68 @@ from mvtracker.models.core.model_utils import bilinear_sample2d, pixel_xy_and_ca
 from mvtracker.utils.visualizer_mp4 import Visualizer
 
 
+## added this function to deal with sparse depth maps
+def align_nearest_neighbor(view_depths: torch.Tensor, view_traj_e: torch.Tensor) -> torch.Tensor:
+    """
+    Samples depth values from a depth map at specified 2D trajectory coordinates
+    using nearest neighbor logic.
+
+    This function is a robust replacement for bilinear sampling on sparse depth maps,
+    as it directly picks the value of the closest pixel without any interpolation.
+
+    Args:
+        view_depths (torch.Tensor): The depth maps to sample from.
+            Expected shape: (T, 1, H, W), where T is num_frames.
+        view_traj_e (torch.Tensor): The 2D pixel coordinates of the trajectories to sample.
+            Expected shape: (T, N, 2), where N is num_points and the last dim is (x, y).
+
+    Returns:
+        torch.Tensor: A tensor containing the sampled camera-space Z values (depths).
+            Shape: (T, N).
+    """
+    # --- 1. Get dimensions from the input tensors ---
+    # T: num_frames, N: num_points
+    T, N = view_traj_e.shape[:2]
+    # H: height, W: width
+    H, W = view_depths.shape[-2:]
+
+    # --- 2. Normalize pixel coordinates to the [-1, 1] range required by grid_sample ---
+    # The grid_sample function requires normalized coordinates where (-1, -1) is the
+    # top-left corner and (1, 1) is the bottom-right corner.
+    grid = view_traj_e.clone() # Avoid modifying the original tensor
+
+    # Normalize x-coordinates (corresponding to width W)
+    grid[..., 0] = 2.0 * view_traj_e[..., 0] / (W - 1) - 1.0
+    # Normalize y-coordinates (corresponding to height H)
+    grid[..., 1] = 2.0 * view_traj_e[..., 1] / (H - 1) - 1.0
+
+    # --- 3. Reshape the grid for grid_sample ---
+    # The function expects the grid to have a shape of (T, H_out, W_out, 2).
+    # We are sampling N points for each frame, so we can set H_out=1 and W_out=N.
+    grid = grid.view(T, 1, N, 2)
+
+    # --- 4. Sample the depth map using nearest neighbor ---
+    # 'mode="nearest"' ensures we snap to the closest pixel, avoiding interpolation.
+    # 'padding_mode="border"' clamps out-of-bounds coordinates to the edge.
+    # 'align_corners=True' matches the [0, W-1] pixel coordinate system.
+    sampled_depths = F.grid_sample(
+        view_depths,
+        grid,
+        mode='nearest',
+        padding_mode='border',
+        align_corners=True
+    )
+
+    # --- 5. Reshape the output to the desired format ---
+    # The output of grid_sample is (T, C, H_out, W_out), so we squeeze it
+    # to get the final shape of (T, N).
+    view_camera_z = sampled_depths.squeeze().view(T, N)
+
+    # --- 5. Reshape the output to the desired format (T, N, 1) ---
+    # The output of grid_sample is (T, 1, 1, N). We reshape it to match the
+    # required input shape for the next function, which is (T, N, 1).
+    return sampled_depths.view(T, N, 1)
+
 class CoTrackerOfflineWrapper(nn.Module):
     def __init__(self, model_name="cotracker3_offline", grid_size=10):
         super(CoTrackerOfflineWrapper, self).__init__()
@@ -686,9 +748,12 @@ class MonocularToMultiViewAdapter(nn.Module):
                 else:
                     # view_camera_z = bilinear_sampler(view_depths, view_traj_e.reshape(num_frames, -1, 1, 2))[:, 0, :, :]
                     #this fails with sparse depth 
-                    # so we use nearest neighbor sampling instead
-                    grid = view_traj_e.clone()
-                    view_camera_z = torch.nn.functional.grid_sample(view_depths, grid, mode='nearest', padding_mode='border', align_corners=False)
+                    # Input shape : 
+                    #   view_depths: (num_frames, 1, height, width)
+                    #   view_traj_e: (num_frames, num_tracked_points, 2)
+                    # Output shape:
+                    #   view_camera_z: (num_frames, num_tracked_points, 1)
+                    view_camera_z = align_nearest_neighbor(view_depths, view_traj_e)
 
                 view_intrs = intrs[batch_idx, view_idx]
                 view_extrs = extrs[batch_idx, view_idx]
