@@ -80,7 +80,7 @@ ROBOT_EE_LINK_MAP = {
 
 # Candidate gripper links for different robot types.
 GRIPPER_LINK_CANDIDATES = {
-    "ur5": ["robotiq_arg2f_base_link", "ee_link", "wrist_3_link"],
+    "ur5": ["robotiq_arg2f_base_link", "ee_link", "wrist_3_link","wsg_50_base_link"],
     "flexiv": ["flange", "link7"],
     "kuka": ["lbr_iiwa_link_7", "lbr_iiwa_link_6"],
     "franka": ["panda_hand", "panda_link8"],
@@ -654,6 +654,7 @@ def _compute_gripper_body_bbox(
     center = (front_face + approach_axis * half_sizes[2]).astype(np.float32)
     
     quat = _rotation_matrix_to_xyzw(basis)
+    breakpoint()
     return {
         "center": center.astype(np.float32),
         "half_sizes": half_sizes.astype(np.float32),
@@ -2196,6 +2197,7 @@ def process_frames(
                 # Ensure we have the correct number of joints
                 # The robot model expects len(conf.robot_joint_sequence) joints
                 expected_joints = len(scene_low.configuration.robot_joint_sequence)
+                
                 gripper_joint_angle = None
                 
                 if len(joint_angles) < expected_joints:
@@ -2297,6 +2299,7 @@ def process_frames(
                         
                         # Compute bbox using TCP method
                         if tcp_transform is not None:
+                            print("[INFO] Computing gripper bbox using TCP transform")
                             bbox_entry_for_frame, base_full_bbox, fingertip_bbox_for_frame = _compute_gripper_bbox_from_tcp(
                                 tcp_transform=tcp_transform,
                                 robot_conf=robot_conf,
@@ -2305,8 +2308,10 @@ def process_frames(
                                 contact_length_m=getattr(args, "gripper_bbox_contact_length_m", None),
                             )
                         else:
+                            print("[WARN] tcp_transform is None, cannot compute TCP-based bbox")
                             bbox_entry_for_frame, base_full_bbox, fingertip_bbox_for_frame = None, None, None
                     else:
+                        print("[INFO] Not using TCP; defaulting to FK-based gripper bbox computation")  
                         # Use FK-based computation (default)
                         if ti == 0:
                             print("[INFO] Using FK-based gripper bbox computation")
