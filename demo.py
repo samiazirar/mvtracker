@@ -541,6 +541,14 @@ def main():
         action="store_true",
         help="Overlay the robot URDF as a static mesh in the Rerun visualization."
     )
+    p.add_argument(
+        "sample_path",
+        type=str,
+        default=None,
+        help="Path to the task npz, if none will download the sample from HF mvtracker repo.",
+        nargs="?",
+    )
+
     args = p.parse_args()
     np.random.seed(72)
     torch.manual_seed(72)
@@ -602,7 +610,19 @@ def main():
     # sample_path = "data/high_res_filtered/task_0065_user_0010_scene_0009_cfg_0004_processed.npz"
     #input to mapanythibg
     # sample_path = "/data/rh20t_api/test_npz/task_0065_user_0010_scene_0009_cfg_0004_processed.npz"
-    sample_path = "data/high_res_filtered/task_0065_user_0010_scene_0009_cfg_0004_processed.npz"
+    # sample_path = "data/high_res_filtered/task_0065_user_0010_scene_0009_cfg_0004_processed.npz"
+    
+    if args.sample_path is not None:
+        sample_path = args.sample_path
+    elif sample_path is None:
+        print("No sample path provided, downloading a small demo sample from HF...")
+        raise NotImplementedError("Get the correct sample path")
+        # sample_path = hf_hub_download(
+        #     repo_id="ethz-vlg/mvtracker",
+        #     filename="data/task_0001_user_0010_scene_0005_cfg_0004_demo.npz",
+        #     repo_type="dataset",
+        # )
+
     print("HUMANS NOT SUPPORTED YET") #TODO: find out why _human not work
     print("Loading large RH20T dataset - this may take a while...")
     print("Memory before loading:", torch.cuda.memory_allocated() / 1024**3 if torch.cuda.is_available() else "N/A", "GB GPU")

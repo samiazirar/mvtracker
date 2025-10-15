@@ -5,24 +5,27 @@
 
 set -euo pipefail
 
-# python create_sparse_depth_map.py \
-#   --task-folder /data/rh20t_api/data/test_data_full_rgb_upscaled_depth/uncompressed_low_res_data/task_0065_user_0010_scene_0009_cfg_0004 \
-#   --high-res-folder /data/rh20t_api/data/test_data_full_rgb_upscaled_depth/rgb_data/RH20T_cfg4/task_0065_user_0010_scene_0009_cfg_0004 \
-#   --out-dir ./data/high_res_filtered \
-#   --max-frames 100 \
-#   --frames-for-tracking 1 \
-#   --no-sharpen-edges-with-mesh \
-#   --add-robot \
-#   --gripper-bbox \
-#   --gripper-body-bbox \
-#   --gripper-fingertip-bbox \
-#   --gripper-pad-points \
-#   --export-bbox-video \
-#   --tcp-points \
-#   --object-points \
-#   --visualize-query-points \
-#   --max-query-points 512 \
-#   "${@}"
+
+TASK_FOLDER="task_0065_user_0010_scene_0009_cfg_0004"
+
+python create_sparse_depth_map.py \
+  --task-folder /data/rh20t_api/data/test_data_full_rgb_upscaled_depth/uncompressed_low_res_data/$TASK_FOLDER \
+  --high-res-folder /data/rh20t_api/data/test_data_full_rgb_upscaled_depth/rgb_data/RH20T_cfg4/$TASK_FOLDER \
+  --out-dir ./data/high_res_filtered \
+  --max-frames 100 \
+  --frames-for-tracking 1 \
+  --no-sharpen-edges-with-mesh \
+  --add-robot \
+  --gripper-bbox \
+  --gripper-body-bbox \
+  --gripper-fingertip-bbox \
+  --gripper-pad-points \
+  --export-bbox-video \
+  --tcp-points \
+  --object-points \
+  --visualize-query-points \
+  --max-query-points 512 \
+  "${@}"
 
 
 echo "Copying data to /data/rh20t_api"
@@ -49,3 +52,4 @@ cp -r ./mvtracker_demo.rrd /data/rh20t_api/test_data_generated
 #--exclude-inside-gripper -> remove what is inside gripper
 # TODO: remove all the unnessary functions such as temporal stride etc.
 #--tracker cotracker3_offline 
+#check if the fps is relevant
