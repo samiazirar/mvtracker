@@ -20,14 +20,29 @@ python create_sparse_depth_map.py \
   --tcp-points \
   --object-points \
   --visualize-query-points \
+  --max-query-points 512 \
   "${@}"
 
+
+echo "Copying data to /data/rh20t_api"
 cp ./data/high_res_filtered/task_0065_user_0010_scene_0009_cfg_0004_reprojected.rrd /data/rh20t_api
 cp -r  ./data /data/rh20t_api/test_data_generated
 
+echo "Running MVTracker demo"
+python demo.py --batch_processing  --temporal_stride 1 --spatial_downsample 1 --depth_estimator gt --depth_cache_dir ./depth_cache --rerun save
+
+echo "Copying MVTracker demo results to /data/rh20t_api"
+cp -r ./mvtracker_demo.rrd /data/rh20t_api/test_data_generated
+
+#TODO: add a function to liimit the number of query poiints
+# remove the max query points
+# TODO: Make thre query points around the gripper ..
 #--no-color-alignment-check \
   # --align-bbox-with-points \
 #  --align-bbox-search-radius-scale 2.0 \
   # --gripper-body-length-m 0.15 \
   # --gripper-body-height-m 0.15 \
   # --gripper-body-width-m 0.15 \
+  # check number and if it uses query points each time again
+#--exclude-by-cluster -> dbscan anr remove what inside
+#--exclude-inside-gripper -> remove what is inside gripper
