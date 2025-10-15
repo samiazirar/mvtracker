@@ -684,7 +684,11 @@ class MonocularToMultiViewAdapter(nn.Module):
                 if "traj_z" in results:
                     view_camera_z = results["traj_z"]
                 else:
-                    view_camera_z = bilinear_sampler(view_depths, view_traj_e.reshape(num_frames, -1, 1, 2))[:, 0, :, :]
+                    # view_camera_z = bilinear_sampler(view_depths, view_traj_e.reshape(num_frames, -1, 1, 2))[:, 0, :, :]
+                    #this fails with sparse depth 
+                    # so we use nearest neighbor sampling instead
+                    grid = view_traj_e.clone()
+                    view_camera_z = torch.nn.functional.grid_sample(view_depths, grid, mode='nearest', padding_mode='border', align_corners=False)
 
                 view_intrs = intrs[batch_idx, view_idx]
                 view_extrs = extrs[batch_idx, view_idx]
