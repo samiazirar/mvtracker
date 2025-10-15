@@ -542,11 +542,10 @@ def main():
         help="Overlay the robot URDF as a static mesh in the Rerun visualization."
     )
     p.add_argument(
-        "sample_path",
+        "--sample-path",
         type=str,
         default=None,
         help="Path to the task npz, if none will download the sample from HF mvtracker repo.",
-        nargs="?",
     )
 
     args = p.parse_args()
@@ -593,24 +592,6 @@ def main():
         mvtracker = MonocularToMultiViewAdapter(base_tracker).to(device)
         mvtracker.eval()
 
-    # Load the RH20T dataset with memory management
-    #sample_path = "/data/rh20t_api/data/RH20T/packed_npz/task_0015_user_0011_scene_0006_cfg_0003.npz"
-
-    #upscaled:
-    # sample_path = "/data/rh20t_api/data/test_data_full_rgb_upscaled_depth/packed_npz/task_0065_user_0010_scene_0009_cfg_0004.npz"
-    #not upscaled:
-    # sample_path = "/data/rh20t_api/data/test_data_full_rgb_upscaled_depth/uncompressed_low_res_data/packed_npz/task_0065_user_0010_scene_0009_cfg_0004.npz"
-    # sample_path = "/data/rh20t_api/data/low_res_data/packed_npz/task_0001_user_0010_scene_0005_cfg_0004.npz"
-    #with mapanythign
-    # sample_path = "/data/npz_file/task_0065_user_0010_scene_0009_cfg_0004_pred.npz"
-    #Final mapanything
-    # sample_path = "/data/rh20t_api/mapanything_test/task_0065_user_0010_scene_0009_cfg_0004_processed.npz"
-
-    #reprojected without depth
-    # sample_path = "data/high_res_filtered/task_0065_user_0010_scene_0009_cfg_0004_processed.npz"
-    #input to mapanythibg
-    # sample_path = "/data/rh20t_api/test_npz/task_0065_user_0010_scene_0009_cfg_0004_processed.npz"
-    # sample_path = "data/high_res_filtered/task_0065_user_0010_scene_0009_cfg_0004_processed.npz"
     
     if args.sample_path is not None:
         sample_path = args.sample_path
@@ -669,6 +650,7 @@ def main():
         else:
             camera_ids = decoded_ids if decoded_ids else None
     depth_seq_name_base = Path(sample_path).stem or "demo_sequence"
+    #TODO: whats this
     # Load data in smaller chunks or subsample to fit memory
     temporal_stride = args.temporal_stride
     spatial_downsample = args.spatial_downsample
