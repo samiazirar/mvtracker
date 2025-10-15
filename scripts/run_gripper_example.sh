@@ -10,6 +10,7 @@ python create_sparse_depth_map.py \
   --high-res-folder /data/rh20t_api/data/test_data_full_rgb_upscaled_depth/rgb_data/RH20T_cfg4/task_0065_user_0010_scene_0009_cfg_0004 \
   --out-dir ./data/high_res_filtered \
   --max-frames 100 \
+  --frames-for-tracking 1 \
   --no-sharpen-edges-with-mesh \
   --add-robot \
   --gripper-bbox \

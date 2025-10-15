@@ -1058,6 +1058,40 @@ def _filter_points_by_color_cluster(
     return filtered_points, filtered_colors
 
 
+def _restrict_query_points_to_frames(
+    query_points: Optional[List[Optional[np.ndarray]]],
+    query_colors: Optional[List[Optional[np.ndarray]]],
+    max_frames: Optional[int],
+) -> Tuple[Optional[List[Optional[np.ndarray]]], Optional[List[Optional[np.ndarray]]]]:
+    """
+    Limit query point exports to the first `max_frames` frames while leaving the processing pipeline untouched.
+
+    Args:
+        query_points: Per-frame list of query point arrays (or None) assembled during processing.
+        query_colors: Optional per-frame list of color arrays aligned with `query_points`.
+        max_frames: If positive, only frames [0, max_frames) retain their query points; later frames are cleared.
+
+    Returns:
+        Tuple containing filtered versions of `query_points` and `query_colors`.
+    """
+    if query_points is None or max_frames is None:
+        return query_points, query_colors
+
+    # Clamp non-positive requests to zero frames.
+    if max_frames <= 0:
+        max_frames = 0
+
+    filtered_points = list(query_points)
+    filtered_colors = list(query_colors) if query_colors is not None else None
+
+    for idx in range(max_frames, len(filtered_points)):
+        filtered_points[idx] = None
+        if filtered_colors is not None and idx < len(filtered_colors):
+            filtered_colors[idx] = None
+
+    return filtered_points, filtered_colors
+
+
 def _project_bbox_pixels(corners_world: np.ndarray, intr: np.ndarray, extr: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """Project 3D bounding box corners into 2D image pixels."""
     corners_world = np.asarray(corners_world, dtype=np.float32)
@@ -2563,6 +2597,12 @@ def process_frames(
             if robot_debug_colors is not None:
                 robot_debug_colors.append(debug_cols)
 
+    query_points, query_colors = _restrict_query_points_to_frames(
+        query_points,
+        query_colors,
+        getattr(args, "frames_for_tracking", None),
+    )
+
     return (
         rgbs_out,
         depths_out,
@@ -2989,6 +3029,12 @@ def main():
     parser.add_argument("--config", default="RH20T/configs/configs.json", type=Path, help="Path to RH20T robot configs JSON.")
     parser.add_argument("--max-frames", type=int, default=50, help="Limit frames to process (0 for all).")
     parser.add_argument("--frame-selection", choices=["first", "last", "middle"], default="middle", help="Method for selecting frames.")
+    parser.add_argument(
+        "--frames-for-tracking",
+        type=int,
+        default=None,
+        help="If provided, only export query points for the first N frames (tracking seeds).",
+    )
     parser.add_argument(
         "--color-alignment-check",
         action=argparse.BooleanOptionalAction,
