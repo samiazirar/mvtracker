@@ -38,7 +38,6 @@ python create_sparse_depth_map.py \
   --gripper-pad-points \
   --export-bbox-video \
   --object-points \
-  --use-tcp \
   --gripper-body-length-m 0.15 \
   --gripper-body-height-m 0.15 \
   --gripper-body-width-m 0.15 \
@@ -58,6 +57,9 @@ python demo.py  --temporal_stride 1 --spatial_downsample 1 --depth_estimator gt 
 
 echo "Copying MVTracker demo results to /data/rh20t_api"
 cp -r ./mvtracker_demo.rrd /data/rh20t_api/test_data_generated
+
+
+#  --use-tcp \
 
 
 #TODO: add a function to liimit the number of query poiints
