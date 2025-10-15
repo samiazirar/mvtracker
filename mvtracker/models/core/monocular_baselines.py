@@ -723,15 +723,18 @@ class MonocularToMultiViewAdapter(nn.Module):
             view_vis_e = results["vis"]
 
             if save_debug_logs and view_traj_e is not None:
+                #something with visualizer?
                 visualizer = Visualizer(
                     save_dir=debug_logs_path,
                     pad_value=16,
                     fps=12,
                     show_first_frame=0,
-                    tracks_leave_trace=3,
+                    tracks_leave_trace=3,#check TODO
                 )
+                #it seems it requires other format
+                video_for_viz = view_rgbs[None].cpu() * 255.0
                 visualizer.visualize(
-                    video=view_rgbs[None].cpu(),
+                    video=video_for_viz,
                     tracks=view_traj_e[None].cpu(),
                     visibility=view_vis_e[None].cpu(),
                     filename=f"view_{view_idx}.mp4",
