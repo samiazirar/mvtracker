@@ -16,7 +16,6 @@ from mvtracker.models.core.monocular_baselines import (
     CoTrackerOnlineWrapper,
     MonocularToMultiViewAdapter,
 )
-from create_sparse_depth_map import _log_robot_meshes_to_rerun
 from mvtracker.utils.visualizer_rerun import log_pointclouds_to_rerun, log_tracks_to_rerun
 
 import sys
@@ -600,7 +599,7 @@ def main():
     # sample_path = "/data/rh20t_api/mapanything_test/task_0065_user_0010_scene_0009_cfg_0004_processed.npz"
 
     #reprojected without depth
-    sample_path = "data/high_res_filtered/task_0065_user_0010_scene_0009_cfg_0004_processed.npz"
+    # sample_path = "data/high_res_filtered/task_0065_user_0010_scene_0009_cfg_0004_processed.npz"
     #input to mapanythibg
     # sample_path = "/data/rh20t_api/test_npz/task_0065_user_0010_scene_0009_cfg_0004_processed.npz"
     sample_path = "data/high_res_filtered/task_0065_user_0010_scene_0009_cfg_0004_processed.npz"
@@ -667,6 +666,7 @@ def main():
         else:
             effective_batch_frames = args.batch_size_frames
             effective_batch_views = args.batch_size_views
+            print("[Warning] Check ig the batch uses the last query poitns as inout, normally it is not to good to make batches as it then cannot track occluded. So if possible, redo. maybe alwways when gripper is wide open ") #TODO
         
         print("Loading data in batches to minimize memory usage...")
         
@@ -1012,12 +1012,11 @@ def main():
         log_rgb_pointcloud=True,
         pc_clean_cfg=pc_clean_cfg,
     )
+
     if args.include_robot:
-        _log_robot_meshes_to_rerun(
-            dataset_name="demo",
-            datapoint_idx=0,
-            sample_path=Path(sample_path),
-        )
+        raise NotImplementedError("Robot visualization from urdf not anymore supported.")
+
+    #TODO: check if query points are correct!
     log_tracks_to_rerun(
         dataset_name="demo",
         datapoint_idx=0,
