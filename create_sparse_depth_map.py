@@ -670,7 +670,6 @@ def _compute_gripper_body_bbox(
     center = (front_face + approach_axis * half_sizes[2]).astype(np.float32)
     
     quat = _rotation_matrix_to_xyzw(basis)
-    breakpoint()
     return {
         "center": center.astype(np.float32),
         "half_sizes": half_sizes.astype(np.float32),
@@ -723,6 +722,7 @@ def _compute_gripper_pad_points(
     
     # FALLBACK: If no finger pads found, use end-effector link
     if not points:
+        print("[Info] No gripper pad links found; falling back to end-effector link for single gripper point.") 
         robot_type = getattr(robot_conf, "robot", None)
         ee_link = ROBOT_EE_LINK_MAP.get(robot_type)
         if ee_link and ee_link in fk_map:
