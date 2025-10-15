@@ -30,7 +30,7 @@ cp ./data/high_res_filtered/task_0065_user_0010_scene_0009_cfg_0004_reprojected.
 cp -r  ./data /data/rh20t_api/test_data_generated
 
 echo "Running MVTracker demo"
-python demo.py  --temporal_stride 1 --spatial_downsample 1 --depth_estimator gt --depth_cache_dir ./depth_cache --rerun save   --tracker cotracker3_offline 
+python demo.py  --temporal_stride 1 --spatial_downsample 1 --depth_estimator gt --depth_cache_dir ./depth_cache --rerun save   
 
 echo "Copying MVTracker demo results to /data/rh20t_api"
 cp -r ./mvtracker_demo.rrd /data/rh20t_api/test_data_generated
@@ -48,3 +48,4 @@ cp -r ./mvtracker_demo.rrd /data/rh20t_api/test_data_generated
 #--exclude-by-cluster -> dbscan anr remove what inside
 #--exclude-inside-gripper -> remove what is inside gripper
 # TODO: remove all the unnessary functions such as temporal stride etc.
+#--tracker cotracker3_offline 
