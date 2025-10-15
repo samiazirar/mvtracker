@@ -612,7 +612,7 @@ class MonocularToMultiViewAdapter(nn.Module):
             intrs,
             extrs,
             save_debug_logs=True,
-            debug_logs_path="",
+            debug_logs_path="data/high_res_filtered",
             query_points_view=None,
             **kwargs,
     ):
