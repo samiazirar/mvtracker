@@ -17,7 +17,7 @@ set -euo pipefail
 # RGB_FOLDER="/data/rh20t_api/data/test_data_full_rgb_upscaled_depth/rgb_data/RH20T_cfg4/$TASK_FOLDER"
 
 #cfg 3 for both
-TASK_FOLDER="task_0001_user_0016_scene_0002_cfg_0003"
+TASK_FOLDER="task_0024_user_0010_scene_0005_cfg_0003"
 
 
 DEPTH_FOLDER="/data/rh20t_api/data/low_res_data/RH20T_cfg3/$TASK_FOLDER"
@@ -37,7 +37,6 @@ python create_sparse_depth_map.py \
   --gripper-fingertip-bbox \
   --gripper-pad-points \
   --export-bbox-video \
-  --tcp-points \
   --object-points \
   --visualize-query-points \
   --max-query-points 512 \

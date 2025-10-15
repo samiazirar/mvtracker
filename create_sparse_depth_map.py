@@ -609,6 +609,10 @@ def _compute_gripper_body_bbox(
 ) -> Optional[Dict[str, np.ndarray]]:
     """Compute a larger gripper body bbox with fixed width, sharing the same frame as the contact bbox."""
     if robot_conf is None or ref_bbox is None:
+        if robot_conf is None:
+            print("[Warning] No robot configuration provided; cannot compute gripper body bbox.")
+        if ref_bbox is None:
+            print("[Warning] No reference bbox provided; cannot compute gripper body bbox.")
         return None
     # Mirror the contact frame but enlarge the body dimensions to wrap the entire gripper.
     dims = DEFAULT_GRIPPER_DIMS
@@ -633,6 +637,7 @@ def _compute_gripper_body_bbox(
     # Share the same basis as contact bbox
     basis = ref_bbox.get("basis")
     if basis is None:
+        print("[Warning] Reference bbox has no basis; cannot compute body bbox.")
         return None
     basis = np.asarray(basis, dtype=np.float32)
     
@@ -1441,7 +1446,10 @@ def _robot_model_to_pointcloud(
         try:
             joint_map = {name: float(joint_angles_arr[i]) for i, name in enumerate(joint_sequence)}
             fk = robot_model.chain.forward_kinematics(joint_map)
+            # robot_model.latest_transforms = fk  # ← TODO: CHeck this line
         except Exception as exc:
+            #TODO: remove all general Exceptions..
+            print(f"[ERROR] Forward kinematics computation failed: {exc}")
             warnings.warn(f"Failed to compute forward kinematics for robot model ({exc}).")
     
     # Combine all robot meshes into a single point cloud
@@ -2185,7 +2193,6 @@ def process_frames(
                 # Use scene_high if available (it has the robot data), otherwise fall back to scene_low
                 robot_scene = scene_low if scene_low is not None else scene_high
                 joint_angles = robot_scene.get_joint_angles_aligned(t_low)
-                
                 # Ensure we have the correct number of joints
                 # The robot model expects len(conf.robot_joint_sequence) joints
                 expected_joints = len(scene_low.configuration.robot_joint_sequence)
