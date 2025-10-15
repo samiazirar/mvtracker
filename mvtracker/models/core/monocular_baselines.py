@@ -611,7 +611,7 @@ class MonocularToMultiViewAdapter(nn.Module):
             query_points,
             intrs,
             extrs,
-            save_debug_logs=False,
+            save_debug_logs=True,
             debug_logs_path="",
             query_points_view=None,
             **kwargs,
