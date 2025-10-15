@@ -185,6 +185,10 @@ def _compute_gripper_bbox_from_tcp(
         Tuple of (contact_box, full_box, fingertip_box) dictionaries or (None, None, None)
     """
     if tcp_transform is None or robot_conf is None:
+        if tcp_transform is None:
+            print("[Warning] No TCP transform provided; cannot compute gripper bbox from TCP. Returning None.")
+        if robot_conf is None:
+            print("[Warning] No robot configuration provided; cannot compute gripper bbox from TCP. Returning None.")
         return None, None, None
     
     # Extract position and rotation from TCP transform
