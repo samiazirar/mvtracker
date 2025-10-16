@@ -759,10 +759,10 @@ class MonocularToMultiViewAdapter(nn.Module):
                     view_camera_z = align_nearest_neighbor(view_depths, view_traj_e)
 
                 # FIX: Set depth to NaN for invisible points
-                # The visualizer expects NaN coordinates for points that should be ignored.
-                # Without this, all points get valid 3D coordinates, causing spurious lines
-                # from the origin in the visualization.
-                view_camera_z[~view_vis_e] = float('nan')
+                # view_camera_z shape: (T, N, 1), view_vis_e shape: (T, N)
+                # Expand view_vis_e to match camera_z shape before applying mask
+                invisible_mask = ~view_vis_e.unsqueeze(-1)  # (T, N, 1)
+                view_camera_z[invisible_mask] = float('nan')
 
                 view_intrs = intrs[batch_idx, view_idx]
                 view_extrs = extrs[batch_idx, view_idx]
@@ -777,9 +777,10 @@ class MonocularToMultiViewAdapter(nn.Module):
                     extrs_inv=extrs_inv,
                 )
 
-            # Set the trajectory to (0,0,0) for the timesteps before the query timestep
+            # Set the trajectory to NaN for the timesteps before the query timestep
+            # (use NaN instead of 0.0 to avoid lines from camera origin)
             for point_idx, t in enumerate(query_points_t[batch_idx, :, :].squeeze(-1)[track_mask]):
-                view_traj_e[:t, point_idx, :] = 0.0
+                view_traj_e[:t, point_idx, :] = float('nan')
 
             traj_e_per_view[view_idx] = view_traj_e[None]
             vis_e_per_view[view_idx] = view_vis_e[None]
