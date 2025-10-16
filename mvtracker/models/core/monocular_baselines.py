@@ -758,6 +758,12 @@ class MonocularToMultiViewAdapter(nn.Module):
                     #   view_camera_z: (num_frames, num_tracked_points, 1)
                     view_camera_z = align_nearest_neighbor(view_depths, view_traj_e)
 
+                # FIX: Set depth to NaN for invisible points
+                # The visualizer expects NaN coordinates for points that should be ignored.
+                # Without this, all points get valid 3D coordinates, causing spurious lines
+                # from the origin in the visualization.
+                view_camera_z[~view_vis_e] = float('nan')
+
                 view_intrs = intrs[batch_idx, view_idx]
                 view_extrs = extrs[batch_idx, view_idx]
                 intrs_inv = torch.inverse(view_intrs.float())
