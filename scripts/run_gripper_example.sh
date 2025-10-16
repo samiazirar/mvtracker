@@ -28,7 +28,7 @@ python create_sparse_depth_map.py \
   --task-folder $DEPTH_FOLDER \
   --high-res-folder $RGB_FOLDER \
   --out-dir ./data/high_res_filtered \
-  --max-frames 20 \
+  --max-frames 100 \
   --frames-for-tracking 1 \
   --no-sharpen-edges-with-mesh \
   --add-robot \
