@@ -14,7 +14,10 @@ from huggingface_hub import hf_hub_download
 from mvtracker.models.core.monocular_baselines import (
     CoTrackerOfflineWrapper,
     CoTrackerOnlineWrapper,
+    DELTAWrapper,
+    LocoTrackWrapper,
     MonocularToMultiViewAdapter,
+    SpaTrackerV2Wrapper,
 )
 from mvtracker.utils.visualizer_rerun import log_pointclouds_to_rerun, log_tracks_to_rerun
 
@@ -439,7 +442,14 @@ def main():
     )
     p.add_argument(
         "--tracker",
-        choices=["mvtracker", "cotracker3_online", "cotracker3_offline"],
+        choices=[
+            "mvtracker",
+            "cotracker3_online",
+            "cotracker3_offline",
+            "densetrack3d",
+            "spatialtrackerv2",
+            "locotrack",
+        ],
         default="mvtracker",
         help="Select which tracker to run. Defaults to MVTracker; CoTracker3 wrappers are available for comparison.",
     )
@@ -585,8 +595,16 @@ def main():
     else:
         if args.tracker == "cotracker3_online":
             base_tracker = CoTrackerOnlineWrapper(model_name="cotracker3_online")
-        else:
+        elif args.tracker == "cotracker3_offline":
             base_tracker = CoTrackerOfflineWrapper(model_name="cotracker3_offline")
+        elif args.tracker == "densetrack3d":
+            base_tracker = DELTAWrapper()
+        elif args.tracker == "spatialtrackerv2":
+            base_tracker = SpaTrackerV2Wrapper()
+        elif args.tracker == "locotrack":
+            base_tracker = LocoTrackWrapper()
+        else:
+            raise ValueError(f"Unsupported tracker option '{args.tracker}'.")
         base_tracker = base_tracker.to(device)
         base_tracker.eval()
         mvtracker = MonocularToMultiViewAdapter(base_tracker).to(device)
