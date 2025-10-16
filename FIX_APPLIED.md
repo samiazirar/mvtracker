@@ -1,10 +1,17 @@
 # Fix Applied: Gripper Bounding Box Support for WSG-50 (Config 3)
 
 ## Commits
-- **Before fix**: `Previous commit` - Analysis complete, ready to implement WSG-50 gripper support
-- **After fix**: `ba5cb60` - Fix: Add ee_link fallback for grippers without finger pad links (WSG-50)
+- **Before fix 1**: `Previous commits` - Analysis complete
+- **After fix 1**: `ba5cb60` - Fix: Add ee_link fallback for grippers without finger pad links (WSG-50)
+- **After fix 1 docs**: `dd173a1` - Add documentation for WSG-50 gripper bbox fix
+- **After fix 2**: `e13bc1e` - Fix: Compute gripper bbox when any bbox flag is set, not just --gripper-bbox
 
-## Problem Summary
+## Problem 1: WSG-50 Gripper Bbox Not Computing (FIXED ✅)
+
+### Summary
+The gripper bounding box computation was failing for Config 3 (WSG-50 gripper) but working for Config 4 (Robotiq 2F-85 gripper).
+
+### Root Cause
 The gripper bounding box computation was failing for Config 3 (WSG-50 gripper) but working for Config 4 (Robotiq 2F-85 gripper).
 
 ## Root Cause
@@ -131,9 +138,63 @@ python create_sparse_depth_map.py \
 
 The computed gripper boxes (`robot_gripper_boxes`, `robot_gripper_body_boxes`, etc.) are logged to Rerun but **not included in the NPZ file**. This is a pre-existing issue unrelated to the WSG-50 fix.
 
+---
+
+## Problem 2: Only Orange Bbox Visible (FIXED ✅)
+
+### Summary
+When using `--gripper-body-bbox` or `--gripper-fingertip-bbox` flags alone, no bounding boxes were computed at all. Only when using `--gripper-bbox` (contact bbox) would ANY bbox appear.
+
+### Root Cause
+The gripper bbox computation code was gated behind a single condition:
+```python
+if robot_gripper_boxes is not None:
+    # ALL bbox computation happens here
+```
+
+This meant:
+- ✅ `--gripper-bbox`: Sets `robot_gripper_boxes != None` → computation runs → orange contact bbox appears
+- ❌ `--gripper-body-bbox` only: `robot_gripper_boxes = None` → computation SKIPPED → no bbox at all
+- ❌ `--gripper-fingertip-bbox` only: `robot_gripper_boxes = None` → computation SKIPPED → no bbox at all
+
+### Solution (Commit e13bc1e)
+Changed the condition to run bbox computation if **ANY** bbox output list is requested:
+
+```python
+# Compute gripper bbox if ANY bbox output is requested
+if (robot_gripper_boxes is not None or 
+    robot_gripper_body_boxes is not None or 
+    robot_gripper_fingertip_boxes is not None):
+    # Bbox computation happens here
+```
+
+### Test Results
+Now all combinations work correctly:
+
+```bash
+# Test 1: Body bbox only
+--gripper-body-bbox
+# Result: ✅ Red body bbox appears
+
+# Test 2: Fingertip bbox only  
+--gripper-fingertip-bbox
+# Result: ✅ Blue fingertip bbox appears
+
+# Test 3: All three together
+--gripper-bbox --gripper-body-bbox --gripper-fingertip-bbox
+# Result: ✅ All three bboxes appear (orange + red + blue)
+```
+
+### Bbox Color Guide
+- **Orange (255, 128, 0)**: Contact/gripper bbox (`--gripper-bbox`)
+- **Red (255, 0, 0)**: Full body bbox (`--gripper-body-bbox`)
+- **Blue (0, 0, 255)**: Fingertip bbox (`--gripper-fingertip-bbox`)
+
+---
+
 ## Summary
 
-✅ **Fixed**: Gripper bounding box now computes correctly for both Config 3 (WSG-50) and Config 4 (Robotiq)  
-✅ **Method**: Added fallback to use `ee_link` when finger pad links aren't available  
-✅ **Backward Compatible**: Config 4 still uses the more accurate finger pad method when available  
+✅ **Fix 1 (ba5cb60)**: Gripper bounding box now computes correctly for Config 3 (WSG-50) using ee_link fallback  
+✅ **Fix 2 (e13bc1e)**: All bbox flags now work independently and in combination  
+✅ **Backward Compatible**: Config 4 (Robotiq) still uses the more accurate finger pad method when available  
 ⚠️ **Known Issue**: Boxes computed but not saved to NPZ (separate bug, affects both configs)
