@@ -12,23 +12,21 @@ set -euo pipefail
 
 
 #config 4
-# TASK_FOLDER="task_0065_user_0010_scene_0009_cfg_0004" 
-# DEPTH_FOLDER="/data/rh20t_api/data/test_data_full_rgb_upscaled_depth/uncompressed_low_res_data/$TASK_FOLDER"
-# RGB_FOLDER="/data/rh20t_api/data/test_data_full_rgb_upscaled_depth/rgb_data/RH20T_cfg4/$TASK_FOLDER"
+TASK_FOLDER="task_0065_user_0010_scene_0009_cfg_0004" 
+DEPTH_FOLDER="/data/rh20t_api/data/test_data_full_rgb_upscaled_depth/uncompressed_low_res_data/$TASK_FOLDER"
+RGB_FOLDER="/data/rh20t_api/data/test_data_full_rgb_upscaled_depth/rgb_data/RH20T_cfg4/$TASK_FOLDER"
 
 #cfg 3 for both
-TASK_FOLDER="task_0024_user_0010_scene_0005_cfg_0003"
-
-
-DEPTH_FOLDER="/data/rh20t_api/data/low_res_data/RH20T_cfg3/$TASK_FOLDER"
-RGB_FOLDER="/data/rh20t_api/data/RH20T/RH20T_cfg3/$TASK_FOLDER"
-
+# TASK_FOLDER="task_0024_user_0010_scene_0005_cfg_0003"
+# DEPTH_FOLDER="/data/rh20t_api/data/low_res_data/RH20T_cfg3/$TASK_FOLDER"
+# RGB_FOLDER="/data/rh20t_api/data/RH20T/RH20T_cfg3/$TASK_FOLDER"
+#check if using scene high with tcp now means it is swapped for all?
 
 python create_sparse_depth_map.py \
   --task-folder $DEPTH_FOLDER \
   --high-res-folder $RGB_FOLDER \
   --out-dir ./data/high_res_filtered \
-  --max-frames 100 \
+  --max-frames 120 \
   --frames-for-tracking 1 \
   --no-sharpen-edges-with-mesh \
   --add-robot \
@@ -38,6 +36,7 @@ python create_sparse_depth_map.py \
   --gripper-pad-points \
   --export-bbox-video \
   --object-points \
+  --use-tcp \
   --gripper-body-length-m 0.15 \
   --gripper-body-height-m 0.15 \
   --gripper-body-width-m 0.15 \
@@ -53,12 +52,12 @@ cp -r  ./data /data/rh20t_api/test_data_generated
 
 SAMPLE_PATH="data/high_res_filtered/${TASK_FOLDER}_processed.npz"
 echo "Running MVTracker demo"
-python demo.py  --temporal_stride 1 --spatial_downsample 1 --depth_estimator gt --depth_cache_dir ./depth_cache --rerun save  --sample-path $SAMPLE_PATH
+python demo.py  --temporal_stride 1 --spatial_downsample 1 --depth_estimator gt --depth_cache_dir ./depth_cache --rerun save  --sample-path $SAMPLE_PATH --tracker cotracker3_offline 
 
 echo "Copying MVTracker demo results to /data/rh20t_api"
 cp -r ./mvtracker_demo.rrd /data/rh20t_api/test_data_generated
 
-
+  
 #  --use-tcp \
 
 
