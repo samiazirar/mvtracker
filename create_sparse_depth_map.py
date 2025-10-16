@@ -2296,7 +2296,10 @@ def process_frames(
                     urdf_colors=robot_urdf_colors,
                     mtl_colors=robot_mtl_colors,
                 )
-                if robot_gripper_boxes is not None:
+                # Compute gripper bbox if ANY bbox output is requested
+                if (robot_gripper_boxes is not None or 
+                    robot_gripper_body_boxes is not None or 
+                    robot_gripper_fingertip_boxes is not None):
                     # Determine which method to use for bbox computation
                     use_tcp = getattr(args, "use_tcp", False)
                     tcp_transform = None
