@@ -65,13 +65,13 @@ echo "Post-create setup completed successfully!"
 # cd pytorch3d && pip install -e .
 # echo "if errors invoke unset TORCH_CUDA_ARCH_LIST"
 
-#apt-get update
-# apt-get install -y build-essential gcc-11 g++-11 ninja-build
-#pip install --upgrade pip setuptools wheel ninja
+apt-get update
+apt-get install -y build-essential gcc-11 g++-11 ninja-build
+pip install --upgrade pip setuptools wheel ninja
 
-# export TORCH_CUDA_ARCH_LIST="12.0"      # dotted, not 120
-# export MAX_JOBS=$(nproc)
-# pip install -v --no-build-isolation \
-#   "git+https://github.com/ethz-vlg/pointcept.git@2082918#subdirectory=libs/pointops"
+export TORCH_CUDA_ARCH_LIST="12.0"      # dotted, not 120
+export MAX_JOBS=$(nproc)
+pip install -v --no-build-isolation \
+  "git+https://github.com/ethz-vlg/pointcept.git@2082918#subdirectory=libs/pointops"
 
 #pip install trimesh

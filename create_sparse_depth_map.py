@@ -2303,15 +2303,18 @@ def process_frames(
                     # Determine which method to use for bbox computation
                     use_tcp = getattr(args, "use_tcp", False)
                     tcp_transform = None
-                    
                     if use_tcp:
                         # Use TCP-based computation
                         try:
+
                             if ti == 0:
                                 print("[INFO] Using TCP-based gripper bbox computation")
                             # Get the official TCP pose from the dataset (7D: position + quaternion)
-                            robot_scene = scene_low if scene_low is not None else scene_high
-                            tcp_pose_7d = robot_scene.get_tcp_aligned(t_low)
+
+                            # robot_scene = scene_low if scene_low is not None else scene_high
+                            # tcp_pose_7d = robot_scene.get_tcp_aligned(t_low) #maybe use camera serial
+                            print("[DEBUG] REMOVE or CHECK THIS AFTERWARDS; USING SCENE HIGH ONLY") #todo why? find out
+                            tcp_pose_7d = scene_high.get_tcp_aligned(t_low)
                             # Validate that we got valid data
                             if tcp_pose_7d is not None and len(tcp_pose_7d) == 7:
                                 # Convert 7D pose [x, y, z, qx, qy, qz, qw] to 4x4 matrix
@@ -2322,10 +2325,14 @@ def process_frames(
                                 if ti == 0:
                                     print(f"[WARN] API returned invalid TCP data: {tcp_pose_7d}")
                                     print(f"[WARN] Cannot compute TCP-based bbox, skipping frame")
-                        except Exception as e:
+                        except TypeError as e:
                             if ti == 0:
-                                print(f"[WARN] Could not get TCP from API: {e}")
-                                print(f"[WARN] Cannot compute TCP-based bbox, skipping frame")
+                                print(f"[ERROR] Could not get TCP from API: {e}")
+                                print(f"[ERROR] Cannot compute TCP-based bbox, skipping frame")
+                            elif ti != 0:
+                                # Only log once after the first frame
+                                print(f"[ERROR] Could not get TCP from API at frame {ti}: {e}")
+                        
                         
                         # Compute bbox using TCP method
                         if tcp_transform is not None:
@@ -2389,6 +2396,7 @@ def process_frames(
                     try:
                         robot_scene = scene_low if scene_low is not None else scene_high
                         tcp_pose_7d = robot_scene.get_tcp_aligned(t_low)
+                        #TODO: use camera serial?
                         if tcp_pose_7d is not None and len(tcp_pose_7d) >= 3:
                             # Extract position (first 3 elements: x, y, z)
                             tcp_pt_for_frame = np.array(tcp_pose_7d[:3], dtype=np.float32)
@@ -2758,7 +2766,7 @@ def save_and_visualize(
 
         # Log robot points separately (they survive better than going through reprojection)
         if robot_debug_points is not None and len(robot_debug_points) > 0:
-            fps = 30.0
+            fps = 12.0 #TODO: adjust to one fps rate later tot he real one
             print(f"[INFO] Logging {len(robot_debug_points)} robot point clouds to Rerun...")
             for idx, pts in enumerate(robot_debug_points):
                 if pts is None or pts.size == 0:
