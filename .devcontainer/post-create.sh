@@ -81,12 +81,15 @@ if [ ! -d "spatialtrackerv2" ]; then
     git clone https://github.com/henry123-boy/SpaTrackerV2.git spatialtrackerv2
     cd spatialtrackerv2
     git checkout 1673230
-    #rname the depth_edge with depth_map_edge
-    sed -i -E 's/(^|[^_a-zA-Z0-9])depth_edge([^_a-zA-Z0-9]|$)/\1depth_map_edge\2/g' spatialtrackerv2/models/SpaTrackV2/models/SpaTrack.py
     git submodule update --init --recursive
+
+    #rname the depth_edge with depth_map_edge, led to issues 
+    # sed -i -E 's/(^|[^_a-zA-Z0-9])depth_edge([^_a-zA-Z0-9]|$)/\1depth_map_edge\2/g' ./models/SpaTrackV2/models/SpaTrack.py
 fi
 pip install pycolmap==3.11.1
-pip install git+https://github.com/EasternJournalist/utils3d.git#egg=utils3d
+# pip install git+https://github.com/EasternJournalist/utils3d.git#egg=utils3d
+#then no depth_edge chaaneg needed? re
+pip install git+https://github.com/EasternJournalist/utils3d.git@d790d33#egg=utils3d
 pip install pyceres==2.4
 pip install jaxtyping
 pip install decord
