@@ -255,7 +255,7 @@ def _log_tracks_to_rerun(
         log_points=True,
         points_radii=-3.6,
 
-        log_line_strips=True,
+        log_line_strips=False,
         max_strip_length_past=10,
         max_strip_length_future=0,
         strips_radii=-1.8,

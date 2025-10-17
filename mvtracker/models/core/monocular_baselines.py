@@ -751,20 +751,20 @@ class MonocularToMultiViewAdapter(nn.Module):
                 if "traj_z" in results:
                     view_camera_z = results["traj_z"]
                 else:
-                    # view_camera_z = bilinear_sampler(view_depths, view_traj_e.reshape(num_frames, -1, 1, 2))[:, 0, :, :]
+                    view_camera_z = bilinear_sampler(view_depths, view_traj_e.reshape(num_frames, -1, 1, 2))[:, 0, :, :]
                     #this fails with sparse depth 
                     # Input shape : 
                     #   view_depths: (num_frames, 1, height, width)
                     #   view_traj_e: (num_frames, num_tracked_points, 2)
                     # Output shape:
                     #   view_camera_z: (num_frames, num_tracked_points, 1)
-                    view_camera_z = align_nearest_neighbor(view_depths, view_traj_e)
+                    # view_camera_z = align_nearest_neighbor(view_depths, view_traj_e)
 
                 # FIX: Set depth to NaN for invisible points
                 # The visualizer expects NaN coordinates for points that should be ignored.
                 # Without this, all points get valid 3D coordinates, causing spurious lines
                 # from the origin in the visualization.
-                view_camera_z[~view_vis_e] = float('nan')
+                # view_camera_z[~view_vis_e] = float('nan')
 
                 view_intrs = intrs[batch_idx, view_idx]
                 view_extrs = extrs[batch_idx, view_idx]

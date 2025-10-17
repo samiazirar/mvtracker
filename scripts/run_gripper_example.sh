@@ -52,9 +52,9 @@ cp -r  ./data /data/rh20t_api/test_data_generated
 
 SAMPLE_PATH="data/high_res_filtered/${TASK_FOLDER}_processed.npz"
 echo "Running MVTracker demo"
-python demo.py  --temporal_stride 1 --spatial_downsample 1 --depth_estimator gt --depth_cache_dir ./depth_cache --rerun save  --sample-path $SAMPLE_PATH --tracker spatialtrackerv2 
+# python demo.py  --temporal_stride 1 --spatial_downsample 1 --depth_estimator gt --depth_cache_dir ./depth_cache --rerun save  --sample-path $SAMPLE_PATH --tracker spatialtrackerv2 
 
-# python demo.py  --temporal_stride 1 --spatial_downsample 1 --depth_estimator gt --depth_cache_dir ./depth_cache --rerun save  --sample-path $SAMPLE_PATH --tracker cotracker3_offline 
+python demo.py  --temporal_stride 1 --spatial_downsample 1 --depth_estimator gt --depth_cache_dir ./depth_cache --rerun save  --sample-path $SAMPLE_PATH --tracker cotracker3_offline 
 
 echo "Copying MVTracker demo results to /data/rh20t_api"
 cp -r ./mvtracker_demo.rrd /data/rh20t_api/test_data_generated
