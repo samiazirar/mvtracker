@@ -22,30 +22,30 @@ RGB_FOLDER="/data/rh20t_api/data/test_data_full_rgb_upscaled_depth/rgb_data/RH20
 # RGB_FOLDER="/data/rh20t_api/data/RH20T/RH20T_cfg3/$TASK_FOLDER"
 #check if using scene high with tcp now means it is swapped for all?
 
-# python create_sparse_depth_map.py \
-#   --task-folder $DEPTH_FOLDER \
-#   --high-res-folder $RGB_FOLDER \
-#   --out-dir ./data/high_res_filtered \
-#   --max-frames 120 \
-#   --frames-for-tracking 1 \
-#   --no-sharpen-edges-with-mesh \
-#   --add-robot \
-#   --gripper-bbox \
-#   --gripper-body-bbox \
-#   --gripper-fingertip-bbox \
-#   --gripper-pad-points \
-#   --export-bbox-video \
-#   --object-points \
-#   --use-tcp \
-#   --gripper-body-length-m 0.15 \
-#   --gripper-body-height-m 0.15 \
-#   --gripper-body-width-m 0.15 \
-#   --visualize-query-points \
-#   --max-query-points 512 \
-#   --no-color-alignment-check \
-#   "${@}"
+python create_sparse_depth_map.py \
+  --task-folder $DEPTH_FOLDER \
+  --high-res-folder $RGB_FOLDER \
+  --out-dir ./data/high_res_filtered \
+  --max-frames 240 \
+  --frames-for-tracking 1 \
+  --no-sharpen-edges-with-mesh \
+  --add-robot \
+  --gripper-bbox \
+  --gripper-body-bbox \
+  --gripper-fingertip-bbox \
+  --gripper-pad-points \
+  --export-bbox-video \
+  --object-points \
+  --gripper-body-length-m 0.10 \
+  --gripper-body-height-m 0.10 \
+  --gripper-body-width-m 0.10 \
+  --visualize-query-points \
+  --max-query-points 128 \
+  --no-color-alignment-check \
+  "${@}"
 
-
+#  --use-tcp \
+# SpatialTrackerV2 works good -> KNN to nearest depth pixel avaiable
 echo "Copying data to /data/rh20t_api"
 cp ./data/high_res_filtered/${TASK_FOLDER}_reprojected.rrd /data/rh20t_api
 cp -r  ./data /data/rh20t_api/test_data_generated
