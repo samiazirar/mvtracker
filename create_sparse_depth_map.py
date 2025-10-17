@@ -2041,76 +2041,47 @@ def reproject_to_sparse_depth_cv2(
 
 # --- SAM2 Tracking Functions ---
 
-def track_gripper_with_sam2(
+def track_gripper_with_sam2_single_camera(
     args,
-    rgbs: np.ndarray,
+    rgb_frames: np.ndarray,
     query_points: Optional[List[Optional[np.ndarray]]],
     intrs: np.ndarray,
     extrs: np.ndarray,
-    camera_idx: int = 0,
+    camera_idx: int,
+    predictor,
 ) -> Optional[List[np.ndarray]]:
     """
-    Track gripper using SAM2 video predictor initialized with query points.
+    Track gripper using SAM2 for a single camera.
     
     Args:
         args: Parsed command-line arguments
-        rgbs: RGB images (C, T, H, W, 3)
+        rgb_frames: RGB images for this camera (T, H, W, 3)
         query_points: 3D query points for each frame (list of T arrays)
-        intrs: Camera intrinsics (C, T, 3, 3)
-        extrs: Camera extrinsics (C, T, 3, 4)
-        camera_idx: Which camera to use for tracking (default: 0)
+        intrs: Camera intrinsics for this camera (T, 3, 3)
+        extrs: Camera extrinsics for this camera (T, 3, 4)
+        camera_idx: Camera index for logging
+        predictor: SAM2 video predictor instance
     
     Returns:
         List of binary masks (H, W) for each frame, or None if tracking fails
     """
-    if not getattr(args, "sam2_tracking", False):
-        return None
-    
-    if query_points is None or len(query_points) == 0:
-        print("[WARN] SAM2 tracking requires query points. Skipping SAM2 tracking.")
-        return None
-    
-    # Check if SAM2 checkpoint exists
-    if not args.sam2_checkpoint.exists():
-        print(f"[ERROR] SAM2 checkpoint not found at: {args.sam2_checkpoint}")
-        print("[INFO] Please download SAM2 checkpoint or disable --sam2-tracking")
-        return None
-    
-    print(f"[INFO] Initializing SAM2 video predictor from {args.sam2_checkpoint}...")
-    
-    try:
-        # Build SAM2 video predictor
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        predictor = build_sam2_video_predictor(
-            args.sam2_config,
-            args.sam2_checkpoint,
-            device=device,
-        )
-    except Exception as e:
-        print(f"[ERROR] Failed to initialize SAM2: {e}")
-        import traceback
-        traceback.print_exc()
-        return None
-    
-    # Get RGB frames for the selected camera (T, H, W, 3)
-    C, T, H, W, _ = rgbs.shape
-    rgb_frames = rgbs[camera_idx]  # (T, H, W, 3)
-    
-    # SAM2 requires saving frames to a directory
-    # Create temporary directory for video frames
     import tempfile
     import shutil
-    temp_dir = Path(tempfile.mkdtemp(prefix="sam2_frames_"))
+    
+    T, H, W, _ = rgb_frames.shape
+    
+    # Create temporary directory for video frames
+    temp_dir = Path(tempfile.mkdtemp(prefix=f"sam2_cam{camera_idx}_"))
     
     try:
-        print(f"[INFO] Saving {T} frames to temporary directory for SAM2...")
+        print(f"[INFO] Camera {camera_idx}: Saving {T} frames to temporary directory...")
         # Save frames as JPEG images
         for t_idx in range(T):
             frame_path = temp_dir / f"{t_idx:05d}.jpg"
             Image.fromarray(rgb_frames[t_idx]).save(frame_path, quality=95)
         
         # Initialize SAM2 inference state with the frame directory
-        print(f"[INFO] Initializing SAM2 inference state with {T} frames ({H}x{W})...")
+        print(f"[INFO] Camera {camera_idx}: Initializing SAM2 inference state ({H}x{W})...")
         inference_state = predictor.init_state(
             video_path=str(temp_dir),
             offload_video_to_cpu=False,
@@ -2118,7 +2089,7 @@ def track_gripper_with_sam2(
         )
         
     except Exception as e:
-        print(f"[ERROR] Failed to initialize SAM2 inference state: {e}")
+        print(f"[ERROR] Camera {camera_idx}: Failed to initialize SAM2 inference state: {e}")
         import traceback
         traceback.print_exc()
         shutil.rmtree(temp_dir, ignore_errors=True)
@@ -2127,32 +2098,32 @@ def track_gripper_with_sam2(
     # Find the initialization frame with valid query points
     init_frame_idx = args.sam2_init_frame
     if init_frame_idx >= T:
-        print(f"[WARN] --sam2-init-frame ({init_frame_idx}) >= num frames ({T}). Using frame 0.")
+        print(f"[WARN] Camera {camera_idx}: --sam2-init-frame ({init_frame_idx}) >= num frames ({T}). Using frame 0.")
         init_frame_idx = 0
     
     # Find first frame with query points if init frame has none
     if query_points[init_frame_idx] is None or len(query_points[init_frame_idx]) == 0:
-        print(f"[WARN] No query points at init frame {init_frame_idx}. Searching for first valid frame...")
+        print(f"[WARN] Camera {camera_idx}: No query points at init frame {init_frame_idx}. Searching...")
         for t_idx in range(T):
             if query_points[t_idx] is not None and len(query_points[t_idx]) > 0:
                 init_frame_idx = t_idx
-                print(f"[INFO] Using frame {init_frame_idx} for SAM2 initialization (first with query points)")
+                print(f"[INFO] Camera {camera_idx}: Using frame {init_frame_idx} for initialization")
                 break
         else:
-            print("[ERROR] No frames with query points found. Cannot initialize SAM2.")
+            print(f"[ERROR] Camera {camera_idx}: No frames with query points found.")
             shutil.rmtree(temp_dir, ignore_errors=True)
             return None
     
     # Project 3D query points to 2D for the initialization frame
     qpts_3d = query_points[init_frame_idx]
     if qpts_3d is None or len(qpts_3d) == 0:
-        print(f"[ERROR] No query points at frame {init_frame_idx}")
+        print(f"[ERROR] Camera {camera_idx}: No query points at frame {init_frame_idx}")
         shutil.rmtree(temp_dir, ignore_errors=True)
         return None
     
     # Get camera parameters for this frame
-    K = intrs[camera_idx, init_frame_idx]  # (3, 3)
-    E = extrs[camera_idx, init_frame_idx]  # (3, 4)
+    K = intrs[init_frame_idx]  # (3, 3)
+    E = extrs[init_frame_idx]  # (3, 4)
     R, t = E[:3, :3], E[:3, 3]
     
     # Transform 3D points to camera frame
@@ -2171,14 +2142,13 @@ def track_gripper_with_sam2(
     qpts_2d_valid = qpts_2d[valid_mask]
     
     if len(qpts_2d_valid) == 0:
-        print(f"[ERROR] No valid query points project into frame {init_frame_idx}")
+        print(f"[ERROR] Camera {camera_idx}: No valid query points project into frame {init_frame_idx}")
         shutil.rmtree(temp_dir, ignore_errors=True)
         return None
     
-    print(f"[INFO] Initializing SAM2 with {len(qpts_2d_valid)} points at frame {init_frame_idx}")
+    print(f"[INFO] Camera {camera_idx}: Initializing with {len(qpts_2d_valid)} points at frame {init_frame_idx}")
     
     # Add points to SAM2 predictor
-    # SAM2 expects points as (N, 2) numpy array and labels as (N,) where 1=foreground
     ann_obj_id = 1  # Object ID for the gripper
     points = qpts_2d_valid.astype(np.float32)
     labels = np.ones(len(points), dtype=np.int32)  # All foreground
@@ -2192,14 +2162,14 @@ def track_gripper_with_sam2(
             labels=labels,
         )
     except Exception as e:
-        print(f"[ERROR] Failed to add points to SAM2: {e}")
+        print(f"[ERROR] Camera {camera_idx}: Failed to add points to SAM2: {e}")
         import traceback
         traceback.print_exc()
         shutil.rmtree(temp_dir, ignore_errors=True)
         return None
     
     # Propagate masks through the video
-    print(f"[INFO] Propagating SAM2 masks through {T} frames...")
+    print(f"[INFO] Camera {camera_idx}: Propagating SAM2 masks through {T} frames...")
     video_segments = {}
     
     try:
@@ -2211,7 +2181,7 @@ def track_gripper_with_sam2(
             }
         
     except Exception as e:
-        print(f"[ERROR] Failed to propagate SAM2 masks: {e}")
+        print(f"[ERROR] Camera {camera_idx}: Failed to propagate SAM2 masks: {e}")
         import traceback
         traceback.print_exc()
         shutil.rmtree(temp_dir, ignore_errors=True)
@@ -2230,13 +2200,183 @@ def track_gripper_with_sam2(
             # No mask for this frame - create empty mask
             masks.append(np.zeros((H, W), dtype=bool))
     
-    if len(masks) != T:
-        print(f"[WARN] SAM2 returned {len(masks)} masks, expected {T}. Padding with empty masks.")
-        while len(masks) < T:
-            masks.append(np.zeros((H, W), dtype=bool))
-    
-    print(f"[INFO] SAM2 tracking completed successfully with {len(masks)} masks")
+    print(f"[INFO] Camera {camera_idx}: SAM2 tracking completed with {len(masks)} masks")
     return masks
+
+
+def track_gripper_with_sam2(
+    args,
+    rgbs: np.ndarray,
+    query_points: Optional[List[Optional[np.ndarray]]],
+    intrs: np.ndarray,
+    extrs: np.ndarray,
+) -> Optional[Dict[int, List[np.ndarray]]]:
+    """
+    Track gripper using SAM2 video predictor for all cameras.
+    
+    Args:
+        args: Parsed command-line arguments
+        rgbs: RGB images (C, T, H, W, 3)
+        query_points: 3D query points for each frame (list of T arrays)
+        intrs: Camera intrinsics (C, T, 3, 3)
+        extrs: Camera extrinsics (C, T, 3, 4)
+    
+    Returns:
+        Dictionary mapping camera_idx to list of binary masks, or None if tracking fails
+    """
+    if not getattr(args, "sam2_tracking", False):
+        return None
+    
+    if query_points is None or len(query_points) == 0:
+        print("[WARN] SAM2 tracking requires query points. Skipping SAM2 tracking.")
+        return None
+    
+    # Check if SAM2 checkpoint exists
+    if not args.sam2_checkpoint.exists():
+        print(f"[ERROR] SAM2 checkpoint not found at: {args.sam2_checkpoint}")
+        print("[INFO] Please download SAM2 checkpoint or disable --sam2-tracking")
+        return None
+    
+    print(f"[INFO] Initializing SAM2 video predictor from {args.sam2_checkpoint}...")
+    
+    try:
+        # Build SAM2 video predictor (shared across all cameras)
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        predictor = build_sam2_video_predictor(
+            args.sam2_config,
+            args.sam2_checkpoint,
+            device=device,
+        )
+    except Exception as e:
+        print(f"[ERROR] Failed to initialize SAM2: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+    
+    C, T, H, W, _ = rgbs.shape
+    print(f"[INFO] Running SAM2 tracking on {C} cameras with {T} frames each...")
+    
+    # Track gripper in each camera view
+    all_masks = {}
+    for cam_idx in range(C):
+        print(f"\n[INFO] Processing camera {cam_idx + 1}/{C}...")
+        rgb_frames = rgbs[cam_idx]  # (T, H, W, 3)
+        cam_intrs = intrs[cam_idx]  # (T, 3, 3)
+        cam_extrs = extrs[cam_idx]  # (T, 3, 4)
+        
+        masks = track_gripper_with_sam2_single_camera(
+            args,
+            rgb_frames,
+            query_points,
+            cam_intrs,
+            cam_extrs,
+            cam_idx,
+            predictor,
+        )
+        
+        if masks is not None:
+            all_masks[cam_idx] = masks
+            print(f"[INFO] Camera {cam_idx}: Successfully tracked {len(masks)} frames")
+        else:
+            print(f"[WARN] Camera {cam_idx}: Tracking failed, skipping this camera")
+    
+    if len(all_masks) == 0:
+        print("[ERROR] SAM2 tracking failed for all cameras")
+        return None
+    
+    print(f"\n[INFO] SAM2 tracking completed successfully for {len(all_masks)}/{C} cameras")
+    return all_masks
+
+
+def fuse_masks_to_3d(
+    masks_per_camera: Dict[int, List[np.ndarray]],
+    depths: np.ndarray,
+    rgbs: np.ndarray,
+    intrs: np.ndarray,
+    extrs: np.ndarray,
+) -> List[Optional[o3d.geometry.PointCloud]]:
+    """
+    Fuse masks from multiple cameras into 3D point clouds.
+    
+    Args:
+        masks_per_camera: Dictionary mapping camera_idx to list of masks
+        depths: Depth maps (C, T, H, W)
+        rgbs: RGB images (C, T, H, W, 3)
+        intrs: Camera intrinsics (C, T, 3, 3)
+        extrs: Camera extrinsics (C, T, 3, 4)
+    
+    Returns:
+        List of fused point clouds for each frame
+    """
+    if not masks_per_camera:
+        return []
+    
+    # Get number of frames from first camera
+    first_cam_idx = list(masks_per_camera.keys())[0]
+    T = len(masks_per_camera[first_cam_idx])
+    
+    print(f"[INFO] Fusing SAM2 masks from {len(masks_per_camera)} cameras across {T} frames...")
+    
+    fused_clouds = []
+    for t_idx in range(T):
+        # Collect point clouds from all cameras for this frame
+        frame_clouds = []
+        
+        for cam_idx, masks in masks_per_camera.items():
+            if t_idx >= len(masks):
+                continue
+            
+            mask = masks[t_idx]
+            if mask is None or not isinstance(mask, np.ndarray) or not mask.any():
+                continue
+            
+            # Get data for this camera and frame
+            depth = depths[cam_idx, t_idx]  # (H, W)
+            rgb = rgbs[cam_idx, t_idx]  # (H, W, 3)
+            K = intrs[cam_idx, t_idx]  # (3, 3)
+            E = extrs[cam_idx, t_idx]  # (3, 4)
+            
+            # Apply mask to depth
+            masked_depth = depth.copy()
+            masked_depth[~mask] = 0.0
+            
+            # Create point cloud from masked depth
+            try:
+                o3d_depth = o3d.geometry.Image(masked_depth.astype(np.float32))
+                o3d_rgb = o3d.geometry.Image(rgb.astype(np.uint8))
+                rgbd_image = o3d.geometry.RGBDImage.create_from_color_and_depth(
+                    o3d_rgb, o3d_depth, depth_scale=1.0, depth_trunc=2.0, convert_rgb_to_intensity=False
+                )
+                
+                H, W = depth.shape
+                intrinsics = o3d.camera.PinholeCameraIntrinsic(W, H, K[0, 0], K[1, 1], K[0, 2], K[1, 2])
+                
+                pcd = o3d.geometry.PointCloud.create_from_rgbd_image(rgbd_image, intrinsics)
+                
+                # Transform to world coordinates
+                E_inv = np.eye(4, dtype=np.float32)
+                E_inv[:3, :3] = E[:3, :3].T
+                E_inv[:3, 3] = -E[:3, :3].T @ E[:3, 3]
+                pcd.transform(E_inv)
+                
+                if pcd.has_points() and len(pcd.points) > 0:
+                    frame_clouds.append(pcd)
+                    
+            except Exception as e:
+                print(f"[WARN] Frame {t_idx}, Camera {cam_idx}: Failed to create point cloud: {e}")
+                continue
+        
+        # Fuse point clouds from all cameras
+        if len(frame_clouds) > 0:
+            fused_pcd = o3d.geometry.PointCloud()
+            for pcd in frame_clouds:
+                fused_pcd += pcd
+            fused_clouds.append(fused_pcd)
+        else:
+            fused_clouds.append(None)
+    
+    print(f"[INFO] Fused {len([c for c in fused_clouds if c is not None])}/{T} frames")
+    return fused_clouds
 
 
 def convert_mask_to_mesh(
@@ -2970,6 +3110,7 @@ def save_and_visualize(
     query_points=None,
     query_colors=None,
     sam2_masks=None,
+    sam2_fused_clouds=None,
 ):
     """Saves the processed data to an NPZ file and generates a Rerun visualization."""
     # Convert to channels-first format for NPZ
@@ -3334,68 +3475,95 @@ def save_and_visualize(
                         ),
                     )
 
-    # Log SAM2 masks if available
+    # Log SAM2 masks and fused 3D point clouds
     if sam2_masks is not None and getattr(args, "visualize_sam2_masks", True):
         fps = args.sync_fps if args.sync_fps > 0 else 30.0
-        print(f"[INFO] Logging {len(sam2_masks)} SAM2 masks to Rerun...")
+        print(f"[INFO] Logging SAM2 masks from {len(sam2_masks)} cameras to Rerun...")
         
-        # Determine which camera was used for tracking (default: 0)
-        cam_idx = 0
+        # Log 2D masks for each camera
+        for cam_idx, masks in sam2_masks.items():
+            cam_id = final_cam_ids[cam_idx]
+            print(f"[INFO] Logging {len(masks)} masks for camera {cam_id}...")
+            
+            for idx, mask in enumerate(masks):
+                if mask is None or not isinstance(mask, np.ndarray) or not mask.any():
+                    continue
+                
+                rr.set_time_seconds("frame", idx / fps)
+                
+                # Log mask as 2D segmentation for this camera
+                rr.log(
+                    f"camera/{cam_id}/sam2_mask",
+                    rr.SegmentationImage(mask.astype(np.uint8)),
+                )
         
-        for idx, mask in enumerate(sam2_masks):
-            if mask is None or not isinstance(mask, np.ndarray):
-                continue
+        # Log fused 3D point clouds
+        if sam2_fused_clouds is not None and getattr(args, "sam2_mask_as_mesh", True):
+            print(f"[INFO] Logging {len(sam2_fused_clouds)} fused SAM2 point clouds to Rerun...")
             
-            rr.set_time_seconds("frame", idx / fps)
-            
-            # Log mask as 2D segmentation
-            rr.log(
-                f"camera/{final_cam_ids[cam_idx]}/sam2_mask",
-                rr.SegmentationImage(mask.astype(np.uint8)),
-            )
-            
-            # Convert mask to 3D mesh if requested
-            if getattr(args, "sam2_mask_as_mesh", True):
-                # Get depth and RGB for this frame and camera
-                depth_frame = depths[cam_idx, idx]  # (H, W)
-                rgb_frame = rgbs[cam_idx, idx]  # (H, W, 3)
-                K = intrs[cam_idx, idx]  # (3, 3)
-                E = extrs[cam_idx, idx]  # (3, 4)
+            for idx, pcd in enumerate(sam2_fused_clouds):
+                if pcd is None or not pcd.has_points():
+                    continue
                 
-                # Create 4x4 inverse extrinsic matrix
-                E_inv = np.eye(4, dtype=np.float32)
-                E_inv[:3, :3] = E[:3, :3].T
-                E_inv[:3, 3] = -E[:3, :3].T @ E[:3, 3]
+                rr.set_time_seconds("frame", idx / fps)
                 
-                # Convert mask to mesh
-                mesh = convert_mask_to_mesh(
-                    mask,
-                    depth_frame,
-                    rgb_frame,
-                    K,
-                    E_inv,
+                # Get points and colors
+                points = np.asarray(pcd.points, dtype=np.float32)
+                if pcd.has_colors():
+                    colors = (np.asarray(pcd.colors) * 255).astype(np.uint8)
+                else:
+                    # Default green color for gripper
+                    colors = np.full((len(points), 3), [0, 255, 128], dtype=np.uint8)
+                
+                # Log as point cloud
+                rr.log(
+                    "sam2/gripper_points",
+                    rr.Points3D(points, colors=colors, radii=0.003),
                 )
                 
-                if mesh is not None:
-                    # Log mesh to Rerun
-                    vertices = np.asarray(mesh.vertices, dtype=np.float32)
-                    triangles = np.asarray(mesh.triangles, dtype=np.uint32)
+                # Optionally create and log mesh from fused point cloud
+                try:
+                    # Estimate normals
+                    pcd_mesh = o3d.geometry.PointCloud(pcd)
+                    pcd_mesh.estimate_normals()
                     
-                    # Get vertex colors if available
-                    if mesh.has_vertex_colors():
-                        vertex_colors = (np.asarray(mesh.vertex_colors) * 255).astype(np.uint8)
-                    else:
-                        # Use a default green color for gripper
-                        vertex_colors = np.full((len(vertices), 3), [0, 255, 128], dtype=np.uint8)
-                    
-                    rr.log(
-                        "sam2/gripper_mesh",
-                        rr.Mesh3D(
-                            vertex_positions=vertices,
-                            triangle_indices=triangles,
-                            vertex_colors=vertex_colors,
-                        ),
+                    # Create mesh using Poisson reconstruction
+                    mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
+                        pcd_mesh, depth=8
                     )
+                    
+                    # Remove low-density vertices
+                    densities_arr = np.asarray(densities)
+                    if densities_arr.size > 0:
+                        density_thresh = np.quantile(densities_arr, 0.1)
+                        vertices_to_remove = densities_arr < density_thresh
+                        mesh.remove_vertices_by_mask(vertices_to_remove)
+                    
+                    if len(mesh.vertices) > 0:
+                        mesh.compute_vertex_normals()
+                        
+                        # Log mesh to Rerun
+                        vertices = np.asarray(mesh.vertices, dtype=np.float32)
+                        triangles = np.asarray(mesh.triangles, dtype=np.uint32)
+                        
+                        # Get vertex colors if available
+                        if mesh.has_vertex_colors():
+                            vertex_colors = (np.asarray(mesh.vertex_colors) * 255).astype(np.uint8)
+                        else:
+                            # Use default green color for gripper
+                            vertex_colors = np.full((len(vertices), 3), [0, 255, 128], dtype=np.uint8)
+                        
+                        rr.log(
+                            "sam2/gripper_mesh",
+                            rr.Mesh3D(
+                                vertex_positions=vertices,
+                                triangle_indices=triangles,
+                                vertex_colors=vertex_colors,
+                            ),
+                        )
+                except Exception as e:
+                    # Mesh creation is optional, continue if it fails
+                    pass
 
     if getattr(args, "export_bbox_video", False):
         try:
@@ -3775,18 +3943,28 @@ def main():
 
     # --- Step 3: SAM2 Tracking (if enabled) ---
     sam2_masks = None
+    sam2_fused_clouds = None
     if getattr(args, "sam2_tracking", False):
-        print("[INFO] Running SAM2 gripper tracking...")
+        print("[INFO] Running SAM2 gripper tracking on all cameras...")
         sam2_masks = track_gripper_with_sam2(
             args,
             rgbs,
             query_points,
             intrs,
             extrs,
-            camera_idx=0,  # Track on first camera
         )
-        if sam2_masks is not None:
-            print(f"[INFO] SAM2 tracking produced {len(sam2_masks)} masks")
+        if sam2_masks is not None and len(sam2_masks) > 0:
+            print(f"[INFO] SAM2 tracking produced masks for {len(sam2_masks)} cameras")
+            
+            # Fuse masks from all cameras into 3D point clouds
+            sam2_fused_clouds = fuse_masks_to_3d(
+                sam2_masks,
+                depths,
+                rgbs,
+                intrs,
+                extrs,
+            )
+            print(f"[INFO] Created {len([c for c in sam2_fused_clouds if c])} fused 3D point clouds")
         else:
             print("[WARN] SAM2 tracking failed or returned no masks")
     
@@ -3830,6 +4008,7 @@ def main():
         query_points,
         query_colors,
         sam2_masks,
+        sam2_fused_clouds,
     )
 
     if not args.no_pointcloud:
