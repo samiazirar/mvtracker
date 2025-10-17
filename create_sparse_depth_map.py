@@ -2088,63 +2088,41 @@ def track_gripper_with_sam2(
         )
     except Exception as e:
         print(f"[ERROR] Failed to initialize SAM2: {e}")
+        import traceback
+        traceback.print_exc()
         return None
     
     # Get RGB frames for the selected camera (T, H, W, 3)
     C, T, H, W, _ = rgbs.shape
     rgb_frames = rgbs[camera_idx]  # (T, H, W, 3)
     
-    # Convert to torch tensors and prepare for SAM2
-    # SAM2 expects RGB frames as uint8
-    video_frames = torch.from_numpy(rgb_frames).to(device)
-    
-    # Initialize inference state with the video frames
-    # SAM2 needs a temporary directory or video path, so we'll create frames in memory
-    print(f"[INFO] Initializing SAM2 inference state with {T} frames ({H}x{W})...")
+    # SAM2 requires saving frames to a directory
+    # Create temporary directory for video frames
+    import tempfile
+    import shutil
+    temp_dir = Path(tempfile.mkdtemp(prefix="sam2_frames_"))
     
     try:
-        # Create a temporary in-memory video structure for SAM2
-        # We need to pass frames directly to avoid disk I/O
+        print(f"[INFO] Saving {T} frames to temporary directory for SAM2...")
+        # Save frames as JPEG images
+        for t_idx in range(T):
+            frame_path = temp_dir / f"{t_idx:05d}.jpg"
+            Image.fromarray(rgb_frames[t_idx]).save(frame_path, quality=95)
+        
+        # Initialize SAM2 inference state with the frame directory
+        print(f"[INFO] Initializing SAM2 inference state with {T} frames ({H}x{W})...")
         inference_state = predictor.init_state(
-            video_path=None,  # We'll manually set the frames
+            video_path=str(temp_dir),
             offload_video_to_cpu=False,
             offload_state_to_cpu=False,
         )
         
-        # Manually set the video frames in the inference state
-        inference_state["images"] = video_frames
-        inference_state["num_frames"] = T
-        inference_state["video_height"] = H
-        inference_state["video_width"] = W
-        
     except Exception as e:
         print(f"[ERROR] Failed to initialize SAM2 inference state: {e}")
-        print("[INFO] Trying alternative initialization method...")
-        
-        # Alternative: Save frames to temporary directory and use that
-        import tempfile
-        import shutil
-        temp_dir = Path(tempfile.mkdtemp())
-        try:
-            # Save frames to temp directory
-            for t_idx in range(T):
-                frame_path = temp_dir / f"frame_{t_idx:05d}.jpg"
-                Image.fromarray(rgb_frames[t_idx]).save(frame_path, quality=95)
-            
-            # Initialize with the temporary directory
-            inference_state = predictor.init_state(
-                video_path=str(temp_dir),
-                offload_video_to_cpu=False,
-                offload_state_to_cpu=False,
-            )
-        except Exception as e2:
-            print(f"[ERROR] Alternative initialization also failed: {e2}")
-            shutil.rmtree(temp_dir, ignore_errors=True)
-            return None
-        finally:
-            # Clean up temp directory
-            if temp_dir.exists():
-                shutil.rmtree(temp_dir, ignore_errors=True)
+        import traceback
+        traceback.print_exc()
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        return None
     
     # Find the initialization frame with valid query points
     init_frame_idx = args.sam2_init_frame
@@ -2162,12 +2140,14 @@ def track_gripper_with_sam2(
                 break
         else:
             print("[ERROR] No frames with query points found. Cannot initialize SAM2.")
+            shutil.rmtree(temp_dir, ignore_errors=True)
             return None
     
     # Project 3D query points to 2D for the initialization frame
     qpts_3d = query_points[init_frame_idx]
     if qpts_3d is None or len(qpts_3d) == 0:
         print(f"[ERROR] No query points at frame {init_frame_idx}")
+        shutil.rmtree(temp_dir, ignore_errors=True)
         return None
     
     # Get camera parameters for this frame
@@ -2192,18 +2172,19 @@ def track_gripper_with_sam2(
     
     if len(qpts_2d_valid) == 0:
         print(f"[ERROR] No valid query points project into frame {init_frame_idx}")
+        shutil.rmtree(temp_dir, ignore_errors=True)
         return None
     
     print(f"[INFO] Initializing SAM2 with {len(qpts_2d_valid)} points at frame {init_frame_idx}")
     
     # Add points to SAM2 predictor
-    # SAM2 expects points as (N, 2) and labels as (N,) where 1=foreground
+    # SAM2 expects points as (N, 2) numpy array and labels as (N,) where 1=foreground
     ann_obj_id = 1  # Object ID for the gripper
-    points = torch.from_numpy(qpts_2d_valid).float().to(device)
-    labels = torch.ones(len(points), dtype=torch.int32, device=device)  # All foreground
+    points = qpts_2d_valid.astype(np.float32)
+    labels = np.ones(len(points), dtype=np.int32)  # All foreground
     
     try:
-        _, out_obj_ids, out_mask_logits = predictor.add_new_points_or_box(
+        _, out_obj_ids, out_mask_logits = predictor.add_new_points(
             inference_state=inference_state,
             frame_idx=init_frame_idx,
             obj_id=ann_obj_id,
@@ -2212,33 +2193,42 @@ def track_gripper_with_sam2(
         )
     except Exception as e:
         print(f"[ERROR] Failed to add points to SAM2: {e}")
+        import traceback
+        traceback.print_exc()
+        shutil.rmtree(temp_dir, ignore_errors=True)
         return None
     
     # Propagate masks through the video
     print(f"[INFO] Propagating SAM2 masks through {T} frames...")
-    masks = []
+    video_segments = {}
     
     try:
-        # Propagate in both directions from init frame
+        # Propagate masks through all frames
         for out_frame_idx, out_obj_ids, out_mask_logits in predictor.propagate_in_video(inference_state):
-            # Get mask for our object
-            if ann_obj_id in out_obj_ids:
-                mask_idx = out_obj_ids.index(ann_obj_id)
-                mask_logits = out_mask_logits[mask_idx]
-                # Convert to binary mask (threshold at 0)
-                mask = (mask_logits > 0.0).cpu().numpy().squeeze()
-                masks.append((out_frame_idx, mask))
-            else:
-                # Object not found in this frame
-                masks.append((out_frame_idx, np.zeros((H, W), dtype=bool)))
-        
-        # Sort by frame index
-        masks.sort(key=lambda x: x[0])
-        masks = [m[1] for m in masks]
+            video_segments[out_frame_idx] = {
+                out_obj_id: (out_mask_logits[i] > 0.0).cpu().numpy()
+                for i, out_obj_id in enumerate(out_obj_ids)
+            }
         
     except Exception as e:
         print(f"[ERROR] Failed to propagate SAM2 masks: {e}")
+        import traceback
+        traceback.print_exc()
+        shutil.rmtree(temp_dir, ignore_errors=True)
         return None
+    finally:
+        # Clean up temporary directory
+        shutil.rmtree(temp_dir, ignore_errors=True)
+    
+    # Extract masks in frame order
+    masks = []
+    for frame_idx in range(T):
+        if frame_idx in video_segments and ann_obj_id in video_segments[frame_idx]:
+            mask = video_segments[frame_idx][ann_obj_id].squeeze()
+            masks.append(mask)
+        else:
+            # No mask for this frame - create empty mask
+            masks.append(np.zeros((H, W), dtype=bool))
     
     if len(masks) != T:
         print(f"[WARN] SAM2 returned {len(masks)} masks, expected {T}. Padding with empty masks.")
