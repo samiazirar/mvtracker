@@ -73,3 +73,7 @@ create_sparse_depth_map_novel.py
 spatialtrackerv2
 spatialtrackerv2/
 spatialtrackerv2/*
+
+3DFlowAction
+3DFlowAction/
+3DFlowAction/*

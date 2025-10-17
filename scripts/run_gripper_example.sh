@@ -22,27 +22,31 @@ RGB_FOLDER="/data/rh20t_api/data/test_data_full_rgb_upscaled_depth/rgb_data/RH20
 # RGB_FOLDER="/data/rh20t_api/data/RH20T/RH20T_cfg3/$TASK_FOLDER"
 #check if using scene high with tcp now means it is swapped for all?
 
-# python create_sparse_depth_map.py \
-#   --task-folder $DEPTH_FOLDER \
-#   --high-res-folder $RGB_FOLDER \
-#   --out-dir ./data/high_res_filtered \
-#   --max-frames 240 \
-#   --frames-for-tracking 1 \
-#   --no-sharpen-edges-with-mesh \
-#   --add-robot \
-#   --gripper-bbox \
-#   --gripper-body-bbox \
-#   --gripper-fingertip-bbox \
-#   --gripper-pad-points \
-#   --export-bbox-video \
-#   --object-points \
-#   --gripper-body-length-m 0.15 \
-#   --gripper-body-height-m 0.15 \
-#   --gripper-body-width-m 0.15 \
-#   --visualize-query-points \
-#   --max-query-points 128 \
-#   --no-color-alignment-check \
-#   "${@}"
+
+python create_sparse_depth_map.py \
+  --task-folder $DEPTH_FOLDER \
+  --high-res-folder $RGB_FOLDER \
+  --out-dir ./data/high_res_filtered \
+  --max-frames 240 \
+  --frames-for-tracking 1 \
+  --no-sharpen-edges-with-mesh \
+  --add-robot \
+  --gripper-bbox \
+  --gripper-body-bbox \
+  --gripper-fingertip-bbox \
+  --gripper-pad-points \
+  --export-bbox-video \
+  --object-points \
+  --gripper-body-length-m 0.15 \
+  --gripper-body-height-m 0.15 \
+  --gripper-body-width-m 0.15 \
+  --visualize-query-points \
+  --max-query-points 128 \
+  --no-color-alignment-check \
+  --sam2-tracking \
+  --visualize-sam2-masks \
+  --sam2-mask-as-mesh \
+  "${@}"
 
 #  --use-tcp \
 # SpatialTrackerV2 works good -> KNN to nearest depth pixel avaiable
@@ -97,3 +101,12 @@ cp -r ./mvtracker_demo.rrd /data/rh20t_api/test_data_generated
 # input to mapanythibg
 # sample_path = "/data/rh20t_api/test_npz/task_0065_user_0010_scene_0009_cfg_0004_processed.npz"
 # sample_path = "data/high_res_filtered/task_0065_user_0010_scene_0009_cfg_0004_processed.npz"
+
+
+# Install SAM2: cd sam2 && pip install -e .
+# Download checkpoint: wget https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_large.pt -P sam2/checkpoints/
+# Run with --sam2-tracking flag
+
+# mkdir -p /tmp/sam2_runner
+# cd /tmp/sam2_runner
+# PYTHONPATH="/workspace:/workspace/sam2/sam2" python -m runpy /workspace/create_sparse_depth_map.py …
