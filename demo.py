@@ -1045,7 +1045,7 @@ def main():
         gt_visibilities_any_view=None,
         query_points_3d=query_points[None],
         pred_trajectories=pred_tracks,
-        pred_visibilities=pred_vis,#change here maybe for Cotracker lul
+        pred_visibilities=pred_vis,#change here maybe for Cotracker lul -> it seems they interpolating for cotracker between the point and 0 instead of not tracking that point..
         per_track_results=None,
         radii_scale=1.0,
         fps=12,
@@ -1057,7 +1057,6 @@ def main():
         method_id=None,
         color_per_method_id=None,
         memory_lightweight_logging=args.lightweight,
-        log_line_strips=False
     )
     if args.rerun == "save":
         rr.save(args.rrd)
