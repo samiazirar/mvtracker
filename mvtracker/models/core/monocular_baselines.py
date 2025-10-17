@@ -216,6 +216,7 @@ class SpaTrackerV2Wrapper(nn.Module):
         assert trajectories_3d.shape == (T, N, 3)
         assert visibilities.shape == (T, N)
 
+
         return {"traj_2d": None, "traj_3d_worldspace": trajectories_3d, "vis": visibilities}
 
 
@@ -441,6 +442,7 @@ class TAPIP3DWrapper(nn.Module):
     LIBRARY_PATH=$CONDA_PREFIX/lib:$LIBRARY_PATH python setup.py install
     cd ../..
     """
+    #TODO: add all the trackers
 
     def __init__(
             self,
