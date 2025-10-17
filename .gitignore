@@ -69,3 +69,7 @@ sam2/
 sam2/*
 
 create_sparse_depth_map_novel.py
+
+spatialtrackerv2
+spatialtrackerv2/
+spatialtrackerv2/*
