@@ -1171,7 +1171,7 @@ def _export_gripper_bbox_videos(
     video_dir = Path(args.out_dir) / "bbox_videos"
     video_dir.mkdir(parents=True, exist_ok=True)
 
-    fps = getattr(args, "bbox_video_fps", 30.0)
+    fps = getattr(args, "bbox_video_fps", 12.0)
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     edges = [(0, 1), (1, 2), (2, 3), (3, 0), (4, 5), (5, 6), (6, 7), (7, 4), (0, 4), (1, 5), (2, 6), (3, 7)]
     color = (0, 165, 255)
@@ -2788,7 +2788,7 @@ def save_and_visualize(
         
         # Log query points (sensor points inside gripper bbox) if requested
         if getattr(args, "visualize_query_points", False) and query_points is not None and len(query_points) > 0:
-            fps = 30.0
+            fps = 12.0
             valid_query_count = sum(1 for qpts in query_points if qpts is not None and qpts.size > 0)
             if valid_query_count > 0:
                 print(f"[INFO] Logging {valid_query_count} query point clouds to Rerun (magenta)...")
@@ -2807,7 +2807,7 @@ def save_and_visualize(
         if robot_gripper_boxes:
             valid_box_count = sum(1 for box in robot_gripper_boxes if box)
             if valid_box_count > 0:
-                fps = 30.0
+                fps = 12.0
                 print(f"[INFO] Logging {valid_box_count} gripper bounding boxes to Rerun...")
                 for idx, box in enumerate(robot_gripper_boxes):
                     if not box:
@@ -2872,7 +2872,7 @@ def save_and_visualize(
         if robot_gripper_body_boxes:
             valid_box_count = sum(1 for box in robot_gripper_body_boxes if box)
             if valid_box_count > 0:
-                fps = 30.0
+                fps = 12.0
                 print(f"[INFO] Logging {valid_box_count} gripper BODY bounding boxes to Rerun...")
                 for idx, box in enumerate(robot_gripper_body_boxes):
                     if not box:
@@ -2937,7 +2937,7 @@ def save_and_visualize(
         if robot_gripper_fingertip_boxes:
             valid_box_count = sum(1 for box in robot_gripper_fingertip_boxes if box)
             if valid_box_count > 0:
-                fps = 30.0
+                fps = 12.0
                 print(f"[INFO] Logging {valid_box_count} gripper FINGERTIP bounding boxes to Rerun...")
                 for idx, box in enumerate(robot_gripper_fingertip_boxes):
                     if not box:
@@ -2999,7 +2999,7 @@ def save_and_visualize(
                             ),
                         )
         if robot_gripper_pad_points:
-            fps = 30.0
+            fps = 12.0
             valid_pts = any(pts is not None and len(pts) > 0 for pts in robot_gripper_pad_points)
             if valid_pts:
                 count = sum(1 for pts in robot_gripper_pad_points if pts is not None and len(pts) > 0)
