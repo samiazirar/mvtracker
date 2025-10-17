@@ -20,4 +20,6 @@ add more points to the object modified and make it retain if on it gripper for c
 TODO: Apply a mask on the gripper 
 Force the tracked points to be inside the gripper
 Do the same for the objects
-SOmehow make objects remain consisten
+SOmehow make objects remain consistent
+FIX COTRACKER AND MVTRACKER
+-> maybe use the dense low resution stuff first

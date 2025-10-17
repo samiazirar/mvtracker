@@ -3632,13 +3632,13 @@ def main():
     parser.add_argument(
         "--visualize-sam2-masks",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=False,
         help="Visualize SAM2 masks in Rerun.",
     )
     parser.add_argument(
         "--sam2-mask-as-mesh",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=False,
         help="Convert SAM2 masks to 3D meshes for Rerun visualization.",
     )
     args = parser.parse_args()
