@@ -74,21 +74,25 @@ export MAX_JOBS=$(nproc)
 pip install -v --no-build-isolation \
   "git+https://github.com/ethz-vlg/pointcept.git@2082918#subdirectory=libs/pointops"
 
-#pip install trimesh
+pip install trimesh
 
-if [ ! -d "../spatialtrackerv2" ]; then
+if [ ! -d "spatialtrackerv2" ]; then
     echo "Cloning SpaTrackerV2 repository..."
-    git clone https://github.com/henry123-boy/SpaTrackerV2.git ../spatialtrackerv2
+    git clone https://github.com/henry123-boy/SpaTrackerV2.git spatialtrackerv2
+    cd spatialtrackerv2
+    git checkout 1673230
+    #rname the depth_edge with depth_map_edge
+    sed -i -E 's/(^|[^_a-zA-Z0-9])depth_edge([^_a-zA-Z0-9]|$)/\1depth_map_edge\2/g' spatialtrackerv2/models/SpaTrackV2/models/SpaTrack.py
+    git submodule update --init --recursive
 fi
-cd ../spatialtrackerv2
-git checkout 1673230
-git submodule update --init --recursive
 pip install pycolmap==3.11.1
 pip install git+https://github.com/EasternJournalist/utils3d.git#egg=utils3d
 pip install pyceres==2.4
-cd ..
+pip install jaxtyping
+pip install decord
 # Update the threshold for weighted_procrustes_torch from 1e-3 to 5e-3
 sed -i 's/(torch.det(R) - 1).abs().max() < 1e-3/(torch.det(R) - 1).abs().max() < 5e-3/' ./models/SpaTrackV2/models/tracker3D/spatrack_modules/utils.py
 
 # Verify the change: this should print a line with 5e-3
 cat ./models/SpaTrackV2/models/tracker3D/spatrack_modules/utils.py | grep "(torch.det(R) - 1).abs().max()"
+cd ..
