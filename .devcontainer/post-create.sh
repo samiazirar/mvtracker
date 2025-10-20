@@ -40,8 +40,10 @@ pip install --upgrade safetensors
 pip install -r rh20t_api/requirements.txt
 
 # Install SAM2 in editable mode (clone if missing)
-SAM2_DIR="/workspace/sam2"
+SAM2_DIR="/workspace/third_party/sam2"
+
 if [ ! -d "$SAM2_DIR" ]; then
+    mkdir -p /workspace/third_party
     echo "Cloning SAM2 repository..."
     git clone https://github.com/facebookresearch/sam2.git "$SAM2_DIR"
 else
