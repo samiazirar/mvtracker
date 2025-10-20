@@ -27,7 +27,7 @@ python create_sparse_depth_map.py \
   --task-folder $DEPTH_FOLDER \
   --high-res-folder $RGB_FOLDER \
   --out-dir ./data/high_res_filtered \
-  --max-frames 240 \
+  --max-frames 100 \
   --frames-for-tracking 1 \
   --no-sharpen-edges-with-mesh \
   --add-robot \
@@ -44,6 +44,8 @@ python create_sparse_depth_map.py \
   --max-query-points 128 \
   --no-color-alignment-check \
   --sam2-tracking \
+  --sam2-checkpoint third_party/sam2/sam2/checkpoints/sam2.1_hiera_large.pt \
+  --sam2-config configs/sam2.1/sam2.1_hiera_l.yaml \
   --visualize-sam2-masks \
   --sam2-mask-as-mesh \
   "${@}"

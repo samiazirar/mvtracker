@@ -3782,7 +3782,7 @@ def main():
     parser.add_argument(
         "--sam2-checkpoint",
         type=Path,
-        default=Path("sam2/checkpoints/sam2.1_hiera_large.pt"),
+        default=Path("third_party/sam2/sam2/checkpoints/sam2.1_hiera_large.pt"),
         help="Path to SAM2 model checkpoint.",
     )
     parser.add_argument(
