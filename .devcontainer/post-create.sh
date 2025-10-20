@@ -50,6 +50,17 @@ else
     echo "SAM2 repository already exists, skipping clone."
 fi
 
+
+3DFLOWACTION_DIR ="/workspace/third_party/3DFlowAction"
+
+if [ ! -d "$3DFLOWACTION_DIR" ]; then
+    mkdir -p /workspace/third_party
+    echo "Cloning 3D-FlowAction repository..."
+    git clone https://github.com/Hoyyyaard/3DFlowAction.git "$3DFLOWACTION_DIR"
+else
+    echo "3D-FlowAction repository already exists, skipping clone."
+fi
+
 echo "Installing SAM2..."
 pip install -e "$SAM2_DIR"
 # Configure git
