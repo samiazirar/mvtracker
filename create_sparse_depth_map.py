@@ -3639,6 +3639,12 @@ def main():
     parser.add_argument("--sync-min-density", type=float, default=0.6, help="Minimum density ratio required per camera during synchronization.")
     parser.add_argument("--sync-max-drift", type=float, default=0.05, help="Maximum tolerated fractional FPS shortfall before warning.")
     parser.add_argument("--sync-tolerance-ms", type=float, default=50.0, help="Maximum timestamp deviation (ms) when matching frames; defaults to half frame period.")
+    parser.add_argument(
+        "--dataset-type",
+        choices=["robot", "human"],
+        default="robot",
+        help="Quick selector that disables robot-only options when processing human demonstrations.",
+    )
     parser.add_argument("--add-robot", action="store_true", help="Include robot arm model in Rerun visualization.")
     parser.add_argument(
         "--gripper-bbox",
@@ -3811,7 +3817,30 @@ def main():
     )
     args = parser.parse_args()
 
-    if getattr(args, "export_bbox_video", False) and not getattr(args, "gripper_bbox", False):
+    if args.dataset_type == "human":
+        robot_toggles = [
+            "add_robot",
+            "gripper_bbox",
+            "gripper_body_bbox",
+            "gripper_fingertip_bbox",
+            "gripper_pad_points",
+            "export_bbox_video",
+            "object_points",
+            "tcp_points",
+            "visualize_query_points",
+            "exclude_inside_gripper",
+            "exclude_by_cluster",
+        ]
+        disabled_flags = [flag for flag in robot_toggles if getattr(args, flag, False)]
+        for flag in robot_toggles:
+            setattr(args, flag, False)
+        if disabled_flags:
+            joined = ", ".join(sorted(disabled_flags))
+            print(f"[INFO] Human dataset selected; disabling robot-only options: {joined}")
+        else:
+            print("[INFO] Human dataset selected; robot overlays are disabled.")
+
+    if args.dataset_type != "human" and getattr(args, "export_bbox_video", False) and not getattr(args, "gripper_bbox", False):
         print("[INFO] --export-bbox-video requires bounding boxes; enabling --gripper-bbox.")
         args.gripper_bbox = True
 
