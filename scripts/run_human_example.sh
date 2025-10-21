@@ -21,16 +21,6 @@ mkdir -p "${OUT_DIR}"
 # Human recordings reuse the calibration bundle shipped with the RGB archive.
 DEPTH_ROOT="$(dirname "$DEPTH_FOLDER")"
 RGB_ROOT_PARENT="$(dirname "$RGB_FOLDER")"
-CALIB_DST="${DEPTH_ROOT}/calib"
-CALIB_SRC="${RGB_ROOT_PARENT}/calib"
-if [[ ! -e "${CALIB_DST}" ]]; then
-  if [[ -d "${CALIB_SRC}" ]]; then
-    echo "Linking calibration data: ${CALIB_SRC} -> ${CALIB_DST}"
-    ln -s "${CALIB_SRC}" "${CALIB_DST}"
-  else
-    echo "Warning: calibration source missing at ${CALIB_SRC}"
-  fi
-fi
 
 python create_sparse_depth_map.py \
   --task-folder "$DEPTH_FOLDER" \
