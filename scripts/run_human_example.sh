@@ -5,58 +5,41 @@
 
 set -euo pipefail
 
-# Default sample (human) task identifiers can be overridden by exporting TASK_FOLDER.
-: "${TASK_FOLDER:=task_0092_user_0010_scene_0004_cfg_0003_human}"
+# Human example from configuration 3 (default)
+TASK_FOLDER="task_0092_user_0010_scene_0004_cfg_0003_human"
+DEPTH_FOLDER="/data/rh20t_api/data/low_res_data/RH20T_cfg3/$TASK_FOLDER"
+RGB_FOLDER="/data/rh20t_api/data/RH20T/RH20T_cfg3/$TASK_FOLDER"
 
-# Low-resolution depth source (typically RH20T_cfg3 for human data)
-: "${DEPTH_ROOT:=/data/rh20t_api/data/low_res_data/RH20T_cfg3}"
+# Uncomment to try configuration 4 style data
+# TASK_FOLDER="task_0065_user_0010_scene_0009_cfg_0004_human"
+# DEPTH_FOLDER="/data/rh20t_api/data/test_data_full_rgb_upscaled_depth/uncompressed_low_res_data/$TASK_FOLDER"
+# RGB_FOLDER="/data/rh20t_api/data/test_data_full_rgb_upscaled_depth/rgb_data/RH20T_cfg4/$TASK_FOLDER"
 
-# High-resolution RGB source
-: "${RGB_ROOT:=/data/rh20t_api/data/RH20T/RH20T_cfg3}"
-
-DEPTH_FOLDER="${DEPTH_ROOT}/${TASK_FOLDER}"
-RGB_FOLDER="${RGB_ROOT}/${TASK_FOLDER}"
-
-if [[ ! -d "${DEPTH_FOLDER}" ]]; then
-  echo "Depth folder not found: ${DEPTH_FOLDER}" >&2
-  exit 1
-fi
-
-if [[ ! -d "${RGB_FOLDER}" ]]; then
-  echo "RGB folder not found: ${RGB_FOLDER}" >&2
-  exit 1
-fi
-
-OUT_DIR="./data/human_processed"
+OUT_DIR="./data/human_high_res_filtered"
 mkdir -p "${OUT_DIR}"
 
-echo "Processing human task: ${TASK_FOLDER}"
 python create_sparse_depth_map.py \
-  --task-folder "${DEPTH_FOLDER}" \
-  --high-res-folder "${RGB_FOLDER}" \
-  --out-dir "${OUT_DIR}" \
+  --task-folder "$DEPTH_FOLDER" \
+  --high-res-folder "$RGB_FOLDER" \
+  --out-dir "$OUT_DIR" \
   --max-frames 60 \
   --frames-for-tracking 1 \
   --no-sharpen-edges-with-mesh \
+  --no-color-alignment-check \
   "$@"
 
-RRD_PATH="${OUT_DIR}/${TASK_FOLDER}_reprojected.rrd"
-NPZ_PATH="${OUT_DIR}/${TASK_FOLDER}_processed.npz"
+echo "Copying data to /data/rh20t_api"
+cp "$OUT_DIR/${TASK_FOLDER}_reprojected.rrd" /data/rh20t_api
+cp -r ./data /data/rh20t_api/test_data_generated_human
 
-STAGING_ROOT="/data/rh20t_api/test_data_generated_human"
-mkdir -p "${STAGING_ROOT}"
+SAMPLE_PATH="$OUT_DIR/${TASK_FOLDER}_processed.npz"
+echo "Running MVTracker demo"
+python demo.py --temporal_stride 1 --spatial_downsample 1 --depth_estimator gt --depth_cache_dir ./depth_cache --rerun save --sample-path "$SAMPLE_PATH"
+# python demo.py --temporal_stride 1 --spatial_downsample 1 --depth_estimator gt --depth_cache_dir ./depth_cache --rerun save --sample-path "$SAMPLE_PATH" --tracker spatialtrackerv2
+# python demo.py --temporal_stride 1 --spatial_downsample 1 --depth_estimator gt --depth_cache_dir ./depth_cache --rerun save --sample-path "$SAMPLE_PATH" --tracker cotracker3_offline
 
-if [[ -f "${RRD_PATH}" ]]; then
-  echo "Copying RRD to ${STAGING_ROOT}"
-  cp "${RRD_PATH}" "${STAGING_ROOT}/"
-else
-  echo "RRD file not found (skipping copy): ${RRD_PATH}"
-fi
+echo "Copying MVTracker demo results to /data/rh20t_api"
+cp -r ./mvtracker_demo.rrd /data/rh20t_api/test_data_generated_human
 
-if [[ -f "${NPZ_PATH}" ]]; then
-  echo "Sample NPZ available at ${NPZ_PATH}"
-else
-  echo "NPZ file not found: ${NPZ_PATH}" >&2
-fi
-
-echo "Human processing pipeline finished."
+# Human dataset references
+# sample_path = "/data/rh20t_api/data/RH20T/packed_npz/task_0092_user_0010_scene_0004_cfg_0003_human.npz"
