@@ -153,8 +153,8 @@ apt-get install -y --no-install-recommends \
 rm -rf /var/lib/apt/lists/*
 export PYOPENGL_PLATFORM=osmesa
 
-pip install mmpose mmengine mmdet
-pip install "mmcv>=2.0.0rc4,<=3.0.0"
+# pip install mmpose mmengine mmdet
+# pip install "mmcv>=2.0.0rc4,<=3.0.0"
 
 echo "deactivating HaMeR virtual environment..."
 deactivate

@@ -23,10 +23,10 @@ mkdir -p "${OUT_DIR}"
 # Human recordings reuse the calibration bundle shipped with the RGB archive.
 DEPTH_ROOT="$(dirname "$DEPTH_FOLDER")"
 RGB_ROOT_PARENT="$(dirname "$RGB_FOLDER")"
-
+#TODO: intrinsics?
 python create_sparse_depth_map.py \
-  --task-folder "$RGB_FOLDER" \
-  --high-res-folder "$RGB_FOLDER" \
+  --task-folder "$DEPTH_FOLDER" \
+  --high-res-folder "$DEPTH_FOLDER" \
   --out-dir "$OUT_DIR" \
   --dataset-type human \
   --max-frames 240 \
