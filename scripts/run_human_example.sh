@@ -15,6 +15,8 @@ RGB_FOLDER="/data/rh20t_api/data/RH20T/RH20T_cfg3/$TASK_FOLDER"
 # DEPTH_FOLDER="/data/rh20t_api/data/test_data_full_rgb_upscaled_depth/uncompressed_low_res_data/$TASK_FOLDER"
 # RGB_FOLDER="/data/rh20t_api/data/test_data_full_rgb_upscaled_depth/rgb_data/RH20T_cfg4/$TASK_FOLDER"
 
+#seems for humans both depth data is bad
+
 OUT_DIR="./data/human_high_res_filtered"
 mkdir -p "${OUT_DIR}"
 
@@ -23,14 +25,16 @@ DEPTH_ROOT="$(dirname "$DEPTH_FOLDER")"
 RGB_ROOT_PARENT="$(dirname "$RGB_FOLDER")"
 
 python create_sparse_depth_map.py \
-  --task-folder "$DEPTH_FOLDER" \
+  --task-folder "$RGB_FOLDER" \
   --high-res-folder "$RGB_FOLDER" \
   --out-dir "$OUT_DIR" \
   --dataset-type human \
-  --max-frames 60 \
+  --max-frames 240 \
   --frames-for-tracking 1 \
   --no-sharpen-edges-with-mesh \
   --no-color-alignment-check \
+  --pc-clean-radius 0.01 \
+  --pc-clean-min-points 40 \
   "$@"
 
 echo "Copying data to /data/rh20t_api"
@@ -39,7 +43,9 @@ cp -r ./data /data/rh20t_api/test_data_generated_human
 
 SAMPLE_PATH="$OUT_DIR/${TASK_FOLDER}_processed.npz"
 echo "Running MVTracker demo"
-python demo.py --temporal_stride 1 --spatial_downsample 1 --depth_estimator gt --depth_cache_dir ./depth_cache --rerun save --sample-path "$SAMPLE_PATH"
+python demo.py --temporal_stride 1 --spatial_downsample 1 --depth_estimator duster --depth_cache_dir ./depth_cache --rerun save --sample-path "$SAMPLE_PATH"
+
+# python demo.py --temporal_stride 1 --spatial_downsample 1 --depth_estimator gt --depth_cache_dir ./depth_cache --rerun save --sample-path "$SAMPLE_PATH"
 # python demo.py --temporal_stride 1 --spatial_downsample 1 --depth_estimator gt --depth_cache_dir ./depth_cache --rerun save --sample-path "$SAMPLE_PATH" --tracker spatialtrackerv2
 # python demo.py --temporal_stride 1 --spatial_downsample 1 --depth_estimator gt --depth_cache_dir ./depth_cache --rerun save --sample-path "$SAMPLE_PATH" --tracker cotracker3_offline
 
