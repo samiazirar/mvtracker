@@ -1572,6 +1572,89 @@ def _robot_model_to_pointcloud(
     return robot_pcd
 
 
+def get_hand_tracked_points(num_frames: int, num_points: int = 10) -> List[Optional[np.ndarray]]:
+    """
+    Generate dummy hand tracking points for human datasets.
+    Returns a simple set of points in world coordinates that can be tracked.
+    
+    Args:
+        num_frames: Number of frames to generate points for
+        num_points: Number of tracking points per frame
+        
+    Returns:
+        List of numpy arrays, one per frame, each containing N points in 3D world coordinates
+    """
+    # Create dummy points in front of cameras (roughly in the workspace)
+    # These are simple test points that move slightly over time
+    dummy_points = []
+    for t in range(num_frames):
+        # Create points in a small region (e.g., around origin with slight motion)
+        base_points = np.random.randn(num_points, 3).astype(np.float32) * 0.05  # 5cm spread
+        # Add a small temporal offset to simulate hand motion
+        time_offset = np.array([0, 0, t * 0.01], dtype=np.float32)  # Move 1cm per frame in Z
+        points = base_points + time_offset
+        dummy_points.append(points)
+    
+    return dummy_points
+
+
+def fix_human_metadata_calib(task_path: Path) -> None:
+    """
+    Fix calibration timestamp in metadata for human datasets.
+    Human dataset metadata often references non-existent calibration timestamps.
+    This function finds a valid calibration from the parent folder and patches the metadata.
+    
+    Args:
+        task_path: Path to the task folder
+    """
+    import json
+    
+    metadata_path = task_path / "metadata.json"
+    if not metadata_path.exists():
+        return
+    
+    # Read current metadata
+    with open(metadata_path, 'r') as f:
+        metadata = json.load(f)
+    
+    # Check if calibration exists
+    calib_ts = metadata.get("calib", -1)
+    if calib_ts == -1:
+        return
+    
+    # Look for calib folder in parent
+    calib_root = task_path.parent / "calib"
+    if not calib_root.exists():
+        return
+    
+    # Check if the specified calibration exists
+    calib_path = calib_root / str(calib_ts)
+    if calib_path.exists():
+        return  # Calibration is valid, no fix needed
+    
+    # Find the most recent valid calibration
+    available_calibs = sorted([int(d.name) for d in calib_root.iterdir() if d.is_dir() and d.name.isdigit()])
+    if not available_calibs:
+        print(f"[WARN] No valid calibrations found in {calib_root}")
+        return
+    
+    # Use the most recent calibration that's before or around the task time
+    task_start = metadata.get("start_time", 0)
+    # Find closest calibration that's before the task start time
+    valid_calib = available_calibs[-1]  # Default to most recent
+    for calib in reversed(available_calibs):
+        if calib <= task_start:
+            valid_calib = calib
+            break
+    
+    print(f"[INFO] Fixing metadata: changing calib from {calib_ts} to {valid_calib}")
+    metadata["calib"] = valid_calib
+    
+    # Write back the fixed metadata
+    with open(metadata_path, 'w') as f:
+        json.dump(metadata, f)
+
+
 #TODO: add jounts
 def load_scene_data(task_path: Path, robot_configs: List) -> Tuple[Optional[RH20TScene], List[str], List[Path]]:
     """
@@ -3852,7 +3935,24 @@ def main():
     robot_configs = load_conf(str(args.config))
     
     # --- Step 1: Load and Synchronize Data ---
-    scene_low, cam_ids_low, cam_dirs_low = load_scene_data(args.task_folder, robot_configs)
+    # For human datasets with high-res folder, load calibration from high-res folder
+    # because low-res (depth) folder may not contain calibration data
+    if args.dataset_type == "human" and args.high_res_folder:
+        print("[INFO] Human dataset: loading calibration from high-res folder")
+        # Fix metadata calibration timestamp if needed
+        fix_human_metadata_calib(args.high_res_folder)
+        scene_low, cam_ids_low, cam_dirs_low = load_scene_data(args.high_res_folder, robot_configs)
+        # Override cam_dirs_low to point to the actual depth data location
+        if scene_low and cam_ids_low:
+            cam_dirs_low = [args.task_folder / f"cam_{cid}" for cid in cam_ids_low]
+            # Filter to only directories that actually exist
+            valid_pairs = [(cid, cdir) for cid, cdir in zip(cam_ids_low, cam_dirs_low) if cdir.is_dir()]
+            cam_ids_low = [cid for cid, _ in valid_pairs]
+            cam_dirs_low = [cdir for _, cdir in valid_pairs]
+            print(f"[INFO] Found {len(cam_ids_low)} cameras with depth data in {args.task_folder.name}")
+    else:
+        scene_low, cam_ids_low, cam_dirs_low = load_scene_data(args.task_folder, robot_configs)
+    
     if not scene_low or not cam_ids_low: return
 
     scene_high, cam_ids_high, cam_dirs_high = (load_scene_data(args.high_res_folder, robot_configs) if args.high_res_folder else (None, None, None))
@@ -3969,6 +4069,14 @@ def main():
         per_cam_low_sel,
         per_cam_high_sel,
     )
+
+    # --- Generate dummy tracking points for human datasets ---
+    if args.dataset_type == "human":
+        num_frames = len(timestamps)
+        query_points = get_hand_tracked_points(num_frames, num_points=20)
+        # Generate dummy colors (light blue to represent hands)
+        query_colors = [np.tile([0.5, 0.7, 1.0], (20, 1)).astype(np.float32) for _ in range(num_frames)]
+        print(f"[INFO] Generated {len(query_points)} frames of dummy hand tracking points")
 
     # --- Step 3: SAM2 Tracking (if enabled) ---
     sam2_masks = None
