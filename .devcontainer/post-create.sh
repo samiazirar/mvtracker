@@ -136,10 +136,11 @@ cd $HAMER_DIR
 source .hamer/bin/activate
 unset TORCH_CUDA_ARCH_LIST
 export TORCH_CUDA_ARCH_LIST="8.0 8.6 8.9 9.0"
-pip install 'detectron2@git+https://github.com/facebookresearch/detectron2'
 echo "Setting up HaMeR environment..."
 pip install torch torchvision torchaudio
-pip install .[all]
+pip install --no-build-isolation -e .
+pip install --no-build-isolation -e .[all]
+pip install 'detectron2@git+https://github.com/facebookresearch/detectron2'
 pip install -v -e third-party/ViTPose
 
 #here stuff neded to run w/o a display
