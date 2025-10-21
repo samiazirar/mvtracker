@@ -3,7 +3,12 @@
 # ↑ OLD base image kept for reference (commented)
 
 # NEW: move to CUDA 12.8 devel image to match cu128 wheels/toolkit cleanly
-FROM nvidia/cuda:12.8.0-devel-ubuntu22.04
+# FROM nvidia/cuda:12.8.0-devel-ubuntu22.04
+# only duing outage
+
+# Prefer NGC (nvcr.io) during Docker Hub outages; override via build arg if needed
+ARG BASE_IMAGE=nvcr.io/nvidia/cuda:12.8.1-devel-ubuntu22.04
+FROM ${BASE_IMAGE}
 
 ENV DEBIAN_FRONTEND=noninteractive
 

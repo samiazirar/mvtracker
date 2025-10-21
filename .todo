@@ -1,5 +1,14 @@
+
+- [ ] Finally settle for a good 2D/3D flow
+- [ ] enable hand tracking
+- [ ] Finalize large scale code to train somerthing like flow..
+
+
+
+
 - [x] Update the date for lab course
 -  [ ] for grasping - data generation for side grasps? 
+
 -  [x] Check if someone has the same camera as we and check then Intel Realsense d435i and d405
 - add the robot and work with low res data
 - all untouched by robot remains static for better colorization and grer to

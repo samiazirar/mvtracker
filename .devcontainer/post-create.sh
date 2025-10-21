@@ -51,15 +51,16 @@ else
 fi
 
 
-3DFLOWACTION_DIR ="/workspace/third_party/3DFlowAction"
+FLOWACTION_DIR="/workspace/third_party/3DFlowAction"
 
-if [ ! -d "$3DFLOWACTION_DIR" ]; then
+if [ ! -d "$FLOWACTION_DIR" ]; then
     mkdir -p /workspace/third_party
     echo "Cloning 3D-FlowAction repository..."
-    git clone https://github.com/Hoyyyaard/3DFlowAction.git "$3DFLOWACTION_DIR"
+    git clone https://github.com/Hoyyyaard/3DFlowAction.git "$FLOWACTION_DIR"
 else
     echo "3D-FlowAction repository already exists, skipping clone."
 fi
+
 
 echo "Installing SAM2..."
 pip install -e "$SAM2_DIR"
@@ -95,7 +96,7 @@ if [ ! -d "spatialtrackerv2" ]; then
     cd spatialtrackerv2
     git checkout 1673230
     git submodule update --init --recursive
-
+    cd ..
     #rname the depth_edge with depth_map_edge, led to issues 
     # sed -i -E 's/(^|[^_a-zA-Z0-9])depth_edge([^_a-zA-Z0-9]|$)/\1depth_map_edge\2/g' ./models/SpaTrackV2/models/SpaTrack.py
 fi
@@ -107,8 +108,52 @@ pip install pyceres==2.4
 pip install jaxtyping
 pip install decord
 # Update the threshold for weighted_procrustes_torch from 1e-3 to 5e-3
+cd spatialtrackerv2
 sed -i 's/(torch.det(R) - 1).abs().max() < 1e-3/(torch.det(R) - 1).abs().max() < 5e-3/' ./models/SpaTrackV2/models/tracker3D/spatrack_modules/utils.py
 
 # Verify the change: this should print a line with 5e-3
 cat ./models/SpaTrackV2/models/tracker3D/spatrack_modules/utils.py | grep "(torch.det(R) - 1).abs().max()"
 cd ..
+
+echo "Installing HaMeR Hand tracking..."
+HAMER_DIR="/workspace/third_party/hamer"
+if [ ! -d "$HAMER_DIR" ]; then
+    mkdir -p /workspace/third_party
+    echo "Cloning HaMER repository..."
+    git clone --recursive https://github.com/geopavlakos/hamer.git
+    cd $HAMER_DIR
+    bash fetch_demo_data.sh
+    python3.10 -m venv .hamer
+    cd ../..
+else
+    echo "HaMER repository already exists, skipping clone."
+fi
+
+# pip install --upgrade --no-cache-dir --force-reinstall xtcocotools
+#pip install --upgrade --no-cache-dir --force-reinstall scikit-image
+
+cd $HAMER_DIR
+source .hamer/bin/activate
+unset TORCH_CUDA_ARCH_LIST
+export TORCH_CUDA_ARCH_LIST="8.0 8.6 8.9 9.0"
+pip install 'detectron2@git+https://github.com/facebookresearch/detectron2'
+echo "Setting up HaMeR environment..."
+pip install torch torchvision torchaudio
+pip install .[all]
+pip install -v -e third-party/ViTPose
+
+#here stuff neded to run w/o a display
+echo "Installing headless OpenGL (OSMesa + Xvfb)..."
+apt-get update
+apt-get install -y --no-install-recommends \
+    libosmesa6 libosmesa6-dev mesa-common-dev libgl-dev \
+    libegl1 libgles2 mesa-utils mesa-utils-bin \
+    xvfb xserver-common libunwind8 libfontenc1 libxfont2 xauth x11-xkb-utils
+rm -rf /var/lib/apt/lists/*
+export PYOPENGL_PLATFORM=osmesa
+
+echo "deactivating HaMeR virtual environment..."
+deactivate
+cd ../..
+
+echo "Finished with HaMeR setup."

@@ -22,12 +22,12 @@ RGB_FOLDER="/data/rh20t_api/data/test_data_full_rgb_upscaled_depth/rgb_data/RH20
 # RGB_FOLDER="/data/rh20t_api/data/RH20T/RH20T_cfg3/$TASK_FOLDER"
 #check if using scene high with tcp now means it is swapped for all?
 
-
+#run low res both so dense low res
 python create_sparse_depth_map.py \
   --task-folder $DEPTH_FOLDER \
-  --high-res-folder $RGB_FOLDER \
+  --high-res-folder $DEPTH_FOLDER \
   --out-dir ./data/high_res_filtered \
-  --max-frames 100 \
+  --max-frames 60 \
   --frames-for-tracking 1 \
   --no-sharpen-edges-with-mesh \
   --add-robot \
@@ -43,12 +43,36 @@ python create_sparse_depth_map.py \
   --visualize-query-points \
   --max-query-points 128 \
   --no-color-alignment-check \
-  --sam2-tracking \
-  --sam2-checkpoint third_party/sam2/sam2/checkpoints/sam2.1_hiera_large.pt \
-  --sam2-config configs/sam2.1/sam2.1_hiera_l.yaml \
-  --visualize-sam2-masks \
-  --sam2-mask-as-mesh \
   "${@}"
+
+
+# python create_sparse_depth_map.py \
+#   --task-folder $DEPTH_FOLDER \
+#   --high-res-folder $RGB_FOLDER \
+#   --out-dir ./data/high_res_filtered \
+#   --max-frames 240 \
+#   --frames-for-tracking 1 \
+#   --no-sharpen-edges-with-mesh \
+#   --add-robot \
+#   --gripper-bbox \
+#   --gripper-body-bbox \
+#   --gripper-fingertip-bbox \
+#   --gripper-pad-points \
+#   --export-bbox-video \
+#   --object-points \
+#   --gripper-body-length-m 0.15 \
+#   --gripper-body-height-m 0.15 \
+#   --gripper-body-width-m 0.15 \
+#   --visualize-query-points \
+#   --max-query-points 128 \
+#   --no-color-alignment-check \
+#   --sam2-tracking \
+#   --sam2-checkpoint third_party/sam2/sam2/checkpoints/sam2.1_hiera_large.pt \
+#   --sam2-config configs/sam2.1/sam2.1_hiera_l.yaml \
+#   --visualize-sam2-masks \
+#   "${@}"
+
+# --sam2-mask-as-mesh \
 
 #  --use-tcp \
 # SpatialTrackerV2 works good -> KNN to nearest depth pixel avaiable
@@ -62,7 +86,7 @@ echo "Running MVTracker demo"
 
 # python demo.py  --temporal_stride 1 --spatial_downsample 1 --depth_estimator gt --depth_cache_dir ./depth_cache --rerun save  --sample-path $SAMPLE_PATH --tracker cotracker3_offline 
 
-python demo.py  --temporal_stride 1 --spatial_downsample 1 --depth_estimator gt --depth_cache_dir ./depth_cache --rerun save  --sample-path $SAMPLE_PATH  
+# python demo.py  --temporal_stride 1 --spatial_downsample 1 --depth_estimator gt --depth_cache_dir ./depth_cache --rerun save  --sample-path $SAMPLE_PATH  
 
 
 echo "Copying MVTracker demo results to /data/rh20t_api"
