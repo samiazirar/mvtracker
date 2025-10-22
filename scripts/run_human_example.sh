@@ -26,7 +26,7 @@ RGB_ROOT_PARENT="$(dirname "$RGB_FOLDER")"
 #TODO: intrinsics?
 python create_sparse_depth_map.py \
   --task-folder "$DEPTH_FOLDER" \
-  --high-res-folder "$DEPTH_FOLDER" \
+  --high-res-folder "$RGB_FOLDER" \
   --out-dir "$OUT_DIR" \
   --dataset-type human \
   --max-frames 240 \
@@ -43,7 +43,7 @@ cp -r ./data /data/rh20t_api/test_data_generated_human
 
 SAMPLE_PATH="$OUT_DIR/${TASK_FOLDER}_processed.npz"
 echo "Running MVTracker demo"
-python demo.py --temporal_stride 1 --spatial_downsample 1 --depth_estimator duster --depth_cache_dir ./depth_cache --rerun save --sample-path "$SAMPLE_PATH"
+python demo.py --temporal_stride 1 --spatial_downsample 1 --depth_estimator gt --depth_cache_dir ./depth_cache --rerun save --sample-path "$SAMPLE_PATH"
 
 # python demo.py --temporal_stride 1 --spatial_downsample 1 --depth_estimator gt --depth_cache_dir ./depth_cache --rerun save --sample-path "$SAMPLE_PATH"
 # python demo.py --temporal_stride 1 --spatial_downsample 1 --depth_estimator gt --depth_cache_dir ./depth_cache --rerun save --sample-path "$SAMPLE_PATH" --tracker spatialtrackerv2
@@ -54,3 +54,5 @@ cp -r ./mvtracker_demo.rrd /data/rh20t_api/test_data_generated_human
 
 # Human dataset references
 # sample_path = "/data/rh20t_api/data/RH20T/packed_npz/task_0092_user_0010_scene_0004_cfg_0003_human.npz"
+
+

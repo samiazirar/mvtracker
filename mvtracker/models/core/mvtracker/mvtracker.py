@@ -896,7 +896,7 @@ class PointcloudCorrBlock:
             import re
 
             assert self.C > 1
-            rerun_fps = 30
+            rerun_fps = 12
             log_feature_maps = True
             log_knn_neighbors = False
             knn_line_coloring = "static"

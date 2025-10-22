@@ -86,10 +86,10 @@ echo "Running MVTracker demo"
 
 # python demo.py  --temporal_stride 1 --spatial_downsample 1 --depth_estimator gt --depth_cache_dir ./depth_cache --rerun save  --sample-path $SAMPLE_PATH --tracker cotracker3_offline 
 
-# python demo.py  --temporal_stride 1 --spatial_downsample 1 --depth_estimator gt --depth_cache_dir ./depth_cache --rerun save  --sample-path $SAMPLE_PATH  
+python demo.py  --temporal_stride 1 --spatial_downsample 1 --depth_estimator gt --depth_cache_dir ./depth_cache --rerun save  --sample-path $SAMPLE_PATH  
 
 
-echo "Copying MVTracker demo results to /data/rh20t_api"
+echo "Copying MVTracker demo results to /data/rh20t_api/test_data_generated"
 cp -r ./mvtracker_demo.rrd /data/rh20t_api/test_data_generated
 
   
