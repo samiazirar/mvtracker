@@ -3899,6 +3899,14 @@ def _rotation_matrix_to_quaternion(R: np.ndarray) -> np.ndarray:
 
 def run_colmap_feature_extraction(workspace_dir: Path) -> bool:
     """Run COLMAP feature extraction."""
+    # Check if COLMAP is installed
+    try:
+        subprocess.run(["colmap", "--version"], check=True, capture_output=True, text=True)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print("[ERROR] COLMAP is not installed or not in PATH. Please install COLMAP to use this feature.")
+        print("[INFO] Installation instructions: https://colmap.github.io/install.html")
+        return False
+    
     database_path = workspace_dir / "database.db"
     images_dir = workspace_dir / "images"
     
