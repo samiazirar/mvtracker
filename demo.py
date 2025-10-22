@@ -583,7 +583,6 @@ def main():
             f"(method={pc_clean_cfg['method']})."
         )
 
-    print(f"Using tracker: {args.tracker}")
     if args.tracker == "mvtracker":
         mvtracker = torch.hub.load(
             "ethz-vlg/mvtracker",
@@ -591,6 +590,10 @@ def main():
             pretrained=True,
             device=device,
         )
+        #find more arguments in mvtracker/models/core/mvtracker/mvtracker.py
+        # try to improve the tracking of sparse
+        mvtracker.corr_filter_invalid_depth=True
+        mvtracker.corr_neighbors = 8  # <-- Try reducing this (default is 16)
         mvtracker.eval()
     else:
         if args.tracker == "cotracker3_online":
@@ -613,14 +616,16 @@ def main():
     
     if args.sample_path is not None:
         sample_path = args.sample_path
-    elif sample_path is None:
-        print("No sample path provided, downloading a small demo sample from HF...")
-        raise NotImplementedError("Get the correct sample path")
-        # sample_path = hf_hub_download(
-        #     repo_id="ethz-vlg/mvtracker",
-        #     filename="data/task_0001_user_0010_scene_0005_cfg_0004_demo.npz",
-        #     repo_type="dataset",
-        # )
+        if  sample_path == "data_sample.npz":
+            print("No sample path provided, downloading a small demo sample from HF...")
+            sample_path = hf_hub_download(
+                repo_id="ethz-vlg/mvtracker",
+                filename="data_sample.npz",
+                repo_type="model",
+                token=os.getenv("HF_TOKEN")
+            )
+    else:
+        raise ValueError("Sample path is None, please provide a valid path or leave it to download the demo sample.")
 
     print("HUMANS NOT SUPPORTED YET") #TODO: find out why _human not work
     print("Loading large RH20T dataset - this may take a while...")
@@ -634,20 +639,21 @@ def main():
     # Load with memory mapping to avoid loading entire file into RAM at once
     sample = np.load(sample_path, mmap_mode='r',allow_pickle=True)  
     #only for now, remove all camera data from id "045322071843" for this copy the data
-    camera_ids = sample["camera_ids"]
-    if "045322071843" in camera_ids:
-        print("Removing camera 045322071843 for this demo")
-        raise NotImplementedError("Remove this exception after testing")
-        mask = camera_ids != "045322071843"
-        sample = {
-            "rgbs": sample["rgbs"][mask],
-            "depths": sample["depths"][mask],#CHANGED
-            "intrs": sample["intrs"][mask],
-            "extrs": sample["extrs"][mask],
-            "camera_ids": sample["camera_ids"][mask],
-            #use dummy
-            "query_points": np.random.uniform(-1, 1, (10, 3)).astype(np.float32),
-        }
+    if "camera_ids"  in sample:
+        camera_ids = sample["camera_ids"]
+        if "045322071843" in camera_ids:
+            print("Removing camera 045322071843 for this demo")
+            raise NotImplementedError("Remove this exception after testing")
+            mask = camera_ids != "045322071843"
+            sample = {
+                "rgbs": sample["rgbs"][mask],
+                "depths": sample["depths"][mask],#CHANGED
+                "intrs": sample["intrs"][mask],
+                "extrs": sample["extrs"][mask],
+                "camera_ids": sample["camera_ids"][mask],
+                #use dummy
+                "query_points": np.random.uniform(-1, 1, (10, 3)).astype(np.float32),
+            }
 
         
     print(f"Dataset shapes - RGB: {sample['rgbs'].shape}, Depth: {sample['depths'].shape}")
