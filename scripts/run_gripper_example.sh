@@ -45,10 +45,9 @@ python create_sparse_depth_map.py \
   --no-color-alignment-check \
   --refine-colmap \
   --limit-num-cameras 2 \
-  --colmap-densification \
   "${@}"
 #check colmap refinement
-
+#add colmap densificaiton TODO
 # python create_sparse_depth_map.py \
 #   --task-folder $DEPTH_FOLDER \
 #   --high-res-folder $RGB_FOLDER \
