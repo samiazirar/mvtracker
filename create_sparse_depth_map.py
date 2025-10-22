@@ -3838,14 +3838,14 @@ def setup_colmap_workspace(
             fx, fy = K[0, 0], K[1, 1]
             cx, cy = K[0, 2], K[1, 2]
             # COLMAP PINHOLE model: fx, fy, cx, cy
-            f.write(f"{c_idx} PINHOLE {W} {H} {fx} {fy} {cx} {cy}\\n")
+            f.write(f"{c_idx} PINHOLE {W} {H} {fx} {fy} {cx} {cy}\n")
     
     # Create images.txt
     images_file = workspace_dir / "images.txt"
     with open(images_file, 'w') as f:
-        f.write("# Image list with two lines of data per image:\\n")
-        f.write("#   IMAGE_ID, QW, QX, QY, QZ, TX, TY, TZ, CAMERA_ID, NAME\\n")
-        f.write("#   POINTS2D[] as (X, Y, POINT3D_ID)\\n")
+        f.write("# Image list with two lines of data per image:\n")
+        f.write("#   IMAGE_ID, QW, QX, QY, QZ, TX, TY, TZ, CAMERA_ID, NAME\n")
+        f.write("#   POINTS2D[] as (X, Y, POINT3D_ID)\n")
         img_id = 1
         for c_idx in range(C):
             for t_idx in range(T):
@@ -3858,8 +3858,8 @@ def setup_colmap_workspace(
                 
                 img_name = f"cam_{camera_ids[c_idx]}_frame_{t_idx:04d}.jpg"
                 f.write(f"{img_id} {quat[0]} {quat[1]} {quat[2]} {quat[3]} ")
-                f.write(f"{t[0]} {t[1]} {t[2]} {c_idx} {img_name}\\n")
-                f.write("\\n")  # Empty line for POINTS2D
+                f.write(f"{t[0]} {t[1]} {t[2]} {c_idx} {img_name}\n")
+                f.write("\n")  # Empty line for POINTS2D
                 img_id += 1
     
     print(f"[INFO] COLMAP workspace created at {workspace_dir}")
