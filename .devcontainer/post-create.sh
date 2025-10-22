@@ -155,7 +155,8 @@ export PYOPENGL_PLATFORM=osmesa
 
 # pip install mmpose mmengine mmdet
 # pip install "mmcv>=2.0.0rc4,<=3.0.0"
-
+echo "installing Sam2 inside HaMeR..."
+pip install -e ../sam2
 echo "deactivating HaMeR virtual environment..."
 deactivate
 cd ../..

@@ -3605,6 +3605,12 @@ def main():
         default=None,
         help="Limit number of cameras to N best (based on COLMAP geometric consistency).",
     )
+    parser.add_argument(
+        "--colmap-workspace",
+        type=Path,
+        default=None,
+        help="Reuse an existing COLMAP workspace directory instead of creating a temporary one.",
+    )
     args = parser.parse_args()
 
     if args.dataset_type == "human":
@@ -3793,9 +3799,13 @@ def main():
         # Set up workspace
         import tempfile
         import shutil
-        colmap_workspace = Path(tempfile.mkdtemp(prefix="colmap_workspace_"))
-        
-        print(f"[INFO] COLMAP workspace: {colmap_workspace}")
+        if args.colmap_workspace:
+            colmap_workspace = Path(args.colmap_workspace).expanduser()
+            colmap_workspace.mkdir(parents=True, exist_ok=True)
+            print(f"[INFO] Using provided COLMAP workspace: {colmap_workspace}")
+        else:
+            colmap_workspace = Path(tempfile.mkdtemp(prefix="colmap_workspace_"))
+            print(f"[INFO] COLMAP workspace: {colmap_workspace}")
         
         # Define paths
         database_path = colmap_workspace / "database.db"
