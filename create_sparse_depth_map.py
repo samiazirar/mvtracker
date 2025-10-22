@@ -4475,7 +4475,112 @@ def main():
         query_colors = [np.tile([0.5, 0.7, 1.0], (20, 1)).astype(np.float32) for _ in range(num_frames)]
         print(f"[INFO] Generated {len(query_points)} frames of dummy hand tracking points")
 
-    # --- Step 3: SAM2 Tracking (if enabled) ---
+    # --- Step 3: COLMAP Processing (if enabled) ---
+    colmap_workspace = None
+    if getattr(args, "refine_colmap", False) or getattr(args, "colmap_densification", False):
+        print("\n[INFO] ========== COLMAP Processing ==========")
+        
+        # Set up workspace
+        if args.colmap_workspace:
+            colmap_workspace = args.colmap_workspace
+            colmap_workspace.mkdir(parents=True, exist_ok=True)
+        else:
+            colmap_workspace = Path(tempfile.mkdtemp(prefix="colmap_workspace_"))
+        
+        print(f"[INFO] COLMAP workspace: {colmap_workspace}")
+        
+        # Crop images if requested
+        if getattr(args, "crop_camera", False):
+            print("[INFO] Cropping cameras to ROI...")
+            # Use gripper bbox if available for cropping
+            bbox_center = None
+            bbox_size = None
+            if robot_gripper_body_boxes and len(robot_gripper_body_boxes) > 0:
+                # Use first frame's bbox as reference
+                first_bbox = next((b for b in robot_gripper_body_boxes if b is not None), None)
+                if first_bbox:
+                    bbox_center = np.array(first_bbox["center"])
+                    bbox_size = np.array(first_bbox["half_sizes"]) * 2
+                    print(f"[INFO] Using gripper bbox for cropping: center={bbox_center}, size={bbox_size}")
+            
+            rgbs, depths, intrs, crop_regions = crop_images_to_roi(
+                rgbs, depths, intrs, bbox_center, bbox_size, args.crop_margin
+            )
+        
+        # Set up COLMAP workspace
+        setup_colmap_workspace(colmap_workspace, rgbs, intrs, extrs, final_cam_ids)
+        
+        # Run COLMAP pipeline
+        if getattr(args, "refine_colmap", False):
+            print("[INFO] Running COLMAP refinement pipeline...")
+            
+            # Feature extraction
+            if not run_colmap_feature_extraction(colmap_workspace):
+                print("[WARN] COLMAP feature extraction failed, skipping refinement")
+            else:
+                # Feature matching
+                if not run_colmap_matching(colmap_workspace):
+                    print("[WARN] COLMAP matching failed, skipping refinement")
+                else:
+                    # Mapping
+                    if not run_colmap_mapper(colmap_workspace):
+                        print("[WARN] COLMAP mapping failed, skipping refinement")
+                    else:
+                        # Evaluate camera quality
+                        camera_scores = evaluate_camera_quality_from_colmap(
+                            colmap_workspace, final_cam_ids
+                        )
+                        
+                        # Filter cameras if limit is set
+                        if args.limit_num_cameras and args.limit_num_cameras < len(final_cam_ids):
+                            print(f"[INFO] Selecting best {args.limit_num_cameras} cameras based on COLMAP scores...")
+                            selected_indices = select_best_cameras(
+                                final_cam_ids, camera_scores, args.limit_num_cameras
+                            )
+                            
+                            # Filter all data to selected cameras
+                            final_cam_ids = [final_cam_ids[i] for i in selected_indices]
+                            cam_dirs_low = [cam_dirs_low[i] for i in selected_indices]
+                            if cam_dirs_high:
+                                cam_dirs_high = [cam_dirs_high[i] for i in selected_indices]
+                            
+                            rgbs = rgbs[selected_indices]
+                            depths = depths[selected_indices]
+                            intrs = intrs[selected_indices]
+                            extrs = extrs[selected_indices]
+                            
+                            per_cam_low_sel = [per_cam_low_sel[i] for i in selected_indices]
+                            if per_cam_high_sel:
+                                per_cam_high_sel = [per_cam_high_sel[i] for i in selected_indices]
+                            
+                            print(f"[INFO] Filtered to {len(final_cam_ids)} cameras: {final_cam_ids}")
+        
+        # Run densification if requested
+        dense_pcd = None
+        if getattr(args, "colmap_densification", False):
+            print("[INFO] Running COLMAP densification...")
+            dense_pcd = run_colmap_densification(colmap_workspace)
+            if dense_pcd is not None:
+                print(f"[INFO] COLMAP produced dense point cloud with {len(dense_pcd.points)} points")
+                # Log to Rerun
+                if not args.no_pointcloud:
+                    rr.init("RH20T_Reprojection_Frameworks", spawn=False)
+                    rr.log("world", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
+                    pts = np.asarray(dense_pcd.points, dtype=np.float32)
+                    if dense_pcd.has_colors():
+                        cols = (np.asarray(dense_pcd.colors) * 255).astype(np.uint8)
+                    else:
+                        cols = None
+                    rr.log("colmap/dense_cloud", rr.Points3D(pts, colors=cols))
+        
+        # Clean up temporary workspace if not specified
+        if not args.colmap_workspace and colmap_workspace:
+            print(f"[INFO] Cleaning up temporary COLMAP workspace: {colmap_workspace}")
+            shutil.rmtree(colmap_workspace, ignore_errors=True)
+        
+        print("[INFO] ========== COLMAP Processing Complete ==========\n")
+
+    # --- Step 4: SAM2 Tracking (if enabled) ---
     sam2_masks = None
     sam2_fused_clouds = None
     if getattr(args, "sam2_tracking", False):
@@ -4502,7 +4607,7 @@ def main():
         else:
             print("[WARN] SAM2 tracking failed or returned no masks")
     
-    # --- Step 4: Save and Visualize ---
+    # --- Step 5: Save and Visualize ---
     rr.init("RH20T_Reprojection_Frameworks", spawn=False)
     # Set the desired coordinate system for the 'world' space
     rr.log("world", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
