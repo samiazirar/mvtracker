@@ -42,6 +42,9 @@ python create_sparse_depth_map.py   --task-folder /data/rh20t_api/data/test_data
 import argparse
 import re
 import warnings
+import subprocess
+import tempfile
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -3662,6 +3665,363 @@ def save_and_visualize(
             print(f"[WARN] Failed to export bounding box videos: {exc}")
 
 
+# --- COLMAP Integration Functions ---
+
+def crop_images_to_roi(
+    rgbs: np.ndarray,
+    depths: np.ndarray,
+    intrs: np.ndarray,
+    bbox_3d_center: Optional[np.ndarray] = None,
+    bbox_3d_size: Optional[np.ndarray] = None,
+    margin_ratio: float = 0.1,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[Tuple[int, int, int, int]]]:
+    """
+    Crop images to region of interest based on 3D bounding box projection.
+    
+    Args:
+        rgbs: RGB images (C, T, H, W, 3)
+        depths: Depth maps (C, T, H, W)
+        intrs: Camera intrinsics (C, T, 3, 3)
+        bbox_3d_center: 3D bounding box center (optional)
+        bbox_3d_size: 3D bounding box size (optional)
+        margin_ratio: Additional margin around bbox as ratio of bbox size
+    
+    Returns:
+        Cropped rgbs, depths, updated intrinsics, and crop regions [(x1, y1, x2, y2), ...]
+    """
+    C, T, H, W, _ = rgbs.shape
+    
+    # If no bbox provided, use image center with some default crop
+    if bbox_3d_center is None or bbox_3d_size is None:
+        print("[INFO] No 3D bbox provided, skipping crop")
+        return rgbs, depths, intrs, [(0, 0, W, H)] * C
+    
+    # For now, return uncropped (will implement projection-based cropping)
+    print("[INFO] Camera cropping not yet implemented, returning original images")
+    return rgbs, depths, intrs, [(0, 0, W, H)] * C
+
+
+def setup_colmap_workspace(
+    workspace_dir: Path,
+    rgbs: np.ndarray,
+    intrs: np.ndarray,
+    extrs: np.ndarray,
+    camera_ids: List[str],
+) -> Path:
+    """
+    Set up COLMAP workspace with images and camera parameters.
+    
+    Args:
+        workspace_dir: Path to COLMAP workspace directory
+        rgbs: RGB images (C, T, H, W, 3)
+        intrs: Camera intrinsics (C, T, 3, 3)
+        extrs: Camera extrinsics (C, T, 3, 4)
+        camera_ids: List of camera IDs
+    
+    Returns:
+        Path to the created workspace
+    """
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+    images_dir = workspace_dir / "images"
+    images_dir.mkdir(exist_ok=True)
+    
+    C, T, H, W, _ = rgbs.shape
+    
+    # Export images
+    print(f"[INFO] Exporting {C * T} images to COLMAP workspace...")
+    for c_idx in range(C):
+        for t_idx in range(T):
+            img = rgbs[c_idx, t_idx]
+            img_path = images_dir / f"cam_{camera_ids[c_idx]}_frame_{t_idx:04d}.jpg"
+            Image.fromarray(img).save(img_path, quality=95)
+    
+    # Create cameras.txt
+    cameras_file = workspace_dir / "cameras.txt"
+    with open(cameras_file, 'w') as f:
+        f.write("# Camera list with one line of data per camera:\n")
+        f.write("#   CAMERA_ID, MODEL, WIDTH, HEIGHT, PARAMS[]\n")
+        for c_idx in range(C):
+            K = intrs[c_idx, 0]  # Use first frame's intrinsics
+            fx, fy = K[0, 0], K[1, 1]
+            cx, cy = K[0, 2], K[1, 2]
+            # COLMAP PINHOLE model: fx, fy, cx, cy
+            f.write(f"{c_idx} PINHOLE {W} {H} {fx} {fy} {cx} {cy}\\n")
+    
+    # Create images.txt
+    images_file = workspace_dir / "images.txt"
+    with open(images_file, 'w') as f:
+        f.write("# Image list with two lines of data per image:\\n")
+        f.write("#   IMAGE_ID, QW, QX, QY, QZ, TX, TY, TZ, CAMERA_ID, NAME\\n")
+        f.write("#   POINTS2D[] as (X, Y, POINT3D_ID)\\n")
+        img_id = 1
+        for c_idx in range(C):
+            for t_idx in range(T):
+                E = extrs[c_idx, t_idx]  # 3x4 world-to-camera
+                R = E[:3, :3]
+                t = E[:3, 3]
+                
+                # Convert rotation matrix to quaternion (w, x, y, z)
+                quat = _rotation_matrix_to_quaternion(R)
+                
+                img_name = f"cam_{camera_ids[c_idx]}_frame_{t_idx:04d}.jpg"
+                f.write(f"{img_id} {quat[0]} {quat[1]} {quat[2]} {quat[3]} ")
+                f.write(f"{t[0]} {t[1]} {t[2]} {c_idx} {img_name}\\n")
+                f.write("\\n")  # Empty line for POINTS2D
+                img_id += 1
+    
+    print(f"[INFO] COLMAP workspace created at {workspace_dir}")
+    return workspace_dir
+
+
+def _rotation_matrix_to_quaternion(R: np.ndarray) -> np.ndarray:
+    """Convert 3x3 rotation matrix to quaternion (w, x, y, z)."""
+    trace = np.trace(R)
+    if trace > 0:
+        s = 0.5 / np.sqrt(trace + 1.0)
+        w = 0.25 / s
+        x = (R[2, 1] - R[1, 2]) * s
+        y = (R[0, 2] - R[2, 0]) * s
+        z = (R[1, 0] - R[0, 1]) * s
+    else:
+        if R[0, 0] > R[1, 1] and R[0, 0] > R[2, 2]:
+            s = 2.0 * np.sqrt(1.0 + R[0, 0] - R[1, 1] - R[2, 2])
+            w = (R[2, 1] - R[1, 2]) / s
+            x = 0.25 * s
+            y = (R[0, 1] + R[1, 0]) / s
+            z = (R[0, 2] + R[2, 0]) / s
+        elif R[1, 1] > R[2, 2]:
+            s = 2.0 * np.sqrt(1.0 + R[1, 1] - R[0, 0] - R[2, 2])
+            w = (R[0, 2] - R[2, 0]) / s
+            x = (R[0, 1] + R[1, 0]) / s
+            y = 0.25 * s
+            z = (R[1, 2] + R[2, 1]) / s
+        else:
+            s = 2.0 * np.sqrt(1.0 + R[2, 2] - R[0, 0] - R[1, 1])
+            w = (R[1, 0] - R[0, 1]) / s
+            x = (R[0, 2] + R[2, 0]) / s
+            y = (R[1, 2] + R[2, 1]) / s
+            z = 0.25 * s
+    return np.array([w, x, y, z])
+
+
+def run_colmap_feature_extraction(workspace_dir: Path) -> bool:
+    """Run COLMAP feature extraction."""
+    database_path = workspace_dir / "database.db"
+    images_dir = workspace_dir / "images"
+    
+    cmd = [
+        "colmap", "feature_extractor",
+        "--database_path", str(database_path),
+        "--image_path", str(images_dir),
+        "--ImageReader.single_camera", "0",
+        "--ImageReader.camera_model", "PINHOLE",
+    ]
+    
+    print(f"[INFO] Running COLMAP feature extraction...")
+    try:
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        print("[INFO] Feature extraction completed successfully")
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"[ERROR] Feature extraction failed: {e.stderr}")
+        return False
+
+
+def run_colmap_matching(workspace_dir: Path) -> bool:
+    """Run COLMAP feature matching."""
+    database_path = workspace_dir / "database.db"
+    
+    cmd = [
+        "colmap", "exhaustive_matcher",
+        "--database_path", str(database_path),
+    ]
+    
+    print(f"[INFO] Running COLMAP feature matching...")
+    try:
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        print("[INFO] Feature matching completed successfully")
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"[ERROR] Feature matching failed: {e.stderr}")
+        return False
+
+
+def run_colmap_mapper(workspace_dir: Path) -> bool:
+    """Run COLMAP mapper to reconstruct scene."""
+    database_path = workspace_dir / "database.db"
+    sparse_dir = workspace_dir / "sparse"
+    sparse_dir.mkdir(exist_ok=True)
+    
+    cmd = [
+        "colmap", "mapper",
+        "--database_path", str(database_path),
+        "--image_path", str(workspace_dir / "images"),
+        "--output_path", str(sparse_dir),
+    ]
+    
+    print(f"[INFO] Running COLMAP mapper...")
+    try:
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        print("[INFO] Mapping completed successfully")
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"[ERROR] Mapping failed: {e.stderr}")
+        return False
+
+
+def evaluate_camera_quality_from_colmap(workspace_dir: Path, camera_ids: List[str]) -> Dict[str, float]:
+    """
+    Evaluate camera quality based on COLMAP reconstruction.
+    
+    Returns a dictionary mapping camera_id to quality score (higher is better).
+    Quality is based on number of registered 3D points visible in each camera.
+    """
+    sparse_dir = workspace_dir / "sparse" / "0"
+    if not sparse_dir.exists():
+        print("[WARN] No COLMAP reconstruction found")
+        return {cid: 1.0 for cid in camera_ids}
+    
+    # Parse images.txt to get registered images and their points
+    images_file = sparse_dir / "images.txt"
+    if not images_file.exists():
+        print("[WARN] No images.txt found in COLMAP output")
+        return {cid: 1.0 for cid in camera_ids}
+    
+    camera_scores = {cid: 0.0 for cid in camera_ids}
+    
+    with open(images_file, 'r') as f:
+        lines = f.readlines()
+    
+    # Skip header lines
+    lines = [l for l in lines if not l.startswith('#')]
+    
+    # Parse image entries (two lines per image)
+    for i in range(0, len(lines), 2):
+        if i + 1 >= len(lines):
+            break
+        
+        # First line: IMAGE_ID, QW, QX, QY, QZ, TX, TY, TZ, CAMERA_ID, NAME
+        img_line = lines[i].strip().split()
+        if len(img_line) < 10:
+            continue
+        
+        img_name = img_line[9]
+        
+        # Second line: POINTS2D as (X, Y, POINT3D_ID) triplets
+        points_line = lines[i + 1].strip()
+        if not points_line:
+            continue
+        
+        points = points_line.split()
+        # Count valid 3D points (POINT3D_ID != -1)
+        num_points = 0
+        for j in range(2, len(points), 3):  # Every third element is POINT3D_ID
+            if j < len(points):
+                point3d_id = int(points[j])
+                if point3d_id != -1:
+                    num_points += 1
+        
+        # Extract camera_id from image name
+        for cid in camera_ids:
+            if f"cam_{cid}_" in img_name:
+                camera_scores[cid] += num_points
+                break
+    
+    print(f"[INFO] Camera quality scores: {camera_scores}")
+    return camera_scores
+
+
+def select_best_cameras(
+    camera_ids: List[str],
+    camera_scores: Dict[str, float],
+    limit: int,
+) -> List[int]:
+    """
+    Select indices of best N cameras based on quality scores.
+    
+    Returns:
+        List of camera indices to keep (sorted by score, descending)
+    """
+    # Sort cameras by score
+    scored_cameras = [(idx, cid, camera_scores.get(cid, 0.0)) 
+                      for idx, cid in enumerate(camera_ids)]
+    scored_cameras.sort(key=lambda x: x[2], reverse=True)
+    
+    # Select top N
+    selected = scored_cameras[:limit]
+    selected_indices = sorted([idx for idx, _, _ in selected])
+    
+    print(f"[INFO] Selected {len(selected_indices)} best cameras:")
+    for idx, cid, score in selected:
+        if idx in selected_indices:
+            print(f"  Camera {cid}: score={score:.0f}")
+    
+    return selected_indices
+
+
+def run_colmap_densification(workspace_dir: Path) -> Optional[o3d.geometry.PointCloud]:
+    """
+    Run COLMAP stereo densification to create a denser point cloud.
+    
+    Returns:
+        Open3D point cloud or None if failed
+    """
+    sparse_dir = workspace_dir / "sparse" / "0"
+    dense_dir = workspace_dir / "dense"
+    dense_dir.mkdir(exist_ok=True)
+    
+    # Undistort images
+    print("[INFO] Running COLMAP image undistorter...")
+    cmd = [
+        "colmap", "image_undistorter",
+        "--image_path", str(workspace_dir / "images"),
+        "--input_path", str(sparse_dir),
+        "--output_path", str(dense_dir),
+    ]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as e:
+        print(f"[ERROR] Image undistortion failed: {e.stderr}")
+        return None
+    
+    # Stereo matching
+    print("[INFO] Running COLMAP patch match stereo...")
+    cmd = [
+        "colmap", "patch_match_stereo",
+        "--workspace_path", str(dense_dir),
+    ]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as e:
+        print(f"[ERROR] Stereo matching failed: {e.stderr}")
+        return None
+    
+    # Stereo fusion
+    print("[INFO] Running COLMAP stereo fusion...")
+    cmd = [
+        "colmap", "stereo_fusion",
+        "--workspace_path", str(dense_dir),
+        "--output_path", str(dense_dir / "fused.ply"),
+    ]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as e:
+        print(f"[ERROR] Stereo fusion failed: {e.stderr}")
+        return None
+    
+    # Load the dense point cloud
+    ply_path = dense_dir / "fused.ply"
+    if not ply_path.exists():
+        print("[ERROR] Dense point cloud file not found")
+        return None
+    
+    print(f"[INFO] Loading dense point cloud from {ply_path}")
+    pcd = o3d.io.read_point_cloud(str(ply_path))
+    print(f"[INFO] Loaded dense point cloud with {len(pcd.points)} points")
+    
+    return pcd
+
+
 def main():
     """Parses arguments and orchestrates the entire data processing workflow."""
     parser = argparse.ArgumentParser(
@@ -3897,6 +4257,43 @@ def main():
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Convert SAM2 masks to 3D meshes for Rerun visualization.",
+    )
+    # COLMAP-related arguments
+    parser.add_argument(
+        "--crop-camera",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Crop cameras to region of interest before COLMAP processing.",
+    )
+    parser.add_argument(
+        "--crop-margin",
+        type=float,
+        default=0.1,
+        help="Margin ratio to add around the bounding box when cropping (0.0-1.0).",
+    )
+    parser.add_argument(
+        "--refine-colmap",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Use COLMAP to refine point cloud and check cross-view consistency.",
+    )
+    parser.add_argument(
+        "--limit-num-cameras",
+        type=int,
+        default=None,
+        help="Limit number of cameras to N best (based on COLMAP geometric consistency).",
+    )
+    parser.add_argument(
+        "--colmap-densification",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Use COLMAP stereo to create a denser point cloud.",
+    )
+    parser.add_argument(
+        "--colmap-workspace",
+        type=Path,
+        default=None,
+        help="Path to COLMAP workspace directory. If not provided, a temporary directory will be used.",
     )
     args = parser.parse_args()
 
