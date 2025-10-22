@@ -42,9 +42,6 @@ python create_sparse_depth_map.py   --task-folder /data/rh20t_api/data/test_data
 import argparse
 import re
 import warnings
-import subprocess
-import tempfile
-import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -59,6 +56,7 @@ import open3d as o3d
 import rerun as rr
 from tqdm import tqdm
 from sklearn.cluster import DBSCAN
+import pycolmap
 
 # --- Project-Specific Imports ---
 # Importing utilities and configurations specific to the RH20T dataset and robot model.
@@ -66,7 +64,6 @@ from mvtracker.utils.visualizer_rerun import log_pointclouds_to_rerun
 from RH20T.rh20t_api.configurations import get_conf_from_dir_name, load_conf
 from RH20T.rh20t_api.scene import RH20TScene
 from RH20T.utils.robot import RobotModel
-from sam2.build_sam import build_sam2_video_predictor
 
 # TODO: find unused stuff and eithe remove or implement
 # TODO: First unused stuff: implement tcp usage or remove it
@@ -2125,421 +2122,6 @@ def reproject_to_sparse_depth_cv2(
     
     return sparse_depth
 
-# --- SAM2 Tracking Functions ---
-
-def track_gripper_with_sam2_single_camera(
-    args,
-    rgb_frames: np.ndarray,
-    query_points: Optional[List[Optional[np.ndarray]]],
-    intrs: np.ndarray,
-    extrs: np.ndarray,
-    camera_idx: int,
-    predictor,
-) -> Optional[List[np.ndarray]]:
-    """
-    Track gripper using SAM2 for a single camera.
-    
-    Args:
-        args: Parsed command-line arguments
-        rgb_frames: RGB images for this camera (T, H, W, 3)
-        query_points: 3D query points for each frame (list of T arrays)
-        intrs: Camera intrinsics for this camera (T, 3, 3)
-        extrs: Camera extrinsics for this camera (T, 3, 4)
-        camera_idx: Camera index for logging
-        predictor: SAM2 video predictor instance
-    
-    Returns:
-        List of binary masks (H, W) for each frame, or None if tracking fails
-    """
-    import tempfile
-    import shutil
-    
-    T, H, W, _ = rgb_frames.shape
-    
-    # Create temporary directory for video frames
-    temp_dir = Path(tempfile.mkdtemp(prefix=f"sam2_cam{camera_idx}_"))
-    
-    try:
-        print(f"[INFO] Camera {camera_idx}: Saving {T} frames to temporary directory...")
-        # Save frames as JPEG images
-        for t_idx in range(T):
-            frame_path = temp_dir / f"{t_idx:05d}.jpg"
-            Image.fromarray(rgb_frames[t_idx]).save(frame_path, quality=95)
-        
-        # Initialize SAM2 inference state with the frame directory
-        print(f"[INFO] Camera {camera_idx}: Initializing SAM2 inference state ({H}x{W})...")
-        inference_state = predictor.init_state(
-            video_path=str(temp_dir),
-            offload_video_to_cpu=False,
-            offload_state_to_cpu=False,
-        )
-        
-    except Exception as e:
-        print(f"[ERROR] Camera {camera_idx}: Failed to initialize SAM2 inference state: {e}")
-        import traceback
-        traceback.print_exc()
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        return None
-    
-    # Find the initialization frame with valid query points
-    init_frame_idx = args.sam2_init_frame
-    if init_frame_idx >= T:
-        print(f"[WARN] Camera {camera_idx}: --sam2-init-frame ({init_frame_idx}) >= num frames ({T}). Using frame 0.")
-        init_frame_idx = 0
-    
-    # Find first frame with query points if init frame has none
-    if query_points[init_frame_idx] is None or len(query_points[init_frame_idx]) == 0:
-        print(f"[WARN] Camera {camera_idx}: No query points at init frame {init_frame_idx}. Searching...")
-        for t_idx in range(T):
-            if query_points[t_idx] is not None and len(query_points[t_idx]) > 0:
-                init_frame_idx = t_idx
-                print(f"[INFO] Camera {camera_idx}: Using frame {init_frame_idx} for initialization")
-                break
-        else:
-            print(f"[ERROR] Camera {camera_idx}: No frames with query points found.")
-            shutil.rmtree(temp_dir, ignore_errors=True)
-            return None
-    
-    # Project 3D query points to 2D for the initialization frame
-    qpts_3d = query_points[init_frame_idx]
-    if qpts_3d is None or len(qpts_3d) == 0:
-        print(f"[ERROR] Camera {camera_idx}: No query points at frame {init_frame_idx}")
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        return None
-    
-    # Get camera parameters for this frame
-    K = intrs[init_frame_idx]  # (3, 3)
-    E = extrs[init_frame_idx]  # (3, 4)
-    R, t = E[:3, :3], E[:3, 3]
-    
-    # Transform 3D points to camera frame
-    qpts_cam = (R @ qpts_3d.T + t.reshape(3, 1)).T  # (N, 3)
-    
-    # Project to 2D
-    qpts_2d_hom = (K @ qpts_cam.T).T  # (N, 3)
-    qpts_2d = qpts_2d_hom[:, :2] / (qpts_2d_hom[:, 2:3] + 1e-8)  # (N, 2)
-    
-    # Filter points within image bounds
-    valid_mask = (
-        (qpts_2d[:, 0] >= 0) & (qpts_2d[:, 0] < W) &
-        (qpts_2d[:, 1] >= 0) & (qpts_2d[:, 1] < H) &
-        (qpts_cam[:, 2] > 0)  # In front of camera
-    )
-    qpts_2d_valid = qpts_2d[valid_mask]
-    
-    if len(qpts_2d_valid) == 0:
-        print(f"[ERROR] Camera {camera_idx}: No valid query points project into frame {init_frame_idx}")
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        return None
-    
-    print(f"[INFO] Camera {camera_idx}: Initializing with {len(qpts_2d_valid)} points at frame {init_frame_idx}")
-    
-    # Add points to SAM2 predictor
-    ann_obj_id = 1  # Object ID for the gripper
-    points = qpts_2d_valid.astype(np.float32)
-    labels = np.ones(len(points), dtype=np.int32)  # All foreground
-    
-    try:
-        _, out_obj_ids, out_mask_logits = predictor.add_new_points(
-            inference_state=inference_state,
-            frame_idx=init_frame_idx,
-            obj_id=ann_obj_id,
-            points=points,
-            labels=labels,
-        )
-    except Exception as e:
-        print(f"[ERROR] Camera {camera_idx}: Failed to add points to SAM2: {e}")
-        import traceback
-        traceback.print_exc()
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        return None
-    
-    # Propagate masks through the video
-    print(f"[INFO] Camera {camera_idx}: Propagating SAM2 masks through {T} frames...")
-    video_segments = {}
-    
-    try:
-        # Propagate masks through all frames
-        for out_frame_idx, out_obj_ids, out_mask_logits in predictor.propagate_in_video(inference_state):
-            video_segments[out_frame_idx] = {
-                out_obj_id: (out_mask_logits[i] > 0.0).cpu().numpy()
-                for i, out_obj_id in enumerate(out_obj_ids)
-            }
-        
-    except Exception as e:
-        print(f"[ERROR] Camera {camera_idx}: Failed to propagate SAM2 masks: {e}")
-        import traceback
-        traceback.print_exc()
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        return None
-    finally:
-        # Clean up temporary directory
-        shutil.rmtree(temp_dir, ignore_errors=True)
-    
-    # Extract masks in frame order
-    masks = []
-    for frame_idx in range(T):
-        if frame_idx in video_segments and ann_obj_id in video_segments[frame_idx]:
-            mask = video_segments[frame_idx][ann_obj_id].squeeze()
-            masks.append(mask)
-        else:
-            # No mask for this frame - create empty mask
-            masks.append(np.zeros((H, W), dtype=bool))
-    
-    print(f"[INFO] Camera {camera_idx}: SAM2 tracking completed with {len(masks)} masks")
-    return masks
-
-
-def track_gripper_with_sam2(
-    args,
-    rgbs: np.ndarray,
-    query_points: Optional[List[Optional[np.ndarray]]],
-    intrs: np.ndarray,
-    extrs: np.ndarray,
-) -> Optional[Dict[int, List[np.ndarray]]]:
-    """
-    Track gripper using SAM2 video predictor for all cameras.
-    
-    Args:
-        args: Parsed command-line arguments
-        rgbs: RGB images (C, T, H, W, 3)
-        query_points: 3D query points for each frame (list of T arrays)
-        intrs: Camera intrinsics (C, T, 3, 3)
-        extrs: Camera extrinsics (C, T, 3, 4)
-    
-    Returns:
-        Dictionary mapping camera_idx to list of binary masks, or None if tracking fails
-    """
-    if not getattr(args, "sam2_tracking", False):
-        return None
-    
-    if query_points is None or len(query_points) == 0:
-        print("[WARN] SAM2 tracking requires query points. Skipping SAM2 tracking.")
-        return None
-    
-    # Check if SAM2 checkpoint exists
-    if not args.sam2_checkpoint.exists():
-        print(f"[ERROR] SAM2 checkpoint not found at: {args.sam2_checkpoint}")
-        print("[INFO] Please download SAM2 checkpoint or disable --sam2-tracking")
-        return None
-    
-    print(f"[INFO] Initializing SAM2 video predictor from {args.sam2_checkpoint}...")
-    
-    try:
-        # Build SAM2 video predictor (shared across all cameras)
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        predictor = build_sam2_video_predictor(
-            args.sam2_config,
-            args.sam2_checkpoint,
-            device=device,
-        )
-    except Exception as e:
-        print(f"[ERROR] Failed to initialize SAM2: {e}")
-        import traceback
-        traceback.print_exc()
-        return None
-    
-    C, T, H, W, _ = rgbs.shape
-    print(f"[INFO] Running SAM2 tracking on {C} cameras with {T} frames each...")
-    
-    # Track gripper in each camera view
-    all_masks = {}
-    for cam_idx in range(C):
-        print(f"\n[INFO] Processing camera {cam_idx + 1}/{C}...")
-        rgb_frames = rgbs[cam_idx]  # (T, H, W, 3)
-        cam_intrs = intrs[cam_idx]  # (T, 3, 3)
-        cam_extrs = extrs[cam_idx]  # (T, 3, 4)
-        
-        masks = track_gripper_with_sam2_single_camera(
-            args,
-            rgb_frames,
-            query_points,
-            cam_intrs,
-            cam_extrs,
-            cam_idx,
-            predictor,
-        )
-        
-        if masks is not None:
-            all_masks[cam_idx] = masks
-            print(f"[INFO] Camera {cam_idx}: Successfully tracked {len(masks)} frames")
-        else:
-            print(f"[WARN] Camera {cam_idx}: Tracking failed, skipping this camera")
-    
-    if len(all_masks) == 0:
-        print("[ERROR] SAM2 tracking failed for all cameras")
-        return None
-    
-    print(f"\n[INFO] SAM2 tracking completed successfully for {len(all_masks)}/{C} cameras")
-    return all_masks
-
-
-def fuse_masks_to_3d(
-    masks_per_camera: Dict[int, List[np.ndarray]],
-    depths: np.ndarray,
-    rgbs: np.ndarray,
-    intrs: np.ndarray,
-    extrs: np.ndarray,
-) -> List[Optional[o3d.geometry.PointCloud]]:
-    """
-    Fuse masks from multiple cameras into 3D point clouds.
-    
-    Args:
-        masks_per_camera: Dictionary mapping camera_idx to list of masks
-        depths: Depth maps (C, T, H, W)
-        rgbs: RGB images (C, T, H, W, 3)
-        intrs: Camera intrinsics (C, T, 3, 3)
-        extrs: Camera extrinsics (C, T, 3, 4)
-    
-    Returns:
-        List of fused point clouds for each frame
-    """
-    if not masks_per_camera:
-        return []
-    
-    # Get number of frames from first camera
-    first_cam_idx = list(masks_per_camera.keys())[0]
-    T = len(masks_per_camera[first_cam_idx])
-    
-    print(f"[INFO] Fusing SAM2 masks from {len(masks_per_camera)} cameras across {T} frames...")
-    
-    fused_clouds = []
-    for t_idx in range(T):
-        # Collect point clouds from all cameras for this frame
-        frame_clouds = []
-        
-        for cam_idx, masks in masks_per_camera.items():
-            if t_idx >= len(masks):
-                continue
-            
-            mask = masks[t_idx]
-            if mask is None or not isinstance(mask, np.ndarray) or not mask.any():
-                continue
-            
-            # Get data for this camera and frame
-            depth = depths[cam_idx, t_idx]  # (H, W)
-            rgb = rgbs[cam_idx, t_idx]  # (H, W, 3)
-            K = intrs[cam_idx, t_idx]  # (3, 3)
-            E = extrs[cam_idx, t_idx]  # (3, 4)
-            
-            # Apply mask to depth
-            masked_depth = depth.copy()
-            masked_depth[~mask] = 0.0
-            
-            # Create point cloud from masked depth
-            try:
-                o3d_depth = o3d.geometry.Image(masked_depth.astype(np.float32))
-                o3d_rgb = o3d.geometry.Image(rgb.astype(np.uint8))
-                rgbd_image = o3d.geometry.RGBDImage.create_from_color_and_depth(
-                    o3d_rgb, o3d_depth, depth_scale=1.0, depth_trunc=2.0, convert_rgb_to_intensity=False
-                )
-                
-                H, W = depth.shape
-                intrinsics = o3d.camera.PinholeCameraIntrinsic(W, H, K[0, 0], K[1, 1], K[0, 2], K[1, 2])
-                
-                pcd = o3d.geometry.PointCloud.create_from_rgbd_image(rgbd_image, intrinsics)
-                
-                # Transform to world coordinates
-                E_inv = np.eye(4, dtype=np.float32)
-                E_inv[:3, :3] = E[:3, :3].T
-                E_inv[:3, 3] = -E[:3, :3].T @ E[:3, 3]
-                pcd.transform(E_inv)
-                
-                if pcd.has_points() and len(pcd.points) > 0:
-                    frame_clouds.append(pcd)
-                    
-            except Exception as e:
-                print(f"[WARN] Frame {t_idx}, Camera {cam_idx}: Failed to create point cloud: {e}")
-                continue
-        
-        # Fuse point clouds from all cameras
-        if len(frame_clouds) > 0:
-            fused_pcd = o3d.geometry.PointCloud()
-            for pcd in frame_clouds:
-                fused_pcd += pcd
-            fused_clouds.append(fused_pcd)
-        else:
-            fused_clouds.append(None)
-    
-    print(f"[INFO] Fused {len([c for c in fused_clouds if c is not None])}/{T} frames")
-    return fused_clouds
-
-
-def convert_mask_to_mesh(
-    mask: np.ndarray,
-    depth: np.ndarray,
-    rgb: np.ndarray,
-    K: np.ndarray,
-    E_inv: np.ndarray,
-    min_depth: float = 0.01,
-    max_depth: float = 2.0,
-) -> Optional[o3d.geometry.TriangleMesh]:
-    """
-    Convert a 2D mask to a 3D mesh by unprojecting masked depth points.
-    
-    Args:
-        mask: Binary mask (H, W)
-        depth: Depth map (H, W)
-        rgb: RGB image (H, W, 3)
-        K: Camera intrinsics (3, 3)
-        E_inv: Inverse extrinsics (4, 4) - camera to world transform
-        min_depth: Minimum valid depth
-        max_depth: Maximum valid depth
-    
-    Returns:
-        Open3D TriangleMesh or None if conversion fails
-    """
-    # Apply mask to depth and RGB
-    masked_depth = depth.copy()
-    masked_depth[~mask] = 0.0
-    
-    # Filter by depth range
-    valid_depth_mask = (masked_depth > min_depth) & (masked_depth < max_depth)
-    masked_depth[~valid_depth_mask] = 0.0
-    
-    # Create point cloud from masked depth
-    try:
-        o3d_depth = o3d.geometry.Image(masked_depth.astype(np.float32))
-        o3d_rgb = o3d.geometry.Image(rgb.astype(np.uint8))
-        rgbd_image = o3d.geometry.RGBDImage.create_from_color_and_depth(
-            o3d_rgb, o3d_depth, depth_scale=1.0, depth_trunc=max_depth, convert_rgb_to_intensity=False
-        )
-        
-        H, W = depth.shape
-        intrinsics = o3d.camera.PinholeCameraIntrinsic(W, H, K[0, 0], K[1, 1], K[0, 2], K[1, 2])
-        
-        pcd = o3d.geometry.PointCloud.create_from_rgbd_image(rgbd_image, intrinsics)
-        pcd.transform(E_inv)
-        
-        if not pcd.has_points() or len(pcd.points) < 10:
-            return None
-        
-        # Estimate normals
-        pcd.estimate_normals()
-        
-        # Create mesh using Poisson reconstruction
-        mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
-            pcd, depth=8
-        )
-        
-        # Remove low-density vertices
-        densities_arr = np.asarray(densities)
-        if densities_arr.size > 0:
-            density_thresh = np.quantile(densities_arr, 0.1)
-            vertices_to_remove = densities_arr < density_thresh
-            mesh.remove_vertices_by_mask(vertices_to_remove)
-        
-        if len(mesh.vertices) == 0:
-            return None
-        
-        mesh.compute_vertex_normals()
-        return mesh
-        
-    except Exception as e:
-        print(f"[WARN] Failed to create mesh from mask: {e}")
-        return None
-
-
 # --- Main Workflow & Orchestration ---
 
 def process_frames(
@@ -3195,8 +2777,6 @@ def save_and_visualize(
     robot_object_points=None,
     query_points=None,
     query_colors=None,
-    sam2_masks=None,
-    sam2_fused_clouds=None,
 ):
     """Saves the processed data to an NPZ file and generates a Rerun visualization."""
     # Convert to channels-first format for NPZ
@@ -3561,95 +3141,6 @@ def save_and_visualize(
                         ),
                     )
 
-    # Log SAM2 masks and fused 3D point clouds
-    if sam2_masks is not None and getattr(args, "visualize_sam2_masks", True):
-        fps = args.sync_fps if args.sync_fps > 0 else 30.0
-        print(f"[INFO] Logging SAM2 masks from {len(sam2_masks)} cameras to Rerun...")
-        
-        # Log 2D masks for each camera
-        for cam_idx, masks in sam2_masks.items():
-            cam_id = final_cam_ids[cam_idx]
-            print(f"[INFO] Logging {len(masks)} masks for camera {cam_id}...")
-            
-            for idx, mask in enumerate(masks):
-                if mask is None or not isinstance(mask, np.ndarray) or not mask.any():
-                    continue
-                
-                rr.set_time_seconds("frame", idx / fps)
-                
-                # Log mask as 2D segmentation for this camera
-                rr.log(
-                    f"camera/{cam_id}/sam2_mask",
-                    rr.SegmentationImage(mask.astype(np.uint8)),
-                )
-        
-        # Log fused 3D point clouds
-        if sam2_fused_clouds is not None and getattr(args, "sam2_mask_as_mesh", True):
-            print(f"[INFO] Logging {len(sam2_fused_clouds)} fused SAM2 point clouds to Rerun...")
-            
-            for idx, pcd in enumerate(sam2_fused_clouds):
-                if pcd is None or not pcd.has_points():
-                    continue
-                
-                rr.set_time_seconds("frame", idx / fps)
-                
-                # Get points and colors
-                points = np.asarray(pcd.points, dtype=np.float32)
-                if pcd.has_colors():
-                    colors = (np.asarray(pcd.colors) * 255).astype(np.uint8)
-                else:
-                    # Default green color for gripper
-                    colors = np.full((len(points), 3), [0, 255, 128], dtype=np.uint8)
-                
-                # Log as point cloud
-                rr.log(
-                    "sam2/gripper_points",
-                    rr.Points3D(points, colors=colors, radii=0.003),
-                )
-                
-                # Optionally create and log mesh from fused point cloud
-                try:
-                    # Estimate normals
-                    pcd_mesh = o3d.geometry.PointCloud(pcd)
-                    pcd_mesh.estimate_normals()
-                    
-                    # Create mesh using Poisson reconstruction
-                    mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
-                        pcd_mesh, depth=8
-                    )
-                    
-                    # Remove low-density vertices
-                    densities_arr = np.asarray(densities)
-                    if densities_arr.size > 0:
-                        density_thresh = np.quantile(densities_arr, 0.1)
-                        vertices_to_remove = densities_arr < density_thresh
-                        mesh.remove_vertices_by_mask(vertices_to_remove)
-                    
-                    if len(mesh.vertices) > 0:
-                        mesh.compute_vertex_normals()
-                        
-                        # Log mesh to Rerun
-                        vertices = np.asarray(mesh.vertices, dtype=np.float32)
-                        triangles = np.asarray(mesh.triangles, dtype=np.uint32)
-                        
-                        # Get vertex colors if available
-                        if mesh.has_vertex_colors():
-                            vertex_colors = (np.asarray(mesh.vertex_colors) * 255).astype(np.uint8)
-                        else:
-                            # Use default green color for gripper
-                            vertex_colors = np.full((len(vertices), 3), [0, 255, 128], dtype=np.uint8)
-                        
-                        rr.log(
-                            "sam2/gripper_mesh",
-                            rr.Mesh3D(
-                                vertex_positions=vertices,
-                                triangle_indices=triangles,
-                                vertex_colors=vertex_colors,
-                            ),
-                        )
-                except Exception as e:
-                    # Mesh creation is optional, continue if it fails
-                    pass
 
     if getattr(args, "export_bbox_video", False):
         try:
@@ -3666,133 +3157,6 @@ def save_and_visualize(
 
 
 # --- COLMAP Integration Functions ---
-
-def crop_images_to_roi(
-    rgbs: np.ndarray,
-    depths: np.ndarray,
-    intrs: np.ndarray,
-    extrs: np.ndarray,
-    bbox_3d_center: Optional[np.ndarray] = None,
-    bbox_3d_size: Optional[np.ndarray] = None,
-    margin_ratio: float = 0.1,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[Tuple[int, int, int, int]]]:
-    """
-    Crop images to region of interest based on 3D bounding box projection.
-    
-    Args:
-        rgbs: RGB images (C, T, H, W, 3)
-        depths: Depth maps (C, T, H, W)
-        intrs: Camera intrinsics (C, T, 3, 3)
-        extrs: Camera extrinsics (C, T, 3, 4)
-        bbox_3d_center: 3D bounding box center (optional)
-        bbox_3d_size: 3D bounding box size (optional)
-        margin_ratio: Additional margin around bbox as ratio of bbox size
-    
-    Returns:
-        Cropped rgbs, depths, updated intrinsics, and crop regions [(x1, y1, x2, y2), ...]
-    """
-    C, T, H, W, _ = rgbs.shape
-    
-    # If no bbox provided, skip crop
-    if bbox_3d_center is None or bbox_3d_size is None:
-        print("[INFO] No 3D bbox provided, skipping crop")
-        return rgbs, depths, intrs, [(0, 0, W, H)] * C
-    
-    print(f"[INFO] Cropping images to ROI around bbox center={bbox_3d_center}, size={bbox_3d_size}")
-    
-    # Generate 8 corners of the 3D bounding box
-    half_size = bbox_3d_size / 2
-    corners_3d = []
-    for dx in [-1, 1]:
-        for dy in [-1, 1]:
-            for dz in [-1, 1]:
-                corner = bbox_3d_center + np.array([dx, dy, dz]) * half_size
-                corners_3d.append(corner)
-    corners_3d = np.array(corners_3d)  # (8, 3)
-    
-    # Project corners to each camera and find bounding box in image space
-    crop_regions = []
-    rgbs_cropped_list = []
-    depths_cropped_list = []
-    intrs_cropped_list = []
-    
-    for c_idx in range(C):
-        # Use first frame's calibration for cropping
-        K = intrs[c_idx, 0]  # (3, 3)
-        E = extrs[c_idx, 0]  # (3, 4)
-        R, t = E[:3, :3], E[:3, 3]
-        
-        # Transform corners to camera frame
-        corners_cam = (R @ corners_3d.T + t.reshape(3, 1)).T  # (8, 3)
-        
-        # Filter out points behind camera
-        valid_mask = corners_cam[:, 2] > 0
-        if not valid_mask.any():
-            print(f"[WARN] Camera {c_idx}: All bbox corners behind camera, using full image")
-            crop_regions.append((0, 0, W, H))
-            rgbs_cropped_list.append(rgbs[c_idx])
-            depths_cropped_list.append(depths[c_idx])
-            intrs_cropped_list.append(intrs[c_idx])
-            continue
-        
-        corners_cam_valid = corners_cam[valid_mask]
-        
-        # Project to 2D
-        corners_2d_hom = (K @ corners_cam_valid.T).T  # (N, 3)
-        corners_2d = corners_2d_hom[:, :2] / (corners_2d_hom[:, 2:3] + 1e-8)  # (N, 2)
-        
-        # Find bounding box in image space
-        x_min, y_min = corners_2d.min(axis=0)
-        x_max, y_max = corners_2d.max(axis=0)
-        
-        # Add margin
-        bbox_width = x_max - x_min
-        bbox_height = y_max - y_min
-        margin_x = bbox_width * margin_ratio
-        margin_y = bbox_height * margin_ratio
-        
-        x_min = max(0, int(x_min - margin_x))
-        y_min = max(0, int(y_min - margin_y))
-        x_max = min(W, int(x_max + margin_x))
-        y_max = min(H, int(y_max + margin_y))
-        
-        # Ensure minimum crop size
-        if x_max - x_min < 100 or y_max - y_min < 100:
-            print(f"[WARN] Camera {c_idx}: Crop too small, using full image")
-            crop_regions.append((0, 0, W, H))
-            rgbs_cropped_list.append(rgbs[c_idx])
-            depths_cropped_list.append(depths[c_idx])
-            intrs_cropped_list.append(intrs[c_idx])
-            continue
-        
-        crop_regions.append((x_min, y_min, x_max, y_max))
-        
-        # Crop all frames for this camera
-        rgbs_cam_cropped = rgbs[c_idx, :, y_min:y_max, x_min:x_max, :]
-        depths_cam_cropped = depths[c_idx, :, y_min:y_max, x_min:x_max]
-        
-        rgbs_cropped_list.append(rgbs_cam_cropped)
-        depths_cropped_list.append(depths_cam_cropped)
-        
-        # Update intrinsics (adjust principal point)
-        intrs_cam_cropped = intrs[c_idx].copy()
-        for t_idx in range(T):
-            K_t = intrs_cam_cropped[t_idx].copy()
-            K_t[0, 2] -= x_min  # cx
-            K_t[1, 2] -= y_min  # cy
-            intrs_cam_cropped[t_idx] = K_t
-        
-        intrs_cropped_list.append(intrs_cam_cropped)
-        
-        print(f"[INFO] Camera {c_idx}: Cropped from {W}x{H} to {x_max-x_min}x{y_max-y_min} at ({x_min}, {y_min})")
-    
-    # Stack back to arrays
-    rgbs_cropped = np.stack(rgbs_cropped_list, axis=0)
-    depths_cropped = np.stack(depths_cropped_list, axis=0)
-    intrs_cropped = np.stack(intrs_cropped_list, axis=0)
-    
-    return rgbs_cropped, depths_cropped, intrs_cropped, crop_regions
-
 
 def setup_colmap_workspace(
     workspace_dir: Path,
@@ -3897,76 +3261,43 @@ def _rotation_matrix_to_quaternion(R: np.ndarray) -> np.ndarray:
     return np.array([w, x, y, z])
 
 
-def run_colmap_feature_extraction(workspace_dir: Path) -> bool:
-    """Run COLMAP feature extraction."""
-    # Check if COLMAP is installed
+
+def run_colmap_feature_extraction(workspace_dir: Path, database_path: Path, images_dir: Path) -> bool:
+    """Run COLMAP feature extraction using pycolmap."""
     try:
-        subprocess.run(["colmap", "--version"], check=True, capture_output=True, text=True)
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        print("[ERROR] COLMAP is not installed or not in PATH. Please install COLMAP to use this feature.")
-        print("[INFO] Installation instructions: https://colmap.github.io/install.html")
-        return False
-    
-    database_path = workspace_dir / "database.db"
-    images_dir = workspace_dir / "images"
-    
-    cmd = [
-        "colmap", "feature_extractor",
-        "--database_path", str(database_path),
-        "--image_path", str(images_dir),
-        "--ImageReader.single_camera", "0",
-        "--ImageReader.camera_model", "PINHOLE",
-    ]
-    
-    print(f"[INFO] Running COLMAP feature extraction...")
-    try:
-        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        print(f"[INFO] Running pycolmap feature extraction...")
+        pycolmap.extract_features(database_path, images_dir)
         print("[INFO] Feature extraction completed successfully")
         return True
-    except subprocess.CalledProcessError as e:
-        print(f"[ERROR] Feature extraction failed: {e.stderr}")
+    except Exception as e:
+        print(f"[ERROR] Feature extraction failed: {e}")
         return False
 
 
-def run_colmap_matching(workspace_dir: Path) -> bool:
-    """Run COLMAP feature matching."""
-    database_path = workspace_dir / "database.db"
-    
-    cmd = [
-        "colmap", "exhaustive_matcher",
-        "--database_path", str(database_path),
-    ]
-    
-    print(f"[INFO] Running COLMAP feature matching...")
+def run_colmap_matching(workspace_dir: Path, database_path: Path) -> bool:
+    """Run COLMAP feature matching using pycolmap."""
     try:
-        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        print(f"[INFO] Running pycolmap feature matching...")
+        pycolmap.match_exhaustive(database_path)
         print("[INFO] Feature matching completed successfully")
         return True
-    except subprocess.CalledProcessError as e:
-        print(f"[ERROR] Feature matching failed: {e.stderr}")
+    except Exception as e:
+        print(f"[ERROR] Feature matching failed: {e}")
         return False
 
 
-def run_colmap_mapper(workspace_dir: Path) -> bool:
-    """Run COLMAP mapper to reconstruct scene."""
-    database_path = workspace_dir / "database.db"
-    sparse_dir = workspace_dir / "sparse"
-    sparse_dir.mkdir(exist_ok=True)
-    
-    cmd = [
-        "colmap", "mapper",
-        "--database_path", str(database_path),
-        "--image_path", str(workspace_dir / "images"),
-        "--output_path", str(sparse_dir),
-    ]
-    
-    print(f"[INFO] Running COLMAP mapper...")
+def run_colmap_mapper(workspace_dir: Path, database_path: Path, images_dir: Path, output_dir: Path) -> bool:
+    """Run COLMAP mapper to reconstruct scene using pycolmap."""
     try:
-        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-        print("[INFO] Mapping completed successfully")
+        print(f"[INFO] Running pycolmap mapper...")
+        maps = pycolmap.incremental_mapping(database_path, images_dir, output_dir)
+        if len(maps) == 0:
+            print("[ERROR] No reconstruction created")
+            return False
+        print(f"[INFO] Mapping completed successfully, created {len(maps)} reconstructions")
         return True
-    except subprocess.CalledProcessError as e:
-        print(f"[ERROR] Mapping failed: {e.stderr}")
+    except Exception as e:
+        print(f"[ERROR] Mapping failed: {e}")
         return False
 
 
@@ -4059,68 +3390,6 @@ def select_best_cameras(
     
     return selected_indices
 
-
-def run_colmap_densification(workspace_dir: Path) -> Optional[o3d.geometry.PointCloud]:
-    """
-    Run COLMAP stereo densification to create a denser point cloud.
-    
-    Returns:
-        Open3D point cloud or None if failed
-    """
-    sparse_dir = workspace_dir / "sparse" / "0"
-    dense_dir = workspace_dir / "dense"
-    dense_dir.mkdir(exist_ok=True)
-    
-    # Undistort images
-    print("[INFO] Running COLMAP image undistorter...")
-    cmd = [
-        "colmap", "image_undistorter",
-        "--image_path", str(workspace_dir / "images"),
-        "--input_path", str(sparse_dir),
-        "--output_path", str(dense_dir),
-    ]
-    try:
-        subprocess.run(cmd, check=True, capture_output=True, text=True)
-    except subprocess.CalledProcessError as e:
-        print(f"[ERROR] Image undistortion failed: {e.stderr}")
-        return None
-    
-    # Stereo matching
-    print("[INFO] Running COLMAP patch match stereo...")
-    cmd = [
-        "colmap", "patch_match_stereo",
-        "--workspace_path", str(dense_dir),
-    ]
-    try:
-        subprocess.run(cmd, check=True, capture_output=True, text=True)
-    except subprocess.CalledProcessError as e:
-        print(f"[ERROR] Stereo matching failed: {e.stderr}")
-        return None
-    
-    # Stereo fusion
-    print("[INFO] Running COLMAP stereo fusion...")
-    cmd = [
-        "colmap", "stereo_fusion",
-        "--workspace_path", str(dense_dir),
-        "--output_path", str(dense_dir / "fused.ply"),
-    ]
-    try:
-        subprocess.run(cmd, check=True, capture_output=True, text=True)
-    except subprocess.CalledProcessError as e:
-        print(f"[ERROR] Stereo fusion failed: {e.stderr}")
-        return None
-    
-    # Load the dense point cloud
-    ply_path = dense_dir / "fused.ply"
-    if not ply_path.exists():
-        print("[ERROR] Dense point cloud file not found")
-        return None
-    
-    print(f"[INFO] Loading dense point cloud from {ply_path}")
-    pcd = o3d.io.read_point_cloud(str(ply_path))
-    print(f"[INFO] Loaded dense point cloud with {len(pcd.points)} points")
-    
-    return pcd
 
 
 def main():
@@ -4323,55 +3592,7 @@ def main():
         default=False,
         help="Use DBSCAN clustering on colors to filter query points. Keeps only largest cluster (gripper color). Default: False (off).",
     )
-    parser.add_argument(
-        "--sam2-tracking",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Enable SAM2 tracking for gripper segmentation (requires query points).",
-    )
-    parser.add_argument(
-        "--sam2-checkpoint",
-        type=Path,
-        default=Path("third_party/sam2/sam2/checkpoints/sam2.1_hiera_large.pt"),
-        help="Path to SAM2 model checkpoint.",
-    )
-    parser.add_argument(
-        "--sam2-config",
-        type=str,
-        default="configs/sam2.1/sam2.1_hiera_l.yaml",
-        help="SAM2 model configuration file (relative to sam2 package).",
-    )
-    parser.add_argument(
-        "--sam2-init-frame",
-        type=int,
-        default=0,
-        help="Frame index to initialize SAM2 tracking (when gripper is visible and clear).",
-    )
-    parser.add_argument(
-        "--visualize-sam2-masks",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Visualize SAM2 masks in Rerun.",
-    )
-    parser.add_argument(
-        "--sam2-mask-as-mesh",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Convert SAM2 masks to 3D meshes for Rerun visualization.",
-    )
     # COLMAP-related arguments
-    parser.add_argument(
-        "--crop-camera",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Crop cameras to region of interest before COLMAP processing.",
-    )
-    parser.add_argument(
-        "--crop-margin",
-        type=float,
-        default=0.1,
-        help="Margin ratio to add around the bounding box when cropping (0.0-1.0).",
-    )
     parser.add_argument(
         "--refine-colmap",
         action=argparse.BooleanOptionalAction,
@@ -4383,18 +3604,6 @@ def main():
         type=int,
         default=None,
         help="Limit number of cameras to N best (based on COLMAP geometric consistency).",
-    )
-    parser.add_argument(
-        "--colmap-densification",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Use COLMAP stereo to create a denser point cloud.",
-    )
-    parser.add_argument(
-        "--colmap-workspace",
-        type=Path,
-        default=None,
-        help="Path to COLMAP workspace directory. If not provided, a temporary directory will be used.",
     )
     args = parser.parse_args()
 
@@ -4578,35 +3787,21 @@ def main():
 
     # --- Step 3: COLMAP Processing (if enabled) ---
     colmap_workspace = None
-    if getattr(args, "refine_colmap", False) or getattr(args, "colmap_densification", False):
+    if getattr(args, "refine_colmap", False):
         print("\n[INFO] ========== COLMAP Processing ==========")
         
         # Set up workspace
-        if args.colmap_workspace:
-            colmap_workspace = args.colmap_workspace
-            colmap_workspace.mkdir(parents=True, exist_ok=True)
-        else:
-            colmap_workspace = Path(tempfile.mkdtemp(prefix="colmap_workspace_"))
+        import tempfile
+        import shutil
+        colmap_workspace = Path(tempfile.mkdtemp(prefix="colmap_workspace_"))
         
         print(f"[INFO] COLMAP workspace: {colmap_workspace}")
         
-        # Crop images if requested
-        if getattr(args, "crop_camera", False):
-            print("[INFO] Cropping cameras to ROI...")
-            # Use gripper bbox if available for cropping
-            bbox_center = None
-            bbox_size = None
-            if robot_gripper_body_boxes and len(robot_gripper_body_boxes) > 0:
-                # Use first frame's bbox as reference
-                first_bbox = next((b for b in robot_gripper_body_boxes if b is not None), None)
-                if first_bbox:
-                    bbox_center = np.array(first_bbox["center"])
-                    bbox_size = np.array(first_bbox["half_sizes"]) * 2
-                    print(f"[INFO] Using gripper bbox for cropping: center={bbox_center}, size={bbox_size}")
-            
-            rgbs, depths, intrs, crop_regions = crop_images_to_roi(
-                rgbs, depths, intrs, extrs, bbox_center, bbox_size, args.crop_margin
-            )
+        # Define paths
+        database_path = colmap_workspace / "database.db"
+        images_dir = colmap_workspace / "images"
+        sparse_dir = colmap_workspace / "sparse" / "0"
+        sparse_dir.mkdir(parents=True, exist_ok=True)
         
         # Set up COLMAP workspace
         setup_colmap_workspace(colmap_workspace, rgbs, intrs, extrs, final_cam_ids)
@@ -4616,15 +3811,15 @@ def main():
             print("[INFO] Running COLMAP refinement pipeline...")
             
             # Feature extraction
-            if not run_colmap_feature_extraction(colmap_workspace):
+            if not run_colmap_feature_extraction(colmap_workspace, database_path, images_dir):
                 print("[WARN] COLMAP feature extraction failed, skipping refinement")
             else:
                 # Feature matching
-                if not run_colmap_matching(colmap_workspace):
+                if not run_colmap_matching(colmap_workspace, database_path):
                     print("[WARN] COLMAP matching failed, skipping refinement")
                 else:
                     # Mapping
-                    if not run_colmap_mapper(colmap_workspace):
+                    if not run_colmap_mapper(colmap_workspace, database_path, images_dir, sparse_dir):
                         print("[WARN] COLMAP mapping failed, skipping refinement")
                     else:
                         # Evaluate camera quality
@@ -4656,24 +3851,6 @@ def main():
                             
                             print(f"[INFO] Filtered to {len(final_cam_ids)} cameras: {final_cam_ids}")
         
-        # Run densification if requested
-        dense_pcd = None
-        if getattr(args, "colmap_densification", False):
-            print("[INFO] Running COLMAP densification...")
-            dense_pcd = run_colmap_densification(colmap_workspace)
-            if dense_pcd is not None:
-                print(f"[INFO] COLMAP produced dense point cloud with {len(dense_pcd.points)} points")
-                # Log to Rerun
-                if not args.no_pointcloud:
-                    rr.init("RH20T_Reprojection_Frameworks", spawn=False)
-                    rr.log("world", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
-                    pts = np.asarray(dense_pcd.points, dtype=np.float32)
-                    if dense_pcd.has_colors():
-                        cols = (np.asarray(dense_pcd.colors) * 255).astype(np.uint8)
-                    else:
-                        cols = None
-                    rr.log("colmap/dense_cloud", rr.Points3D(pts, colors=cols))
-        
         # Clean up temporary workspace if not specified
         if not args.colmap_workspace and colmap_workspace:
             print(f"[INFO] Cleaning up temporary COLMAP workspace: {colmap_workspace}")
@@ -4681,34 +3858,9 @@ def main():
         
         print("[INFO] ========== COLMAP Processing Complete ==========\n")
 
-    # --- Step 4: SAM2 Tracking (if enabled) ---
+    # --- Step 4: Save and Visualize ---
     sam2_masks = None
     sam2_fused_clouds = None
-    if getattr(args, "sam2_tracking", False):
-        print("[INFO] Running SAM2 gripper tracking on all cameras...")
-        sam2_masks = track_gripper_with_sam2(
-            args,
-            rgbs,
-            query_points,
-            intrs,
-            extrs,
-        )
-        if sam2_masks is not None and len(sam2_masks) > 0:
-            print(f"[INFO] SAM2 tracking produced masks for {len(sam2_masks)} cameras")
-            
-            # Fuse masks from all cameras into 3D point clouds
-            sam2_fused_clouds = fuse_masks_to_3d(
-                sam2_masks,
-                depths,
-                rgbs,
-                intrs,
-                extrs,
-            )
-            print(f"[INFO] Created {len([c for c in sam2_fused_clouds if c])} fused 3D point clouds")
-        else:
-            print("[WARN] SAM2 tracking failed or returned no masks")
-    
-    # --- Step 5: Save and Visualize ---
     rr.init("RH20T_Reprojection_Frameworks", spawn=False)
     # Set the desired coordinate system for the 'world' space
     rr.log("world", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
@@ -4747,8 +3899,6 @@ def main():
         robot_object_points,
         query_points,
         query_colors,
-        sam2_masks,
-        sam2_fused_clouds,
     )
 
     if not args.no_pointcloud:
