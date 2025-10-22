@@ -1,12 +1,14 @@
 - [ ] Fix the 2D to 3D lifting 
 - [ ] Lift hand tracking to 3D
 - [ ] Lift Tracks to the rgb videos
-- [ ] Select best 4 cameras with COLMAP, then use hand tracking to select relvant region, and complete depth for best view 
+- [ ] ! track the objects in 3D
+- [ ] Select best 4 cameras with COLMAP,
+- [ ]  then use hand tracking to select  and crop relvant region, and complete depth for best view 
 - [ ] segment the objects and track them (remove sam tracking)
 - [ ] Finally settle for a good 2D/3D flow -> hae multiview alignment as this is one of the main selling points
 - [x] enable hand tracking
 - [ ] Finalize large scale code to train somerthing like flow..
-
+ [ ] Fix robtot rendering being slower than the actual code, fix the tcp etc stuff maybe go old commit
 
 - [x] Update the date for lab course
 -  [ ] for grasping - data generation for side grasps? 

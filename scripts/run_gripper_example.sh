@@ -25,7 +25,7 @@ RGB_FOLDER="/data/rh20t_api/data/test_data_full_rgb_upscaled_depth/rgb_data/RH20
 #run low res both so dense low res
 python create_sparse_depth_map.py \
   --task-folder $DEPTH_FOLDER \
-  --high-res-folder $DEPTH_FOLDER \
+  --high-res-folder $RGB_FOLDER \
   --out-dir ./data/high_res_filtered \
   --max-frames 60 \
   --frames-for-tracking 1 \
@@ -41,11 +41,13 @@ python create_sparse_depth_map.py \
   --gripper-body-height-m 0.15 \
   --gripper-body-width-m 0.15 \
   --visualize-query-points \
-  --max-query-points 128 \
+  --max-query-points 512 \
   --no-color-alignment-check \
   --refine-colmap \
-  --limit-num-cameras 2 \
+  --limit-num-cameras 4 \
   "${@}"
+
+# if not happy camera sselection may longer overlap
 #check colmap refinement
 #add colmap densificaiton TODO
 # python create_sparse_depth_map.py \

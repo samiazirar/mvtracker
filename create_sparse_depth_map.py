@@ -3278,7 +3278,9 @@ def run_colmap_matching(workspace_dir: Path, database_path: Path) -> bool:
     """Run COLMAP feature matching using pycolmap."""
     try:
         print(f"[INFO] Running pycolmap feature matching...")
-        pycolmap.match_exhaustive(database_path)
+        #pycolmap.match_exhaustive(database_path)
+        # this is to slow, lets only compare to the next 5 images in time
+        pycolmap.match_sequential(database_path=str(database_path), matching_options=pycolmap.SequentialMatchingOptions(overlap=5))
         print("[INFO] Feature matching completed successfully")
         return True
     except Exception as e:

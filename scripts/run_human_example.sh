@@ -35,6 +35,8 @@ python create_sparse_depth_map.py \
   --no-color-alignment-check \
   --pc-clean-radius 0.01 \
   --pc-clean-min-points 40 \
+  --refine-colmap \
+  --limit-num-cameras 4 \
   "$@"
 
 echo "Copying data to /data/rh20t_api"
