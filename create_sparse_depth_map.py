@@ -3834,16 +3834,20 @@ def main():
                                 final_cam_ids, camera_scores, args.limit_num_cameras
                             )
                             
+                            # Convert to numpy array for proper indexing
+                            selected_indices_np = np.array(selected_indices, dtype=int)
+                            
                             # Filter all data to selected cameras
                             final_cam_ids = [final_cam_ids[i] for i in selected_indices]
                             cam_dirs_low = [cam_dirs_low[i] for i in selected_indices]
                             if cam_dirs_high:
                                 cam_dirs_high = [cam_dirs_high[i] for i in selected_indices]
                             
-                            rgbs = rgbs[selected_indices]
-                            depths = depths[selected_indices]
-                            intrs = intrs[selected_indices]
-                            extrs = extrs[selected_indices]
+                            # Use numpy array indexing for array data
+                            rgbs = rgbs[selected_indices_np]
+                            depths = depths[selected_indices_np]
+                            intrs = intrs[selected_indices_np]
+                            extrs = extrs[selected_indices_np]
                             
                             per_cam_low_sel = [per_cam_low_sel[i] for i in selected_indices]
                             if per_cam_high_sel:
