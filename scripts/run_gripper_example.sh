@@ -43,8 +43,11 @@ python create_sparse_depth_map.py \
   --visualize-query-points \
   --max-query-points 128 \
   --no-color-alignment-check \
+  --refine-colmap \
+  --limit-num-cameras 2 \
+  --colmap-densification \
   "${@}"
-
+#check colmap refinement
 
 # python create_sparse_depth_map.py \
 #   --task-folder $DEPTH_FOLDER \
