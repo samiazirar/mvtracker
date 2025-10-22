@@ -3671,6 +3671,7 @@ def crop_images_to_roi(
     rgbs: np.ndarray,
     depths: np.ndarray,
     intrs: np.ndarray,
+    extrs: np.ndarray,
     bbox_3d_center: Optional[np.ndarray] = None,
     bbox_3d_size: Optional[np.ndarray] = None,
     margin_ratio: float = 0.1,
@@ -3682,6 +3683,7 @@ def crop_images_to_roi(
         rgbs: RGB images (C, T, H, W, 3)
         depths: Depth maps (C, T, H, W)
         intrs: Camera intrinsics (C, T, 3, 3)
+        extrs: Camera extrinsics (C, T, 3, 4)
         bbox_3d_center: 3D bounding box center (optional)
         bbox_3d_size: 3D bounding box size (optional)
         margin_ratio: Additional margin around bbox as ratio of bbox size
@@ -3691,14 +3693,105 @@ def crop_images_to_roi(
     """
     C, T, H, W, _ = rgbs.shape
     
-    # If no bbox provided, use image center with some default crop
+    # If no bbox provided, skip crop
     if bbox_3d_center is None or bbox_3d_size is None:
         print("[INFO] No 3D bbox provided, skipping crop")
         return rgbs, depths, intrs, [(0, 0, W, H)] * C
     
-    # For now, return uncropped (will implement projection-based cropping)
-    print("[INFO] Camera cropping not yet implemented, returning original images")
-    return rgbs, depths, intrs, [(0, 0, W, H)] * C
+    print(f"[INFO] Cropping images to ROI around bbox center={bbox_3d_center}, size={bbox_3d_size}")
+    
+    # Generate 8 corners of the 3D bounding box
+    half_size = bbox_3d_size / 2
+    corners_3d = []
+    for dx in [-1, 1]:
+        for dy in [-1, 1]:
+            for dz in [-1, 1]:
+                corner = bbox_3d_center + np.array([dx, dy, dz]) * half_size
+                corners_3d.append(corner)
+    corners_3d = np.array(corners_3d)  # (8, 3)
+    
+    # Project corners to each camera and find bounding box in image space
+    crop_regions = []
+    rgbs_cropped_list = []
+    depths_cropped_list = []
+    intrs_cropped_list = []
+    
+    for c_idx in range(C):
+        # Use first frame's calibration for cropping
+        K = intrs[c_idx, 0]  # (3, 3)
+        E = extrs[c_idx, 0]  # (3, 4)
+        R, t = E[:3, :3], E[:3, 3]
+        
+        # Transform corners to camera frame
+        corners_cam = (R @ corners_3d.T + t.reshape(3, 1)).T  # (8, 3)
+        
+        # Filter out points behind camera
+        valid_mask = corners_cam[:, 2] > 0
+        if not valid_mask.any():
+            print(f"[WARN] Camera {c_idx}: All bbox corners behind camera, using full image")
+            crop_regions.append((0, 0, W, H))
+            rgbs_cropped_list.append(rgbs[c_idx])
+            depths_cropped_list.append(depths[c_idx])
+            intrs_cropped_list.append(intrs[c_idx])
+            continue
+        
+        corners_cam_valid = corners_cam[valid_mask]
+        
+        # Project to 2D
+        corners_2d_hom = (K @ corners_cam_valid.T).T  # (N, 3)
+        corners_2d = corners_2d_hom[:, :2] / (corners_2d_hom[:, 2:3] + 1e-8)  # (N, 2)
+        
+        # Find bounding box in image space
+        x_min, y_min = corners_2d.min(axis=0)
+        x_max, y_max = corners_2d.max(axis=0)
+        
+        # Add margin
+        bbox_width = x_max - x_min
+        bbox_height = y_max - y_min
+        margin_x = bbox_width * margin_ratio
+        margin_y = bbox_height * margin_ratio
+        
+        x_min = max(0, int(x_min - margin_x))
+        y_min = max(0, int(y_min - margin_y))
+        x_max = min(W, int(x_max + margin_x))
+        y_max = min(H, int(y_max + margin_y))
+        
+        # Ensure minimum crop size
+        if x_max - x_min < 100 or y_max - y_min < 100:
+            print(f"[WARN] Camera {c_idx}: Crop too small, using full image")
+            crop_regions.append((0, 0, W, H))
+            rgbs_cropped_list.append(rgbs[c_idx])
+            depths_cropped_list.append(depths[c_idx])
+            intrs_cropped_list.append(intrs[c_idx])
+            continue
+        
+        crop_regions.append((x_min, y_min, x_max, y_max))
+        
+        # Crop all frames for this camera
+        rgbs_cam_cropped = rgbs[c_idx, :, y_min:y_max, x_min:x_max, :]
+        depths_cam_cropped = depths[c_idx, :, y_min:y_max, x_min:x_max]
+        
+        rgbs_cropped_list.append(rgbs_cam_cropped)
+        depths_cropped_list.append(depths_cam_cropped)
+        
+        # Update intrinsics (adjust principal point)
+        intrs_cam_cropped = intrs[c_idx].copy()
+        for t_idx in range(T):
+            K_t = intrs_cam_cropped[t_idx].copy()
+            K_t[0, 2] -= x_min  # cx
+            K_t[1, 2] -= y_min  # cy
+            intrs_cam_cropped[t_idx] = K_t
+        
+        intrs_cropped_list.append(intrs_cam_cropped)
+        
+        print(f"[INFO] Camera {c_idx}: Cropped from {W}x{H} to {x_max-x_min}x{y_max-y_min} at ({x_min}, {y_min})")
+    
+    # Stack back to arrays
+    rgbs_cropped = np.stack(rgbs_cropped_list, axis=0)
+    depths_cropped = np.stack(depths_cropped_list, axis=0)
+    intrs_cropped = np.stack(intrs_cropped_list, axis=0)
+    
+    return rgbs_cropped, depths_cropped, intrs_cropped, crop_regions
 
 
 def setup_colmap_workspace(
@@ -4504,7 +4597,7 @@ def main():
                     print(f"[INFO] Using gripper bbox for cropping: center={bbox_center}, size={bbox_size}")
             
             rgbs, depths, intrs, crop_regions = crop_images_to_roi(
-                rgbs, depths, intrs, bbox_center, bbox_size, args.crop_margin
+                rgbs, depths, intrs, extrs, bbox_center, bbox_size, args.crop_margin
             )
         
         # Set up COLMAP workspace
