@@ -1,44 +1,26 @@
 #!/bin/bash
 set -e
 
-# 1
-python demo.py --sample-path data/human_high_res_filtered_mg_depth_completion/task_0092_user_0010_scene_0004_cfg_0003_human_mg_depth_completion/task_0092_user_0010_scene_0004_cfg_0003_human_mg_completed_camera_id_036422060909.npz \
-    --random_query_points \
-    --rrd data/human_high_res_filtered_mg_depth_completion/task_0092_user_0010_scene_0004_cfg_0003_human_mg_depth_completion/task_0092_user_0010_scene_0004_cfg_0003_human_mg_completed_camera_id_036422060909.rrd
-cp data/human_high_res_filtered_mg_depth_completion/task_0092_user_0010_scene_0004_cfg_0003_human_mg_depth_completion/task_0092_user_0010_scene_0004_cfg_0003_human_mg_completed_camera_id_036422060909.rrd /data/rh20t_api/test_data_generated/
 
-# 2
-python demo.py --sample-path data/human_high_res_filtered_mg_depth_completion/task_0092_user_0010_scene_0004_cfg_0003_human_mg_depth_completion/task_0092_user_0010_scene_0004_cfg_0003_human_mg_completed_camera_id_038522062288.npz \
-    --random_query_points \
-    --rrd data/human_high_res_filtered_mg_depth_completion/task_0092_user_0010_scene_0004_cfg_0003_human_mg_depth_completion/task_0092_user_0010_scene_0004_cfg_0003_human_mg_completed_camera_id_038522062288.rrd
-cp data/human_high_res_filtered_mg_depth_completion/task_0092_user_0010_scene_0004_cfg_0003_human_mg_depth_completion/task_0092_user_0010_scene_0004_cfg_0003_human_mg_completed_camera_id_038522062288.rrd /data/rh20t_api/test_data_generated/
 
-# 3
-python demo.py --sample-path data/human_high_res_filtered_mg_depth_completion/task_0092_user_0010_scene_0004_cfg_0003_human_mg_depth_completion/task_0092_user_0010_scene_0004_cfg_0003_human_mg_completed_camera_id_104122062295.npz \
-    --random_query_points \
-    --rrd data/human_high_res_filtered_mg_depth_completion/task_0092_user_0010_scene_0004_cfg_0003_human_mg_depth_completion/task_0092_user_0010_scene_0004_cfg_0003_human_mg_completed_camera_id_104122062295.rrd
-cp data/human_high_res_filtered_mg_depth_completion/task_0092_user_0010_scene_0004_cfg_0003_human_mg_depth_completion/task_0092_user_0010_scene_0004_cfg_0003_human_mg_completed_camera_id_104122062295.rrd /data/rh20t_api/test_data_generated/
 
-# 4
-python demo.py --sample-path data/human_high_res_filtered_mg_depth_completion/task_0092_user_0010_scene_0004_cfg_0003_human_mg_depth_completion/task_0092_user_0010_scene_0004_cfg_0003_human_mg_completed_camera_id_104122062823.npz \
-    --random_query_points \
-    --rrd data/human_high_res_filtered_mg_depth_completion/task_0092_user_0010_scene_0004_cfg_0003_human_mg_depth_completion/task_0092_user_0010_scene_0004_cfg_0003_human_mg_completed_camera_id_104122062823.rrd
-cp data/human_high_res_filtered_mg_depth_completion/task_0092_user_0010_scene_0004_cfg_0003_human_mg_depth_completion/task_0092_user_0010_scene_0004_cfg_0003_human_mg_completed_camera_id_104122062823.rrd /data/rh20t_api/test_data_generated/
+echo "Trying depth completed"
+DIR="/workspace/data/human_high_res_filtered_mg_depth_completion/task_0045_user_0020_scene_0004_cfg_0006_human_mg_depth_completion"
 
-# 5
-python demo.py --sample-path data/human_high_res_filtered_mg_depth_completion/task_0092_user_0010_scene_0004_cfg_0003_human_mg_depth_completion/task_0092_user_0010_scene_0004_cfg_0003_human_mg_completed_camera_id_104122063550.npz \
-    --random_query_points \
-    --rrd data/human_high_res_filtered_mg_depth_completion/task_0092_user_0010_scene_0004_cfg_0003_human_mg_depth_completion/task_0092_user_0010_scene_0004_cfg_0003_human_mg_completed_camera_id_104122063550.rrd
-cp data/human_high_res_filtered_mg_depth_completion/task_0092_user_0010_scene_0004_cfg_0003_human_mg_depth_completion/task_0092_user_0010_scene_0004_cfg_0003_human_mg_completed_camera_id_104122063550.rrd /data/rh20t_api/test_data_generated/
+python demo.py --temporal_stride 1 --spatial_downsample 1 --depth_estimator gt --depth_cache_dir ./depth_cache --rerun save --sample-path "$DIR/task_0045_user_0020_scene_0004_cfg_0006_human_mg_completed_camera_id_037522061512.npz" --tracker cotracker3_offline --random_query_points --rrd "$DIR/task_0045_user_0020_scene_0004_cfg_0006_human_mg_completed_camera_id_037522061512.rrd"
 
-# 6
-python demo.py --sample-path data/human_high_res_filtered_mg_depth_completion/task_0092_user_0010_scene_0004_cfg_0003_human_mg_depth_completion/task_0092_user_0010_scene_0004_cfg_0003_human_mg_completed_camera_id_104422070011.npz \
-    --random_query_points \
-    --rrd data/human_high_res_filtered_mg_depth_completion/task_0092_user_0010_scene_0004_cfg_0003_human_mg_depth_completion/task_0092_user_0010_scene_0004_cfg_0003_human_mg_completed_camera_id_104422070011.rrd
-cp data/human_high_res_filtered_mg_depth_completion/task_0092_user_0010_scene_0004_cfg_0003_human_mg_depth_completion/task_0092_user_0010_scene_0004_cfg_0003_human_mg_completed_camera_id_104422070011.rrd /data/rh20t_api/test_data_generated/
+python demo.py --temporal_stride 1 --spatial_downsample 1 --depth_estimator gt --depth_cache_dir ./depth_cache --rerun save --sample-path "$DIR/task_0045_user_0020_scene_0004_cfg_0006_human_mg_completed_camera_id_104122060811.npz" --tracker cotracker3_offline --random_query_points --rrd "$DIR/task_0045_user_0020_scene_0004_cfg_0006_human_mg_completed_camera_id_104122060811.rrd"
 
-# 7
-python demo.py --sample-path data/human_high_res_filtered_mg_depth_completion/task_0092_user_0010_scene_0004_cfg_0003_human_mg_depth_completion/task_0092_user_0010_scene_0004_cfg_0003_human_mg_completed_camera_id_f0172289.npz \
-    --random_query_points \
-    --rrd data/human_high_res_filtered_mg_depth_completion/task_0092_user_0010_scene_0004_cfg_0003_human_mg_depth_completion/task_0092_user_0010_scene_0004_cfg_0003_human_mg_completed_camera_id_f0172289.rrd
-cp data/human_high_res_filtered_mg_depth_completion/task_0092_user_0010_scene_0004_cfg_0003_human_mg_depth_completion/task_0092_user_0010_scene_0004_cfg_0003_human_mg_completed_camera_id_f0172289.rrd /data/rh20t_api/test_data_generated/
+python demo.py --temporal_stride 1 --spatial_downsample 1 --depth_estimator gt --depth_cache_dir ./depth_cache --rerun save --sample-path "$DIR/task_0045_user_0020_scene_0004_cfg_0006_human_mg_completed_camera_id_104122061018.npz" --tracker cotracker3_offline --random_query_points --rrd "$DIR/task_0045_user_0020_scene_0004_cfg_0006_human_mg_completed_camera_id_104122061018.rrd"
+
+python demo.py --temporal_stride 1 --spatial_downsample 1 --depth_estimator gt --depth_cache_dir ./depth_cache --rerun save --sample-path "$DIR/task_0045_user_0020_scene_0004_cfg_0006_human_mg_completed_camera_id_104122061330.npz" --tracker cotracker3_offline --random_query_points --rrd "$DIR/task_0045_user_0020_scene_0004_cfg_0006_human_mg_completed_camera_id_104122061330.rrd"
+
+python demo.py --temporal_stride 1 --spatial_downsample 1 --depth_estimator gt --depth_cache_dir ./depth_cache --rerun save --sample-path "$DIR/task_0045_user_0020_scene_0004_cfg_0006_human_mg_completed_camera_id_104122061602.npz" --tracker cotracker3_offline --random_query_points --rrd "$DIR/task_0045_user_0020_scene_0004_cfg_0006_human_mg_completed_camera_id_104122061602.rrd"
+
+python demo.py --temporal_stride 1 --spatial_downsample 1 --depth_estimator gt --depth_cache_dir ./depth_cache --rerun save --sample-path "$DIR/task_0045_user_0020_scene_0004_cfg_0006_human_mg_completed_camera_id_104122063633.npz" --tracker cotracker3_offline --random_query_points --rrd "$DIR/task_0045_user_0020_scene_0004_cfg_0006_human_mg_completed_camera_id_104122063633.rrd"
+
+python demo.py --temporal_stride 1 --spatial_downsample 1 --depth_estimator gt --depth_cache_dir ./depth_cache --rerun save --sample-path "$DIR/task_0045_user_0020_scene_0004_cfg_0006_human_mg_completed_camera_id_104122064161.npz" --tracker cotracker3_offline --random_query_points --rrd "$DIR/task_0045_user_0020_scene_0004_cfg_0006_human_mg_completed_camera_id_104122064161.rrd"
+
+python demo.py --temporal_stride 1 --spatial_downsample 1 --depth_estimator gt --depth_cache_dir ./depth_cache --rerun save --sample-path "$DIR/task_0045_user_0020_scene_0004_cfg_0006_human_mg_completed_camera_id_f0271510.npz" --tracker cotracker3_offline --random_query_points --rrd "$DIR/task_0045_user_0020_scene_0004_cfg_0006_human_mg_completed_camera_id_f0271510.rrd"
+
+cp -r $DIR/* /data/rh20t_api/test_data_generated/
