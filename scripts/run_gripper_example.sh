@@ -22,6 +22,12 @@ RGB_FOLDER="/data/rh20t_api/data/test_data_full_rgb_upscaled_depth/rgb_data/RH20
 # RGB_FOLDER="/data/rh20t_api/data/RH20T/RH20T_cfg3/$TASK_FOLDER"
 #check if using scene high with tcp now means it is swapped for all?
 
+# detect the object manipulated
+# detect time frame
+# detect static and non static background and remove or so
+# use grid based tracking 
+# depth completion
+
 #run low res both so dense low res
 python create_sparse_depth_map.py \
   --task-folder $DEPTH_FOLDER \

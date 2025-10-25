@@ -64,6 +64,10 @@ from mvtracker.utils.visualizer_rerun import log_pointclouds_to_rerun
 from RH20T.rh20t_api.configurations import get_conf_from_dir_name, load_conf
 from RH20T.rh20t_api.scene import RH20TScene
 from RH20T.utils.robot import RobotModel
+import json
+
+import yaml
+import os
 
 # TODO: find unused stuff and eithe remove or implement
 # TODO: First unused stuff: implement tcp usage or remove it
@@ -1264,6 +1268,7 @@ def scale_intrinsics_matrix(raw_K: np.ndarray, width: int, height: int, base_wid
     K = raw_K[:, :3].astype(np.float32, copy=True)
     scale_x = width / float(base_width)
     scale_y = height / float(base_height)
+    print(f"[INFO] Scaling intrinsics by factors (x: {scale_x:.4f}, y: {scale_y:.4f}) for image size ({width}x{height})")
     K[0, 0] *= scale_x
     K[0, 2] *= scale_x
     K[1, 1] *= scale_y
@@ -1607,7 +1612,6 @@ def fix_human_metadata_calib(task_path: Path) -> None:
     Args:
         task_path: Path to the task folder
     """
-    import json
     
     metadata_path = task_path / "metadata.json"
     if not metadata_path.exists():
@@ -1696,6 +1700,7 @@ def get_synchronized_timestamps(
 ) -> SyncResult:
     """Synchronize camera streams onto a uniform timeline with tolerance-based matching."""
 
+    print()
     desired_fps = target_fps if target_fps and target_fps > 0 else frame_rate_hz
     warnings_local: List[str] = []
 
@@ -2223,6 +2228,7 @@ def process_frames(
         h_low, w_low = low_img.shape[:2]
         low_shapes.append((h_low, w_low))
         base_res = infer_calibration_resolution(scene_low, cid)
+        print(" base res from calib image: ", base_res)
         if base_res is None:
             base_res = (max(1, int(round(scene_low.intrinsics[cid][0, 2] * 2))),
                         max(1, int(round(scene_low.intrinsics[cid][1, 2] * 2))))
@@ -2231,6 +2237,7 @@ def process_frames(
                 f"estimating base resolution as {base_res[0]}x{base_res[1]} using intrinsics."
             )
         base_w, base_h = base_res
+        print("[WARN] Switch this to the original rgbd_to_point_cloud_soon")
         scaled_low_intrinsics.append(scale_intrinsics_matrix(scene_low.intrinsics[cid], w_low, h_low, base_w, base_h))
 
     scaled_high_intrinsics: Optional[List[np.ndarray]] = None
@@ -2758,6 +2765,158 @@ def process_frames(
         query_colors,
     )
 
+
+def reject_outlier_points_multiview(
+    depths: np.ndarray,
+    intrs: np.ndarray,
+    extrs: np.ndarray,
+    reprojection_threshold: float = 5.0,
+) -> np.ndarray:
+    """
+    Reject outlier 3D points using multi-view consistency.
+    
+    For each 3D point derived from depth, check if it reprojects consistently
+    to other camera views. A point is kept only if it has sufficient support
+    from multiple views.
+    
+    Args:
+        depths: (C, T, H, W) depth maps
+        intrs: (C, T, 3, 3) camera intrinsics
+        extrs: (C, T, 3, 4) camera extrinsics (world-to-camera)
+        reprojection_threshold: Maximum pixel error for a reprojection to be considered an inlier
+    
+    Returns:
+        depths_filtered: (C, T, H, W) depth maps with outliers set to 0
+    """
+    print(f"\n[INFO] ========== Point Cloud Outlier Rejection ==========")
+    print(f"[INFO] Reprojection threshold: {reprojection_threshold} pixels")
+    
+    C, T, H, W = depths.shape
+    depths_filtered = depths.copy()
+    
+    total_points = 0
+    kept_points = 0
+    
+    # Process each frame independently
+    for t in range(T):
+        # Build 3D points from all cameras for this frame
+        all_points = []
+        all_colors = []  # For visualization, we could add colors later
+        point_sources = []  # Track which camera each point came from
+        
+        for c in range(C):
+            depth = depths[c, t]
+            K = intrs[c, t]
+            E_world_to_cam = extrs[c, t]
+            
+            # Convert to camera-to-world for easier 3D point computation
+            R_w2c = E_world_to_cam[:3, :3]
+            t_w2c = E_world_to_cam[:3, 3]
+            R_c2w = R_w2c.T
+            t_c2w = -R_c2w @ t_w2c
+            
+            # Get valid depth pixels
+            valid_mask = depth > 0
+            v_coords, u_coords = np.where(valid_mask)
+            
+            if len(u_coords) == 0:
+                continue
+            
+            # Backproject to 3D in camera frame
+            z = depth[v_coords, u_coords]
+            x = (u_coords - K[0, 2]) * z / K[0, 0]
+            y = (v_coords - K[1, 2]) * z / K[1, 1]
+            pts_cam = np.stack([x, y, z], axis=1)
+            
+            # Transform to world frame
+            pts_world = (R_c2w @ pts_cam.T).T + t_c2w
+            
+            all_points.append(pts_world)
+            point_sources.extend([(c, u, v) for u, v in zip(u_coords, v_coords)])
+        
+        if len(all_points) == 0:
+            continue
+        
+        all_points = np.vstack(all_points)
+        frame_total = len(all_points)
+        total_points += frame_total
+        
+        # For each point, check how many cameras see it with consistent depth
+        inlier_mask = np.ones(len(all_points), dtype=bool)
+        
+        for i, (pts_3d, src_info) in enumerate(zip(all_points, point_sources)):
+            src_cam, src_u, src_v = src_info
+            
+            # Count how many other cameras see this point with consistent depth
+            support_count = 0
+            
+            for c in range(C):
+                if c == src_cam:
+                    # Skip source camera
+                    continue
+                
+                K = intrs[c, t]
+                E_world_to_cam = extrs[c, t]
+                R_w2c = E_world_to_cam[:3, :3]
+                t_w2c = E_world_to_cam[:3, 3]
+                
+                # Project point to this camera
+                pts_cam = R_w2c @ pts_3d + t_w2c
+                
+                # Check if point is in front of camera
+                if pts_cam[2] <= 0:
+                    continue
+                
+                # Project to image coordinates
+                u_proj = K[0, 0] * pts_cam[0] / pts_cam[2] + K[0, 2]
+                v_proj = K[1, 1] * pts_cam[1] / pts_cam[2] + K[1, 2]
+                
+                # Check if projection is within image bounds
+                if u_proj < 0 or u_proj >= W or v_proj < 0 or v_proj >= H:
+                    continue
+                
+                u_int = int(np.round(u_proj))
+                v_int = int(np.round(v_proj))
+                
+                # Get depth at projected location
+                depth_at_proj = depths[c, t, v_int, u_int]
+                
+                if depth_at_proj <= 0:
+                    continue
+                
+                # Check consistency: does the depth match?
+                depth_error = abs(pts_cam[2] - depth_at_proj)
+                pixel_error = np.sqrt((u_proj - u_int)**2 + (v_proj - v_int)**2)
+                
+                # Accept if both depth and pixel location are consistent
+                if pixel_error < reprojection_threshold and depth_error < 0.05:  # 5cm depth tolerance
+                    support_count += 1
+            
+            # Require at least 1 other camera to confirm this point (for 2+ cameras)
+            # For more cameras, we could require more support
+            min_support = max(1, (C - 1) // 2)  # At least half of other cameras
+            if support_count < min_support:
+                inlier_mask[i] = False
+        
+        # Update depths to remove outliers
+        for i, src_info in enumerate(point_sources):
+            if not inlier_mask[i]:
+                src_cam, src_u, src_v = src_info
+                depths_filtered[src_cam, t, src_v, src_u] = 0
+        
+        frame_kept = inlier_mask.sum()
+        kept_points += frame_kept
+        
+        if frame_total > 0:
+            print(f"[INFO] Frame {t}: kept {frame_kept}/{frame_total} points ({100*frame_kept/frame_total:.1f}%)")
+    
+    if total_points > 0:
+        print(f"[INFO] Overall: kept {kept_points}/{total_points} points ({100*kept_points/total_points:.1f}%)")
+    print(f"[INFO] ========== Outlier Rejection Complete ==========\n")
+    
+    return depths_filtered
+
+
 def save_and_visualize(
     args,
     rgbs,
@@ -3274,33 +3433,355 @@ def run_colmap_feature_extraction(workspace_dir: Path, database_path: Path, imag
         return False
 
 
-def run_colmap_matching(workspace_dir: Path, database_path: Path) -> bool:
-    """Run COLMAP feature matching using pycolmap."""
+def run_colmap_matching(workspace_dir: Path, database_path: Path) -> tuple[bool, int]:
+    """Run COLMAP feature matching using pycolmap.
+    
+    Returns:
+        (success, num_matches): Whether matching succeeded and number of image pairs with matches
+    """
     try:
         print(f"[INFO] Running pycolmap feature matching...")
-        #pycolmap.match_exhaustive(database_path)
-        # this is to slow, lets only compare to the next 5 images in time
-        pycolmap.match_sequential(database_path=str(database_path), matching_options=pycolmap.SequentialMatchingOptions(overlap=5))
-        print("[INFO] Feature matching completed successfully")
-        return True
+        
+        # Try sequential matching first (faster)
+        print("[INFO] Trying sequential matching (overlap=5)...")
+        pycolmap.match_sequential(
+            database_path=str(database_path),
+            matching_options=pycolmap.SequentialMatchingOptions(overlap=5)
+        )
+        
+        # Query database for match statistics
+        import sqlite3
+        conn = sqlite3.connect(str(database_path))
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM two_view_geometries WHERE rows > 0")
+        num_matches = cursor.fetchone()[0]
+        conn.close()
+        
+        print(f"[INFO] Sequential matching found {num_matches} image pairs with matches")
+        
+        # If sequential matching found very few matches, try exhaustive (slower but more thorough)
+        if num_matches < 5:
+            print("[INFO] Few matches found, trying exhaustive matching...")
+            pycolmap.match_exhaustive(database_path)
+            
+            conn = sqlite3.connect(str(database_path))
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM two_view_geometries WHERE rows > 0")
+            num_matches = cursor.fetchone()[0]
+            conn.close()
+            
+            print(f"[INFO] Exhaustive matching found {num_matches} image pairs with matches")
+        
+        if num_matches == 0:
+            print("[WARN] No feature matches found between images!")
+            print("[WARN] This usually means:")
+            print("[WARN]   1. Images have insufficient texture/features")
+            print("[WARN]   2. Cameras don't share overlapping views (check alignment above)")
+            print("[WARN]   3. Images are too different (lighting, blur, etc.)")
+        
+        return True, num_matches
     except Exception as e:
         print(f"[ERROR] Feature matching failed: {e}")
-        return False
+        import traceback
+        traceback.print_exc()
+        return False, 0
 
 
-def run_colmap_mapper(workspace_dir: Path, database_path: Path, images_dir: Path, output_dir: Path) -> bool:
-    """Run COLMAP mapper to reconstruct scene using pycolmap."""
+def run_colmap_mapper(workspace_dir: Path, database_path: Path, images_dir: Path, output_dir: Path, use_known_poses: bool = True) -> tuple[bool, dict]:
+    """Run COLMAP mapper to reconstruct scene using pycolmap.
+    
+    Args:
+        use_known_poses: Ignored for now - always uses standard incremental mapping
+    
+    Returns:
+        (success, stats): Whether mapping succeeded and reconstruction statistics
+    """
     try:
         print(f"[INFO] Running pycolmap mapper...")
+        
+        # Use standard incremental mapping - it's more robust and handles everything
+        # The calibration is provided via cameras.txt which COLMAP will use as initial guess
         maps = pycolmap.incremental_mapping(database_path, images_dir, output_dir)
+        
         if len(maps) == 0:
             print("[ERROR] No reconstruction created")
-            return False
-        print(f"[INFO] Mapping completed successfully, created {len(maps)} reconstructions")
-        return True
+            print("[ERROR] This usually means:")
+            print("[ERROR]   1. No good initial image pair found (insufficient feature matches)")
+            print("[ERROR]   2. Reconstruction failed to grow beyond initial pair")
+            print("[ERROR]   3. Geometric verification failed (inconsistent camera poses)")
+            return False, {}
+        
+        # Get statistics from first (usually best) reconstruction
+        reconstruction = maps[0]
+        stats = {
+            'num_reconstructions': len(maps),
+            'num_registered_images': reconstruction.num_images(),
+            'num_points3d': reconstruction.num_points3D(),
+            'num_observations': sum(len(p.track.elements) for p in reconstruction.points3D.values())
+        }
+        
+        print(f"[INFO] Mapping completed successfully:")
+        print(f"[INFO]   - {stats['num_reconstructions']} reconstruction(s)")
+        print(f"[INFO]   - {stats['num_registered_images']} registered images")
+        print(f"[INFO]   - {stats['num_points3d']} 3D points")
+        print(f"[INFO]   - {stats['num_observations']} observations")
+        
+        return True, stats
     except Exception as e:
         print(f"[ERROR] Mapping failed: {e}")
-        return False
+        import traceback
+        traceback.print_exc()
+        return False, {}
+
+
+def verify_camera_alignment(
+    rgbs: np.ndarray,
+    depths: np.ndarray,
+    intrs: np.ndarray,
+    extrs: np.ndarray,
+    camera_ids: List[str],
+) -> Dict[str, Any]:
+    """
+    Verify camera alignment by checking multi-view consistency.
+    
+    Args:
+        rgbs: (C, T, H, W, 3) RGB images
+        depths: (C, T, H, W) depth maps
+        intrs: (C, T, 3, 3) intrinsics
+        extrs: (C, T, 3, 4) extrinsics (world-to-camera)
+    
+    Returns:
+        Dictionary with alignment diagnostics
+    """
+    print("\n[INFO] ========== Camera Alignment Verification ==========")
+    
+    C, T, H, W = depths.shape
+    
+    # Check 1: Are extrinsics valid?
+    print("[INFO] Checking camera extrinsics...")
+    for c_idx in range(C):
+        E = extrs[c_idx, 0]  # First frame
+        R = E[:3, :3]
+        t = E[:3, 3]
+        
+        # Check if rotation matrix is valid (determinant should be ~1)
+        det = np.linalg.det(R)
+        orthogonality = np.linalg.norm(R @ R.T - np.eye(3))
+        
+        print(f"[INFO]   Camera {camera_ids[c_idx]}: det(R)={det:.4f}, orthogonality_error={orthogonality:.6f}")
+        
+        if abs(det - 1.0) > 0.1:
+            print(f"[WARN]   Camera {camera_ids[c_idx]}: Rotation matrix determinant is {det:.4f} (should be ~1.0)")
+        if orthogonality > 0.01:
+            print(f"[WARN]   Camera {camera_ids[c_idx]}: Rotation matrix is not orthogonal (error={orthogonality:.6f})")
+    
+    # Check 2: Do cameras have overlapping views?
+    print("\n[INFO] Checking camera view overlap...")
+    frame_idx = T // 2  # Use middle frame
+    
+    # Project points from one camera to another
+    overlap_matrix = np.zeros((C, C))
+    
+    for c1 in range(C):
+        depth1 = depths[c1, frame_idx]
+        K1 = intrs[c1, frame_idx]
+        E1 = extrs[c1, frame_idx]
+        
+        # Get valid depth points (sample to speed up)
+        valid_mask = depth1 > 0
+        v_coords, u_coords = np.where(valid_mask)
+        
+        if len(u_coords) == 0:
+            continue
+        
+        # Sample points (max 1000 for speed)
+        if len(u_coords) > 1000:
+            indices = np.random.choice(len(u_coords), 1000, replace=False)
+            u_coords = u_coords[indices]
+            v_coords = v_coords[indices]
+        
+        # Backproject to 3D in camera frame
+        z1 = depth1[v_coords, u_coords]
+        x1 = (u_coords - K1[0, 2]) * z1 / K1[0, 0]
+        y1 = (v_coords - K1[1, 2]) * z1 / K1[1, 1]
+        pts_cam1 = np.stack([x1, y1, z1], axis=1)
+        
+        # Transform to world frame
+        R1 = E1[:3, :3]
+        t1 = E1[:3, 3]
+        R1_inv = R1.T
+        t1_inv = -R1_inv @ t1
+        pts_world = (R1_inv @ pts_cam1.T).T + t1_inv
+        
+        # Project to other cameras
+        for c2 in range(C):
+            if c1 == c2:
+                overlap_matrix[c1, c2] = 1.0
+                continue
+            
+            K2 = intrs[c2, frame_idx]
+            E2 = extrs[c2, frame_idx]
+            R2 = E2[:3, :3]
+            t2 = E2[:3, 3]
+            
+            # Transform to camera 2 frame
+            pts_cam2 = (R2 @ pts_world.T).T + t2
+            
+            # Project to image
+            valid_in_front = pts_cam2[:, 2] > 0
+            pts_cam2_valid = pts_cam2[valid_in_front]
+            
+            if len(pts_cam2_valid) == 0:
+                overlap_matrix[c1, c2] = 0.0
+                continue
+            
+            u2 = K2[0, 0] * pts_cam2_valid[:, 0] / pts_cam2_valid[:, 2] + K2[0, 2]
+            v2 = K2[1, 1] * pts_cam2_valid[:, 1] / pts_cam2_valid[:, 2] + K2[1, 2]
+            
+            # Check how many points are visible in camera 2
+            visible = (u2 >= 0) & (u2 < W) & (v2 >= 0) & (v2 < H)
+            overlap_ratio = visible.sum() / len(pts_cam2_valid)
+            overlap_matrix[c1, c2] = overlap_ratio
+    
+    print("\n[INFO] Camera overlap matrix (fraction of points visible):")
+    print("[INFO]          ", end="")
+    for c in range(C):
+        print(f"Cam{camera_ids[c][:4]:>6}", end="  ")
+    print()
+    for c1 in range(C):
+        print(f"[INFO] Cam{camera_ids[c1][:4]:<5}", end="")
+        for c2 in range(C):
+            if c1 == c2:
+                print(f"  ---  ", end="  ")
+            else:
+                print(f" {overlap_matrix[c1, c2]:>5.2%}", end="  ")
+        print()
+    
+    # Check if overlap is too low
+    avg_overlap = np.mean(overlap_matrix[np.triu_indices(C, k=1)])
+    print(f"\n[INFO] Average camera overlap: {avg_overlap:.2%}")
+    
+    if avg_overlap < 0.1:
+        print("[WARN] Very low camera overlap (<10%)! Cameras may not see the same scene.")
+        print("[WARN] This will cause:")
+        print("[WARN]   - COLMAP to fail (no common features)")
+        print("[WARN]   - 'Seeing everything twice' (inconsistent views)")
+        print("[WARN] Possible causes:")
+        print("[WARN]   - Wrong camera extrinsics (R, t)")
+        print("[WARN]   - Cameras pointing at different objects")
+        print("[WARN]   - Wrong world coordinate frame")
+    elif avg_overlap < 0.3:
+        print("[WARN] Low camera overlap (<30%). COLMAP may struggle.")
+    
+    print("[INFO] ========== Alignment Verification Complete ==========\n")
+    
+    return {
+        'overlap_matrix': overlap_matrix,
+        'avg_overlap': avg_overlap,
+    }
+
+
+def evaluate_depth_quality(depths: np.ndarray) -> np.ndarray:
+    """
+    Evaluate depth quality for each camera based on multiple metrics.
+    
+    Args:
+        depths: (C, T, H, W) array of depth values
+    
+    Returns:
+        (C,) array of quality scores (higher is better)
+    """
+    C, T, H, W = depths.shape
+    scores = np.zeros(C)
+    
+    for c_idx in range(C):
+        cam_depths = depths[c_idx]  # (T, H, W)
+        
+        # Metric 1: Coverage (% of valid depth values)
+        valid_mask = cam_depths > 0
+        coverage = valid_mask.sum() / (T * H * W)
+        
+        # Metric 2: Depth variance (higher = more 3D structure)
+        # Use valid depths only
+        valid_depths = cam_depths[valid_mask]
+        if len(valid_depths) > 0:
+            depth_variance = np.std(valid_depths)
+        else:
+            depth_variance = 0.0
+        
+        # Metric 3: Edge sharpness (gradient magnitude)
+        # Compute depth gradients for each frame
+        edge_scores = []
+        for t in range(T):
+            d = cam_depths[t]
+            valid = d > 0
+            if valid.sum() > 100:  # Need enough valid pixels
+                # Compute gradients
+                dy, dx = np.gradient(d)
+                grad_mag = np.sqrt(dx**2 + dy**2)
+                # Only consider gradients at valid depth locations
+                valid_grads = grad_mag[valid]
+                edge_scores.append(np.mean(valid_grads))
+        
+        edge_sharpness = np.mean(edge_scores) if edge_scores else 0.0
+        
+        # Combine metrics (normalized to 0-1 range approximately)
+        # Higher coverage, variance, and sharpness = better depth
+        score = (
+            coverage * 100 +  # 0-100 range
+            depth_variance * 10 +  # Scale to similar range
+            edge_sharpness * 10
+        )
+        scores[c_idx] = score
+    
+    return scores
+
+
+def evaluate_feature_richness(rgbs: np.ndarray) -> np.ndarray:
+    """
+    Evaluate feature richness for each camera (independent of COLMAP reconstruction).
+    
+    Args:
+        rgbs: (C, T, H, W, 3) array of RGB images
+    
+    Returns:
+        (C,) array of feature richness scores (higher is better)
+    """
+    C, T, H, W, _ = rgbs.shape
+    scores = np.zeros(C)
+    
+    for c_idx in range(C):
+        cam_rgbs = rgbs[c_idx]  # (T, H, W, 3)
+        
+        # Convert to grayscale and compute statistics
+        texture_scores = []
+        for t in range(min(T, 10)):  # Sample up to 10 frames
+            rgb = cam_rgbs[t]
+            gray = 0.299 * rgb[..., 0] + 0.587 * rgb[..., 1] + 0.114 * rgb[..., 2]
+            
+            # Metric 1: Intensity variance (texture)
+            intensity_var = np.var(gray)
+            
+            # Metric 2: Edge strength (Sobel)
+            dy, dx = np.gradient(gray)
+            edge_strength = np.mean(np.sqrt(dx**2 + dy**2))
+            
+            # Metric 3: Local variance (fine texture)
+            # Compute variance in 8x8 blocks
+            block_vars = []
+            for i in range(0, H - 8, 8):
+                for j in range(0, W - 8, 8):
+                    block = gray[i:i+8, j:j+8]
+                    block_vars.append(np.var(block))
+            local_var = np.mean(block_vars) if block_vars else 0.0
+            
+            # Combine metrics
+            texture_score = intensity_var + edge_strength * 10 + local_var
+            texture_scores.append(texture_score)
+        
+        scores[c_idx] = np.mean(texture_scores) if texture_scores else 0.0
+    
+    return scores
 
 
 def evaluate_camera_quality_from_colmap(workspace_dir: Path, camera_ids: List[str]) -> Dict[str, float]:
@@ -3312,16 +3793,17 @@ def evaluate_camera_quality_from_colmap(workspace_dir: Path, camera_ids: List[st
     """
     sparse_dir = workspace_dir / "sparse" / "0"
     if not sparse_dir.exists():
-        print("[WARN] No COLMAP reconstruction found")
-        return {cid: 1.0 for cid in camera_ids}
+        print("[WARN] No COLMAP reconstruction found, cannot score cameras by reconstruction")
+        return {cid: 0.0 for cid in camera_ids}
     
     # Parse images.txt to get registered images and their points
     images_file = sparse_dir / "images.txt"
     if not images_file.exists():
         print("[WARN] No images.txt found in COLMAP output")
-        return {cid: 1.0 for cid in camera_ids}
+        return {cid: 0.0 for cid in camera_ids}
     
     camera_scores = {cid: 0.0 for cid in camera_ids}
+    camera_registered_count = {cid: 0 for cid in camera_ids}
     
     with open(images_file, 'r') as f:
         lines = f.readlines()
@@ -3359,25 +3841,68 @@ def evaluate_camera_quality_from_colmap(workspace_dir: Path, camera_ids: List[st
         for cid in camera_ids:
             if f"cam_{cid}_" in img_name:
                 camera_scores[cid] += num_points
+                camera_registered_count[cid] += 1
                 break
     
-    print(f"[INFO] Camera quality scores: {camera_scores}")
+    print(f"[INFO] COLMAP camera scores (3D points observed):")
+    for cid in camera_ids:
+        reg_count = camera_registered_count[cid]
+        print(f"[INFO]   Camera {cid}: {camera_scores[cid]:.0f} points in {reg_count} registered images")
+    
     return camera_scores
 
 
 def select_best_cameras(
     camera_ids: List[str],
     camera_scores: Dict[str, float],
+    depth_scores: np.ndarray,
+    feature_scores: np.ndarray,
     limit: int,
 ) -> List[int]:
     """
-    Select indices of best N cameras based on quality scores.
+    Select indices of best N cameras based on combined quality scores.
+    
+    Args:
+        camera_ids: List of camera IDs
+        camera_scores: COLMAP reconstruction scores (0 if reconstruction failed)
+        depth_scores: Depth quality scores
+        feature_scores: Feature richness scores
+        limit: Number of cameras to keep
     
     Returns:
-        List of camera indices to keep (sorted by score, descending)
+        List of camera indices to keep (sorted by combined score, descending)
     """
-    # Sort cameras by score
-    scored_cameras = [(idx, cid, camera_scores.get(cid, 0.0)) 
+    # Normalize scores to 0-1 range
+    def normalize(arr):
+        arr = np.array(arr)
+        if arr.max() > 0:
+            return arr / arr.max()
+        return arr
+    
+    colmap_scores_arr = np.array([camera_scores.get(cid, 0.0) for cid in camera_ids])
+    colmap_scores_norm = normalize(colmap_scores_arr)
+    depth_scores_norm = normalize(depth_scores)
+    feature_scores_norm = normalize(feature_scores)
+    
+    # Combine scores with weights
+    # If COLMAP reconstruction succeeded (max score > 0), use it
+    # Otherwise, rely entirely on depth and feature quality
+    if colmap_scores_arr.max() > 0:
+        print("[INFO] Using combined scoring: 40% COLMAP + 30% depth quality + 30% features")
+        combined_scores = (
+            0.4 * colmap_scores_norm +
+            0.3 * depth_scores_norm +
+            0.3 * feature_scores_norm
+        )
+    else:
+        print("[INFO] COLMAP reconstruction failed, using: 60% depth quality + 40% features")
+        combined_scores = (
+            0.6 * depth_scores_norm +
+            0.4 * feature_scores_norm
+        )
+    
+    # Sort cameras by combined score
+    scored_cameras = [(idx, cid, combined_scores[idx]) 
                       for idx, cid in enumerate(camera_ids)]
     scored_cameras.sort(key=lambda x: x[2], reverse=True)
     
@@ -3386,9 +3911,10 @@ def select_best_cameras(
     selected_indices = sorted([idx for idx, _, _ in selected])
     
     print(f"[INFO] Selected {len(selected_indices)} best cameras:")
-    for idx, cid, score in selected:
+    for idx, cid, combined_score in selected:
         if idx in selected_indices:
-            print(f"  Camera {cid}: score={score:.0f}")
+            print(f"[INFO]   Camera {cid}: combined={combined_score:.3f} "
+                  f"(COLMAP={colmap_scores_norm[idx]:.3f}, depth={depth_scores_norm[idx]:.3f}, features={feature_scores_norm[idx]:.3f})")
     
     return selected_indices
 
@@ -3605,13 +4131,31 @@ def main():
         "--limit-num-cameras",
         type=int,
         default=None,
-        help="Limit number of cameras to N best (based on COLMAP geometric consistency).",
+        help="Limit number of cameras to N best (based on combined depth quality, feature richness, and COLMAP reconstruction).",
     )
     parser.add_argument(
         "--colmap-workspace",
         type=Path,
         default=None,
         help="Reuse an existing COLMAP workspace directory instead of creating a temporary one.",
+    )
+    parser.add_argument(
+        "--colmap-use-known-poses",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use known camera poses from calibration instead of estimating them. More robust when cameras are calibrated.",
+    )
+    parser.add_argument(
+        "--reject-outlier-points",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Use multi-view consistency to reject outlier 3D points (requires --refine-colmap).",
+    )
+    parser.add_argument(
+        "--outlier-reprojection-threshold",
+        type=float,
+        default=5.0,
+        help="Maximum reprojection error (pixels) for a point to be considered an inlier.",
     )
     args = parser.parse_args()
 
@@ -3625,7 +4169,6 @@ def main():
             "export_bbox_video",
             "object_points",
             "tcp_points",
-            "visualize_query_points",
             "exclude_inside_gripper",
             "exclude_by_cluster",
         ]
@@ -3648,14 +4191,36 @@ def main():
     
     args.out_dir.mkdir(parents=True, exist_ok=True)
     robot_configs = load_conf(str(args.config))
-    
-    # --- Step 1: Load and Synchronize Data ---
+    settings_file = "/workspace/RH20T/configs/default.yaml"
+    with open(settings_file, "r") as f:
+        vis_cfg_dict = yaml.load(f, Loader=yaml.FullLoader)    # --- Step 1: Load and Synchronize Data ---
+
+    #load the metadata 
+    metadata_file_path = args.task_folder / "metadata.json"
+    if not metadata_file_path.exists():
+        print(f"[ERROR] Metadata file not found at: {metadata_file_path}")
+        raise FileNotFoundError(f"Metadata file not found at: {metadata_file_path}")
+    with open(metadata_file_path, "r") as f:
+        metadata_file = json.load(f)
+
+    start_timestamp = metadata_file.get("start_time", None)
+    end_timestamp = metadata_file.get("end_time", None)
+    calib_timestamp = metadata_file.get("calib", None)
+    calib_quality = metadata_file.get("calib_quality", None)
+    if start_timestamp is None or end_timestamp is None or calib_timestamp is None:
+        print(f"[ERROR] Metadata file is missing required timestamps.")
+        raise ValueError(f"Metadata file is missing required timestamps.")
+
+    print(f"[INFO] The Calib Quality is: {calib_quality}, lower is better, -1 means some cameras failed calibration. In reality means useless calib")
+    #find the good cameras
+        
+
     # For human datasets with high-res folder, load calibration from high-res folder
     # because low-res (depth) folder may not contain calibration data
     if args.dataset_type == "human" and args.high_res_folder:
         print("[INFO] Human dataset: loading calibration from high-res folder")
         # Fix metadata calibration timestamp if needed
-        fix_human_metadata_calib(args.high_res_folder)
+        # fix_human_metadata_calib(args.high_res_folder)
         scene_low, cam_ids_low, cam_dirs_low = load_scene_data(args.high_res_folder, robot_configs)
         # Override cam_dirs_low to point to the actual depth data location
         if scene_low and cam_ids_low:
@@ -3671,6 +4236,25 @@ def main():
     if not scene_low or not cam_ids_low: return
 
     scene_high, cam_ids_high, cam_dirs_high = (load_scene_data(args.high_res_folder, robot_configs) if args.high_res_folder else (None, None, None))
+    
+    # For human datasets, use scene_high for image pairs (has proper timestamps)
+    # # For robot datasets, use scene_low
+    # scene_for_image_pairs = scene_high if (args.dataset_type == "human" and scene_high) else scene_low
+    # image_pairs = scene_for_image_pairs.get_image_path_pairs_period(vis_cfg_dict["time_interval"])
+    # # # FIX FOR NOW!!
+    # all_cameras = list(image_pairs[0].keys())
+    # usable_cameras = [all_cameras[i] for i in (0, 2, 3)]
+    # print(f"[INFO] Limiting to usable cameras: {usable_cameras}")
+    # print("[INFO] FIX time alignment with the get image path function instead of manual time filtering")#TODO
+    # # Filter cam_ids_low to only usable cameras
+    # ##TODO: Remove this after testing
+    # cam_ids_low = [cid for cid in cam_ids_low if cid in usable_cameras]
+
+    # # Filter cam_ids_low to only usable cameras
+    # ##TODO: Remove this after testing
+    # cam_ids_high = [cid for cid in cam_ids_high if cid in usable_cameras]
+
+
 
     sync_kwargs = dict(
         frame_rate_hz=args.sync_fps,
@@ -3694,6 +4278,10 @@ def main():
             print("[ERROR] Fewer than 2 common cameras between low and high resolution data.")
             return
 
+        if args.refine_colmap:
+            print("[WARN] TODO: Fix the Colmap filtereing before removing camera or recalculae the frames after removing cameras. Less cameras means less frames to throw away.")
+
+                  
         sync_low = get_synchronized_timestamps(cam_dirs_low, **sync_kwargs)
         sync_high = get_synchronized_timestamps(cam_dirs_high, require_depth=False, **sync_kwargs)
 
@@ -3758,7 +4346,12 @@ def main():
     selected_idx = [idx_map_common[int(t)] for t in timestamps]
     per_cam_low_sel = [arr[selected_idx] for arr in per_cam_low]
     per_cam_high_sel = [arr[selected_idx] for arr in per_cam_high] if per_cam_high is not None else None
+    # breakpoint()
 
+    print("[DEBUG] Right now it is not using all timestampts. So for being and end it uses the closest. TODO: fix that, so that it uses all or more frames")
+
+    closes_start_time = min(timestamps, key=lambda x: abs(x - start_timestamp))
+    closes_end_time = min(timestamps, key=lambda x: abs(x - end_timestamp))
     # --- Step 2: Process Frames ---
     (rgbs,
      depths,
@@ -3798,6 +4391,15 @@ def main():
     if getattr(args, "refine_colmap", False):
         print("\n[INFO] ========== COLMAP Processing ==========")
         
+        # Suppress verbose COLMAP logging
+        import logging
+        import os
+        os.environ['GLOG_minloglevel'] = '2'  # Suppress INFO and WARNING logs from COLMAP
+        logging.getLogger('pycolmap').setLevel(logging.ERROR)
+        
+        # First, verify camera alignment
+        alignment_info = verify_camera_alignment(rgbs, depths, intrs, extrs, final_cam_ids)
+        
         # Set up workspace
         import tempfile
         import shutil
@@ -3822,50 +4424,68 @@ def main():
         if getattr(args, "refine_colmap", False):
             print("[INFO] Running COLMAP refinement pipeline...")
             
+            # Always compute depth and feature quality (independent of COLMAP)
+            print("[INFO] Evaluating depth quality...")
+            depth_scores = evaluate_depth_quality(depths)
+            print("[INFO] Depth quality scores:", {cid: f"{score:.2f}" for cid, score in zip(final_cam_ids, depth_scores)})
+            
+            print("[INFO] Evaluating feature richness...")
+            feature_scores = evaluate_feature_richness(rgbs)
+            print("[INFO] Feature richness scores:", {cid: f"{score:.2f}" for cid, score in zip(final_cam_ids, feature_scores)})
+            
             # Feature extraction
             if not run_colmap_feature_extraction(colmap_workspace, database_path, images_dir):
-                print("[WARN] COLMAP feature extraction failed, skipping refinement")
+                print("[WARN] COLMAP feature extraction failed, skipping COLMAP-based scoring")
+                colmap_scores = {cid: 0.0 for cid in final_cam_ids}
             else:
                 # Feature matching
-                if not run_colmap_matching(colmap_workspace, database_path):
-                    print("[WARN] COLMAP matching failed, skipping refinement")
+                match_success, num_matches = run_colmap_matching(colmap_workspace, database_path)
+                if not match_success or num_matches == 0:
+                    print("[WARN] COLMAP matching failed or found no matches, skipping COLMAP-based scoring")
+                    colmap_scores = {cid: 0.0 for cid in final_cam_ids}
                 else:
                     # Mapping
-                    if not run_colmap_mapper(colmap_workspace, database_path, images_dir, sparse_dir):
-                        print("[WARN] COLMAP mapping failed, skipping refinement")
+                    map_success, map_stats = run_colmap_mapper(
+                        colmap_workspace, database_path, images_dir, sparse_dir
+                    )
+                    if not map_success:
+                        print("[WARN] COLMAP mapping failed, using only depth+feature quality for scoring")
+                        colmap_scores = {cid: 0.0 for cid in final_cam_ids}
                     else:
-                        # Evaluate camera quality
-                        camera_scores = evaluate_camera_quality_from_colmap(
+                        # Evaluate camera quality from COLMAP reconstruction
+                        colmap_scores = evaluate_camera_quality_from_colmap(
                             colmap_workspace, final_cam_ids
                         )
-                        
-                        # Filter cameras if limit is set
-                        if args.limit_num_cameras and args.limit_num_cameras < len(final_cam_ids):
-                            print(f"[INFO] Selecting best {args.limit_num_cameras} cameras based on COLMAP scores...")
-                            selected_indices = select_best_cameras(
-                                final_cam_ids, camera_scores, args.limit_num_cameras
-                            )
-                            
-                            # Convert to numpy array for proper indexing
-                            selected_indices_np = np.array(selected_indices, dtype=int)
-                            
-                            # Filter all data to selected cameras
-                            final_cam_ids = [final_cam_ids[i] for i in selected_indices]
-                            cam_dirs_low = [cam_dirs_low[i] for i in selected_indices]
-                            if cam_dirs_high:
-                                cam_dirs_high = [cam_dirs_high[i] for i in selected_indices]
-                            
-                            # Use numpy array indexing for array data
-                            rgbs = rgbs[selected_indices_np]
-                            depths = depths[selected_indices_np]
-                            intrs = intrs[selected_indices_np]
-                            extrs = extrs[selected_indices_np]
-                            
-                            per_cam_low_sel = [per_cam_low_sel[i] for i in selected_indices]
-                            if per_cam_high_sel:
-                                per_cam_high_sel = [per_cam_high_sel[i] for i in selected_indices]
-                            
-                            print(f"[INFO] Filtered to {len(final_cam_ids)} cameras: {final_cam_ids}")
+            
+            # Filter cameras if limit is set
+            if args.limit_num_cameras and args.limit_num_cameras < len(final_cam_ids):
+                print(f"\n[INFO] Selecting best {args.limit_num_cameras} cameras based on combined quality scores...")
+                selected_indices = select_best_cameras(
+                    final_cam_ids, colmap_scores, depth_scores, feature_scores, args.limit_num_cameras
+                )
+                
+                # Convert to numpy array for proper indexing
+                selected_indices_np = np.array(selected_indices, dtype=int)
+                
+                # Filter all data to selected cameras
+                final_cam_ids = [final_cam_ids[i] for i in selected_indices]
+                cam_dirs_low = [cam_dirs_low[i] for i in selected_indices]
+                if cam_dirs_high:
+                    cam_dirs_high = [cam_dirs_high[i] for i in selected_indices]
+                
+                # Use numpy array indexing for array data
+                rgbs = rgbs[selected_indices_np]
+                depths = depths[selected_indices_np]
+                intrs = intrs[selected_indices_np]
+                extrs = extrs[selected_indices_np]
+                
+                per_cam_low_sel = [per_cam_low_sel[i] for i in selected_indices]
+                if per_cam_high_sel:
+                    per_cam_high_sel = [per_cam_high_sel[i] for i in selected_indices]
+                
+                print(f"[INFO] Filtered to {len(final_cam_ids)} cameras: {final_cam_ids}")
+            else:
+                print(f"[INFO] Keeping all {len(final_cam_ids)} cameras (no limit specified or limit >= camera count)")
         
         # Clean up temporary workspace if not specified
         if not args.colmap_workspace and colmap_workspace:
@@ -3873,6 +4493,17 @@ def main():
             shutil.rmtree(colmap_workspace, ignore_errors=True)
         
         print("[INFO] ========== COLMAP Processing Complete ==========\n")
+    
+    # --- Step 3.5: Point Cloud Outlier Rejection (if enabled) ---
+    if getattr(args, "reject_outlier_points", False):
+        if not getattr(args, "refine_colmap", False):
+            print("[WARN] --reject-outlier-points requires --refine-colmap, skipping outlier rejection")
+        else:
+            print("[INFO] Applying multi-view consistency check to reject outliers...")
+            depths = reject_outlier_points_multiview(
+                depths, intrs, extrs, 
+                reprojection_threshold=args.outlier_reprojection_threshold
+            )
 
     # --- Step 4: Save and Visualize ---
     sam2_masks = None

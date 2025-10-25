@@ -1,18 +1,22 @@
 - [ ] Fix the 2D to 3D lifting 
 - [ ] Lift hand tracking to 3D
 - [ ] Lift Tracks to the rgb videos
-- [ ] ! track the objects in 3D
-- [ ] Select best 4 cameras with COLMAP,
+- [ ] ! track the objects in 3D -> maybe use the rigid object 3D model/ Make depth completion only in small part -> get workspace paert and remove background
+- [ ] maybe video depth estimation works better?
+- [ ] Or get the depth from spatracker..
+- [x] Select best 4 cameras with COLMAP,
+- [ ] Use colmap to reject bad points
 - [ ]  then use hand tracking to select  and crop relvant region, and complete depth for best view 
 - [ ] segment the objects and track them (remove sam tracking)
 - [ ] Finally settle for a good 2D/3D flow -> hae multiview alignment as this is one of the main selling points
+- [ ] Keep background static
 - [x] enable hand tracking
 - [ ] Finalize large scale code to train somerthing like flow..
- [ ] Fix robtot rendering being slower than the actual code, fix the tcp etc stuff maybe go old commit
-
+- [ ] Fix robtot rendering being slower than the actual code, fix the tcp etc stuff maybe go old commit
+- [ ] Try low red data without reprojecting
 - [x] Update the date for lab course
 -  [ ] for grasping - data generation for side grasps? 
-
+- [ ] Use Code from Visualizer
 -  [x] Check if someone has the same camera as we and check then Intel Realsense d435i and d405
 - add the robot and work with low res data
 - all untouched by robot remains static for better colorization and grer to
