@@ -1,6 +1,8 @@
 - [ ] make 2D hand and object tracking -> add also vlm pipeline for data 
 - [ ] Fix the 2D to 3D lifting 
-- [ ] Change the .npz format to use real jpeg images -> maybe because less frames it is the quality limitation? -> why only SAM 66/111 frames check if rgb is to cut - frames selected?
+- [ ] VGGT Tracking
+- [ ] SAM STEP WEGLASSEN OBJECT TRACKCKEN FERTIG
+- [ ] Change the .npz format to use real jpeg images -> maybe because less frames it is the quality limitation? -> why only SAM 66/111 frames check if rgb is to cut - frames selected? - are tracked points also close to the hand or gripper? 
 - [ ] Lift hand tracking to 3D
 - [ ] Lift Tracks to the rgb videos
  
