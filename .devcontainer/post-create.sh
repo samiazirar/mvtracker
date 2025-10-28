@@ -180,8 +180,8 @@ echo "Setting up HOISTFormer environment..."
 
 cd $HOIST_DIR
 # ===== System deps (Ubuntu/Debian) =====
-sudo apt-get update
-sudo apt-get install -y --no-install-recommends \
+apt-get update
+apt-get install -y --no-install-recommends \
   build-essential cmake ninja-build git python3-venv python3-dev \
   libgl1 libglib2.0-0
 
@@ -192,4 +192,3 @@ echo "HOISTFormer setup completed."
 
 #remove this later on 
 echo "Running human example script..."
-bash /workspace/scripts/run_human_example.sh
