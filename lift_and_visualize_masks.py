@@ -2,41 +2,53 @@
 """
 Lift and Visualize 2D Masks in 3D using Rerun
 
-This script demonstrates how to lift 2D segmentation masks to 3D point clouds
-and visualize them in Rerun. It supports both single masks and batch processing
-of multiple masks across cameras and frames.
+This script visualizes the full scene including RGB point clouds, camera frustums,
+and 2D masks lifted to 3D. The masks appear as a togglable layer in Rerun, allowing
+you to compare them with the RGB point clouds.
 
 Usage Examples:
 ---------------
 
-# 1. Visualize masks from NPZ file
-python lift_and_visualize_masks.py \\
-    --npz data/example_processed.npz \\
-    --mask-key sam_hand_masks \\
-    --output masks_3d.rrd
-
-# 2. Visualize with custom color (magenta for hands)
-python lift_and_visualize_masks.py \\
-    --npz data/hand_tracked.npz \\
-    --mask-key sam_hand_masks \\
-    --color 255 0 255 \\
+# 1. Visualize hand masks from processed human data (after run_human_example.sh)
+python lift_and_visualize_masks.py \
+    --npz data/human_high_res_filtered/task_0045_user_0020_scene_0004_cfg_0006_human_processed_hand_tracked.npz \
+    --mask-key sam_hand_masks \
+    --color 255 0 255 \
     --max-frames 50
 
-# 3. Visualize with RGB colors from images
-python lift_and_visualize_masks.py \\
-    --npz data/processed.npz \\
-    --mask-key object_masks \\
-    --use-rgb-colors \\
-    --entity-path world/object_masks
+# 2. Visualize with RGB colors from images (match mask colors to scene)
+python lift_and_visualize_masks.py \
+    --npz data/human_high_res_filtered/task_0045_user_0020_scene_0004_cfg_0006_human_processed_hand_tracked.npz \
+    --mask-key sam_hand_masks \
+    --use-rgb-colors \
+    --max-frames 50
+
+# 3. Save to custom output location with specific FPS
+python lift_and_visualize_masks.py \
+    --npz data/human_high_res_filtered/task_0045_user_0020_scene_0004_cfg_0006_human_processed_hand_tracked.npz \
+    --mask-key sam_hand_masks \
+    --color 255 0 255 \
+    --output hand_masks_3d.rrd \
+    --fps 12.0
+
+Features:
+---------
+- RGB point clouds from depth maps (togglable)
+- Camera frustums showing camera poses
+- 3D mask visualization as point clouds (togglable)
+- World coordinate axes (X=Red, Y=Green, Z=Blue)
+- Temporal playback with configurable FPS
 """
 
 import argparse
 from pathlib import Path
 from typing import Optional
 import numpy as np
+import torch
 import rerun as rr
 
 from utils.mask_lifting_utils import visualize_masks_batch
+from mvtracker.utils.visualizer_rerun import log_pointclouds_to_rerun
 
 
 def load_data_from_npz(npz_path: Path, mask_key: str = "masks"):
@@ -257,8 +269,48 @@ def main():
         static=True,
     )
     
-    # Visualize masks
-    print(f"\n[INFO] ========== Visualizing Masks ==========")
+    # Log RGB point clouds and camera frustums (like demo.py)
+    print(f"\n[INFO] ========== Logging RGB Point Clouds and Cameras ==========")
+    
+    # Prepare data for visualization (convert to torch tensors as expected by visualizer)
+    rgbs_viz = data["rgbs"] if data["rgbs"] is not None else None
+    if rgbs_viz is not None:
+        # Handle channel format
+        if rgbs_viz.ndim == 5 and rgbs_viz.shape[-1] == 3:
+            # [C, T, H, W, 3] -> [C, T, 3, H, W]
+            rgbs_viz = np.moveaxis(rgbs_viz, -1, 2)
+    else:
+        print("[WARN] No RGB data available, skipping RGB point cloud visualization")
+    
+    depths_viz = data["depths"]
+    if depths_viz.ndim == 4:
+        # [C, T, H, W] -> [C, T, 1, H, W]
+        depths_viz = depths_viz[:, :, None, :, :]
+    
+    if rgbs_viz is not None:
+        # Convert to torch tensors (add batch dimension as expected by visualizer)
+        rgbs_tensor = torch.from_numpy(rgbs_viz).float().unsqueeze(0)
+        depths_tensor = torch.from_numpy(depths_viz).float().unsqueeze(0)
+        intrs_tensor = torch.from_numpy(data["intrs"]).float().unsqueeze(0)
+        extrs_tensor = torch.from_numpy(data["extrs"]).float().unsqueeze(0)
+        
+        # Log point clouds and camera frustums
+        log_pointclouds_to_rerun(
+            dataset_name="rh20t_mask_visualization",
+            datapoint_idx=0,
+            rgbs=rgbs_tensor,
+            depths=depths_tensor,
+            intrs=intrs_tensor,
+            extrs=extrs_tensor,
+            camera_ids=data["camera_ids"] if data["camera_ids"] is not None else None,
+            log_rgb_pointcloud=True,
+            log_camera_frustrum=True,
+            radii=-0.95
+        )
+        print("[INFO] Logged RGB point clouds and camera frustums")
+    
+    # Visualize masks as togglable layer
+    print(f"\n[INFO] ========== Visualizing Masks (Togglable Layer) ==========")
     stats = visualize_masks_batch(
         masks=data["masks"],
         depths=data["depths"],
