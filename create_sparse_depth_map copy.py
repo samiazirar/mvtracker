@@ -751,6 +751,1159 @@ def process_frames(
     )
 
 
+def reject_outlier_points_multiview(
+    depths: np.ndarray,
+    intrs: np.ndarray,
+    extrs: np.ndarray,
+    reprojection_threshold: float = 5.0,
+) -> np.ndarray:
+    """
+    Reject outlier 3D points using multi-view consistency.
+    
+    For each 3D point derived from depth, check if it reprojects consistently
+    to other camera views. A point is kept only if it has sufficient support
+    from multiple views.
+    
+    Args:
+        depths: (C, T, H, W) depth maps
+        intrs: (C, T, 3, 3) camera intrinsics
+        extrs: (C, T, 3, 4) camera extrinsics (world-to-camera)
+        reprojection_threshold: Maximum pixel error for a reprojection to be considered an inlier
+    
+    Returns:
+        depths_filtered: (C, T, H, W) depth maps with outliers set to 0
+    """
+    print(f"\n[INFO] ========== Point Cloud Outlier Rejection ==========")
+    print(f"[INFO] Reprojection threshold: {reprojection_threshold} pixels")
+    
+    C, T, H, W = depths.shape
+    depths_filtered = depths.copy()
+    
+    total_points = 0
+    kept_points = 0
+    
+    # Process each frame independently
+    for t in range(T):
+        # Build 3D points from all cameras for this frame
+        all_points = []
+        all_colors = []  # For visualization, we could add colors later
+        point_sources = []  # Track which camera each point came from
+        
+        for c in range(C):
+            depth = depths[c, t]
+            K = intrs[c, t]
+            E_world_to_cam = extrs[c, t]
+            
+            # Convert to camera-to-world for easier 3D point computation
+            R_w2c = E_world_to_cam[:3, :3]
+            t_w2c = E_world_to_cam[:3, 3]
+            R_c2w = R_w2c.T
+            t_c2w = -R_c2w @ t_w2c
+            
+            # Get valid depth pixels
+            valid_mask = depth > 0
+            v_coords, u_coords = np.where(valid_mask)
+            
+            if len(u_coords) == 0:
+                continue
+            
+            # Backproject to 3D in camera frame
+            z = depth[v_coords, u_coords]
+            x = (u_coords - K[0, 2]) * z / K[0, 0]
+            y = (v_coords - K[1, 2]) * z / K[1, 1]
+            pts_cam = np.stack([x, y, z], axis=1)
+            
+            # Transform to world frame
+            pts_world = (R_c2w @ pts_cam.T).T + t_c2w
+            
+            all_points.append(pts_world)
+            point_sources.extend([(c, u, v) for u, v in zip(u_coords, v_coords)])
+        
+        if len(all_points) == 0:
+            continue
+        
+        all_points = np.vstack(all_points)
+        frame_total = len(all_points)
+        total_points += frame_total
+        
+        # For each point, check how many cameras see it with consistent depth
+        inlier_mask = np.ones(len(all_points), dtype=bool)
+        
+        for i, (pts_3d, src_info) in enumerate(zip(all_points, point_sources)):
+            src_cam, src_u, src_v = src_info
+            
+            # Count how many other cameras see this point with consistent depth
+            support_count = 0
+            
+            for c in range(C):
+                if c == src_cam:
+                    # Skip source camera
+                    continue
+                
+                K = intrs[c, t]
+                E_world_to_cam = extrs[c, t]
+                R_w2c = E_world_to_cam[:3, :3]
+                t_w2c = E_world_to_cam[:3, 3]
+                
+                # Project point to this camera
+                pts_cam = R_w2c @ pts_3d + t_w2c
+                
+                # Check if point is in front of camera
+                if pts_cam[2] <= 0:
+                    continue
+                
+                # Project to image coordinates
+                u_proj = K[0, 0] * pts_cam[0] / pts_cam[2] + K[0, 2]
+                v_proj = K[1, 1] * pts_cam[1] / pts_cam[2] + K[1, 2]
+                
+                # Check if projection is within image bounds
+                if u_proj < 0 or u_proj >= W or v_proj < 0 or v_proj >= H:
+                    continue
+                
+                u_int = int(np.round(u_proj))
+                v_int = int(np.round(v_proj))
+                
+                # Get depth at projected location
+                depth_at_proj = depths[c, t, v_int, u_int]
+                
+                if depth_at_proj <= 0:
+                    continue
+                
+                # Check consistency: does the depth match?
+                depth_error = abs(pts_cam[2] - depth_at_proj)
+                pixel_error = np.sqrt((u_proj - u_int)**2 + (v_proj - v_int)**2)
+                
+                # Accept if both depth and pixel location are consistent
+                if pixel_error < reprojection_threshold and depth_error < 0.05:  # 5cm depth tolerance
+                    support_count += 1
+            
+            # Require at least 1 other camera to confirm this point (for 2+ cameras)
+            # For more cameras, we could require more support
+            min_support = max(1, (C - 1) // 2)  # At least half of other cameras
+            if support_count < min_support:
+                inlier_mask[i] = False
+        
+        # Update depths to remove outliers
+        for i, src_info in enumerate(point_sources):
+            if not inlier_mask[i]:
+                src_cam, src_u, src_v = src_info
+                depths_filtered[src_cam, t, src_v, src_u] = 0
+        
+        frame_kept = inlier_mask.sum()
+        kept_points += frame_kept
+        
+        if frame_total > 0:
+            print(f"[INFO] Frame {t}: kept {frame_kept}/{frame_total} points ({100*frame_kept/frame_total:.1f}%)")
+    
+    if total_points > 0:
+        print(f"[INFO] Overall: kept {kept_points}/{total_points} points ({100*kept_points/total_points:.1f}%)")
+    print(f"[INFO] ========== Outlier Rejection Complete ==========\n")
+    
+    return depths_filtered
+
+
+def save_and_visualize(
+    args,
+    rgbs,
+    depths,
+    intrs,
+    extrs,
+    final_cam_ids,
+    timestamps,
+    per_camera_timestamps,
+    robot_debug_points=None,
+    robot_debug_colors=None,
+    robot_gripper_boxes=None,
+    robot_gripper_body_boxes=None,
+    robot_gripper_fingertip_boxes=None,
+    robot_gripper_pad_points=None,
+    robot_tcp_points=None,
+    robot_object_points=None,
+    query_points=None,
+    query_colors=None,
+):
+    """Saves the processed data to an NPZ file and generates a Rerun visualization."""
+    # Convert to channels-first format for NPZ
+    rgbs_final = np.moveaxis(rgbs, -1, 2)
+    depths_final = depths[:, :, None, :, :]
+
+    per_cam_ts_arr = np.stack(per_camera_timestamps, axis=0).astype(np.int64)
+    
+    # Format and save query points if available
+    # Query points are saved in mvtracker format: [frame_index, x, y, z]
+    if query_points is not None and len(query_points) > 0:
+        formatted_query_points = []
+        for frame_idx, qpts in enumerate(query_points):
+            if qpts is not None and qpts.size > 0:
+                # Add frame index as first column: [frame_idx, x, y, z]
+                n_points = len(qpts)
+                frame_indices = np.full((n_points, 1), frame_idx, dtype=np.float32)
+                qpts_with_time = np.concatenate([frame_indices, qpts], axis=1)
+                formatted_query_points.append(qpts_with_time)
+        
+        if formatted_query_points:
+            # Concatenate all query points from all frames: shape (N_total, 4)
+            all_query_points = np.concatenate(formatted_query_points, axis=0)
+            print(f"[INFO] Formatted {len(all_query_points)} query points for saving")
+        else:
+            all_query_points = np.empty((0, 4), dtype=np.float32)
+            print("[INFO] No valid query points found")
+    else:
+        all_query_points = None
+    
+    # Persist all modalities together so downstream tools can reload the full synchronized packet.
+    npz_payload = {
+        'rgbs': rgbs_final,
+        'depths': depths_final,
+        'intrs': intrs,
+        'extrs': extrs,
+        'timestamps': timestamps,
+        'per_camera_timestamps': per_cam_ts_arr,
+        'camera_ids': np.array(final_cam_ids, dtype=object),
+    }
+    
+    # Add query points to payload if available
+    if all_query_points is not None:
+        npz_payload['query_points'] = all_query_points
+
+    out_path_npz = args.out_dir / f"{args.task_folder.name}_processed.npz"
+    np.savez_compressed(out_path_npz, **npz_payload)
+    print(f"✅ [OK] Wrote NPZ file to: {out_path_npz}")
+
+    # Generate Rerun Visualization
+    if not args.no_pointcloud:
+        print("[INFO] Logging data to Rerun...")
+        # Cast to tensors because the visualizer expects batched torch inputs.
+        rgbs_tensor = torch.from_numpy(rgbs_final).float().unsqueeze(0)
+        depths_tensor = torch.from_numpy(depths_final).float().unsqueeze(0)
+        intrs_tensor = torch.from_numpy(intrs).float().unsqueeze(0)
+        extrs_tensor = torch.from_numpy(extrs).float().unsqueeze(0)
+        log_pointclouds_to_rerun(
+            dataset_name="rh20t_reprojection",
+            datapoint_idx=0,
+            rgbs=rgbs_tensor,
+            depths=depths_tensor,
+            intrs=intrs_tensor,
+            extrs=extrs_tensor,
+            camera_ids=final_cam_ids,
+            log_rgb_pointcloud=True,
+            log_camera_frustrum=True,
+        )
+        configs_path = args.config.resolve()
+        rh20t_root = configs_path.parent.parent if configs_path.parent.name == "configs" else configs_path.parent
+
+        # Log robot points separately (they survive better than going through reprojection)
+        if robot_debug_points is not None and len(robot_debug_points) > 0:
+            fps = 12.0 #TODO: adjust to one fps rate later tot he real one
+            print(f"[INFO] Logging {len(robot_debug_points)} robot point clouds to Rerun...")
+            for idx, pts in enumerate(robot_debug_points):
+                if pts is None or pts.size == 0:
+                    continue
+                # Keep robot color palette aligned with the optional debug stream.
+                cols = robot_debug_colors[idx] if robot_debug_colors and idx < len(robot_debug_colors) else None
+                rr.set_time_seconds("frame", idx / fps)
+                # Log to top-level robot entity for easy toggling (NOT under sequence-0)
+                rr.log(
+                    f"robot",
+                    rr.Points3D(pts.astype(np.float32, copy=False), colors=cols),
+                )
+                # Also log to debug entity if in debug mode
+                if getattr(args, "debug_mode", False):
+                    rr.log(
+                        f"robot_debug",
+                        rr.Points3D(pts.astype(np.float32, copy=False), colors=cols),
+                    )
+        
+        # Log query points (sensor points inside gripper bbox) if requested
+        if getattr(args, "visualize_query_points", False) and query_points is not None and len(query_points) > 0:
+            fps = 12.0
+            valid_query_count = sum(1 for qpts in query_points if qpts is not None and qpts.size > 0)
+            if valid_query_count > 0:
+                print(f"[INFO] Logging {valid_query_count} query point clouds to Rerun (magenta)...")
+                for idx, qpts in enumerate(query_points):
+                    if qpts is None or qpts.size == 0:
+                        continue
+                    rr.set_time_seconds("frame", idx / fps)
+                    # Log query points as magenta (original sensor points inside bbox)
+                    # Create magenta color array (255, 0, 255)
+                    magenta_colors = np.full((len(qpts), 3), [255, 0, 255], dtype=np.uint8)
+                    rr.log(
+                        "query_points",
+                        rr.Points3D(qpts.astype(np.float32, copy=False), colors=magenta_colors),
+                    )
+        
+        if robot_gripper_boxes:
+            valid_box_count = sum(1 for box in robot_gripper_boxes if box)
+            if valid_box_count > 0:
+                fps = 12.0
+                print(f"[INFO] Logging {valid_box_count} gripper bounding boxes to Rerun...")
+                for idx, box in enumerate(robot_gripper_boxes):
+                    if not box:
+                        continue
+                    rr.set_time_seconds("frame", idx / fps)
+                    centers = np.asarray(box["center"], dtype=np.float32)[None, :]
+                    half_sizes = np.asarray(box["half_sizes"], dtype=np.float32)[None, :]
+                    rr.log(
+                        "robot/gripper_bbox",
+                        rr.Boxes3D(
+                            centers=centers,
+                            half_sizes=half_sizes,
+                            quaternions=np.asarray(box["quat_xyzw"], dtype=np.float32)[None, :],
+                            colors=np.array([[255, 128, 0]], dtype=np.uint8),
+                        ),
+                    )
+                    basis = _ensure_basis(box)
+                    if basis is not None:
+                        axes = np.asarray(basis, dtype=np.float32)
+                        half_sizes_vec = np.asarray(box["half_sizes"], dtype=np.float32)
+                        center_vec = np.asarray(box["center"], dtype=np.float32)
+
+                        approach_axis = axes[:, 2]
+                        approach_axis_norm = np.linalg.norm(approach_axis) + 1e-12
+                        approach_axis = approach_axis / approach_axis_norm
+                        # Draw helper arrows to confirm the oriented bounding box aligns with the jaw approach direction.
+                        origin = center_vec - approach_axis * half_sizes_vec[2]
+                        vector = approach_axis * (half_sizes_vec[2] * 2.0)
+                        rr.log(
+                            "robot/gripper_bbox_centerline",
+                            rr.Arrows3D(
+                                origins=origin[np.newaxis, :],
+                                vectors=vector[np.newaxis, :],
+                                colors=np.array([[255, 128, 0]], dtype=np.uint8),
+                                radii=0.004,
+                            ),
+                        )
+                        up_axis = axes[:, 1]
+                        up_axis_norm = np.linalg.norm(up_axis) + 1e-12
+                        up_axis = up_axis / up_axis_norm
+                        rr.log(
+                            "robot/gripper_bbox_axis_height",
+                            rr.Arrows3D(
+                                origins=center_vec[np.newaxis, :],
+                                vectors=(up_axis * half_sizes_vec[1])[np.newaxis, :],
+                                colors=np.array([[0, 200, 0]], dtype=np.uint8),
+                                radii=0.003,
+                            ),
+                        )
+                        width_axis = axes[:, 0]
+                        width_axis_norm = np.linalg.norm(width_axis) + 1e-12
+                        width_axis = width_axis / width_axis_norm
+                        rr.log(
+                            "robot/gripper_bbox_axis_width",
+                            rr.Arrows3D(
+                                origins=center_vec[np.newaxis, :],
+                                vectors=(width_axis * half_sizes_vec[0])[np.newaxis, :],
+                                colors=np.array([[0, 150, 255]], dtype=np.uint8),
+                                radii=0.003,
+                            ),
+                        )
+        if robot_gripper_body_boxes:
+            valid_box_count = sum(1 for box in robot_gripper_body_boxes if box)
+            if valid_box_count > 0:
+                fps = 12.0
+                print(f"[INFO] Logging {valid_box_count} gripper BODY bounding boxes to Rerun...")
+                for idx, box in enumerate(robot_gripper_body_boxes):
+                    if not box:
+                        continue
+                    rr.set_time_seconds("frame", idx / fps)
+                    centers = np.asarray(box["center"], dtype=np.float32)[None, :]
+                    half_sizes = np.asarray(box["half_sizes"], dtype=np.float32)[None, :]
+                    # Namespace logs under "robot/..." so the inspector groups all overlays together.
+                    rr.log(
+                        "robot/gripper_bbox_body",
+                        rr.Boxes3D(
+                            centers=centers,
+                            half_sizes=half_sizes,
+                            quaternions=np.asarray(box["quat_xyzw"], dtype=np.float32)[None, :],
+                            colors=np.array([[255, 0, 0]], dtype=np.uint8),
+                        ),
+                    )
+                    basis = _ensure_basis(box)
+                    if basis is not None:
+                        axes = np.asarray(basis, dtype=np.float32)
+                        half_sizes_vec = np.asarray(box["half_sizes"], dtype=np.float32)
+                        center_vec = np.asarray(box["center"], dtype=np.float32)
+
+                        approach_axis = axes[:, 2]
+                        approach_axis_norm = np.linalg.norm(approach_axis) + 1e-12
+                        approach_axis = approach_axis / approach_axis_norm
+                        origin = center_vec - approach_axis * half_sizes_vec[2]
+                        vector = approach_axis * (half_sizes_vec[2] * 2.0)
+                        rr.log(
+                            "robot/gripper_bbox_body_centerline",
+                            rr.Arrows3D(
+                                origins=origin[np.newaxis, :],
+                                vectors=vector[np.newaxis, :],
+                                colors=np.array([[255, 0, 0]], dtype=np.uint8),
+                                radii=0.004,
+                            ),
+                        )
+                        up_axis = axes[:, 1]
+                        up_axis_norm = np.linalg.norm(up_axis) + 1e-12
+                        up_axis = up_axis / up_axis_norm
+                        rr.log(
+                            "robot/gripper_bbox_body_axis_height",
+                            rr.Arrows3D(
+                                origins=center_vec[np.newaxis, :],
+                                vectors=(up_axis * half_sizes_vec[1])[np.newaxis, :],
+                                colors=np.array([[0, 200, 0]], dtype=np.uint8),
+                                radii=0.003,
+                            ),
+                        )
+                        width_axis = axes[:, 0]
+                        width_axis_norm = np.linalg.norm(width_axis) + 1e-12
+                        width_axis = width_axis / width_axis_norm
+                        rr.log(
+                            "robot/gripper_bbox_body_axis_width",
+                            rr.Arrows3D(
+                                origins=center_vec[np.newaxis, :],
+                                vectors=(width_axis * half_sizes_vec[0])[np.newaxis, :],
+                                colors=np.array([[0, 150, 255]], dtype=np.uint8),
+                                radii=0.003,
+                            ),
+                        )
+        if robot_gripper_fingertip_boxes:
+            valid_box_count = sum(1 for box in robot_gripper_fingertip_boxes if box)
+            if valid_box_count > 0:
+                fps = 12.0
+                print(f"[INFO] Logging {valid_box_count} gripper FINGERTIP bounding boxes to Rerun...")
+                for idx, box in enumerate(robot_gripper_fingertip_boxes):
+                    if not box:
+                        continue
+                    rr.set_time_seconds("frame", idx / fps)
+                    centers = np.asarray(box["center"], dtype=np.float32)[None, :]
+                    half_sizes = np.asarray(box["half_sizes"], dtype=np.float32)[None, :]
+                    rr.log(
+                        "robot/gripper_bbox_fingertip",
+                        rr.Boxes3D(
+                            centers=centers,
+                            half_sizes=half_sizes,
+                            quaternions=np.asarray(box["quat_xyzw"], dtype=np.float32)[None, :],
+                            colors=np.array([[0, 0, 255]], dtype=np.uint8),  # Blue color
+                        ),
+                    )
+                    basis = _ensure_basis(box)
+                    if basis is not None:
+                        axes = np.asarray(basis, dtype=np.float32)
+                        half_sizes_vec = np.asarray(box["half_sizes"], dtype=np.float32)
+                        center_vec = np.asarray(box["center"], dtype=np.float32)
+
+                        approach_axis = axes[:, 2]
+                        approach_axis_norm = np.linalg.norm(approach_axis) + 1e-12
+                        approach_axis = approach_axis / approach_axis_norm
+                        origin = center_vec - approach_axis * half_sizes_vec[2]
+                        vector = approach_axis * (half_sizes_vec[2] * 2.0)
+                        rr.log(
+                            "robot/gripper_bbox_fingertip_centerline",
+                            rr.Arrows3D(
+                                origins=origin[np.newaxis, :],
+                                vectors=vector[np.newaxis, :],
+                                colors=np.array([[0, 0, 255]], dtype=np.uint8),
+                                radii=0.004,
+                            ),
+                        )
+                        up_axis = axes[:, 1]
+                        up_axis_norm = np.linalg.norm(up_axis) + 1e-12
+                        up_axis = up_axis / up_axis_norm
+                        rr.log(
+                            "robot/gripper_bbox_fingertip_axis_height",
+                            rr.Arrows3D(
+                                origins=center_vec[np.newaxis, :],
+                                vectors=(up_axis * half_sizes_vec[1])[np.newaxis, :],
+                                colors=np.array([[0, 200, 0]], dtype=np.uint8),
+                                radii=0.003,
+                            ),
+                        )
+                        width_axis = axes[:, 0]
+                        width_axis_norm = np.linalg.norm(width_axis) + 1e-12
+                        width_axis = width_axis / width_axis_norm
+                        rr.log(
+                            "robot/gripper_bbox_fingertip_axis_width",
+                            rr.Arrows3D(
+                                origins=center_vec[np.newaxis, :],
+                                vectors=(width_axis * half_sizes_vec[0])[np.newaxis, :],
+                                colors=np.array([[0, 150, 255]], dtype=np.uint8),
+                                radii=0.003,
+                            ),
+                        )
+        if robot_gripper_pad_points:
+            fps = 12.0
+            valid_pts = any(pts is not None and len(pts) > 0 for pts in robot_gripper_pad_points)
+            if valid_pts:
+                count = sum(1 for pts in robot_gripper_pad_points if pts is not None and len(pts) > 0)
+                print(f"[INFO] Logging {count} gripper pad point sets to Rerun (magenta)...")
+                for idx, pts in enumerate(robot_gripper_pad_points):
+                    if pts is None or len(pts) == 0:
+                        continue
+                    rr.set_time_seconds("frame", idx / fps)
+                    cols = np.tile(np.array([[255, 0, 255]], dtype=np.uint8), (len(pts), 1))
+                    rr.log(
+                        "robot/gripper_pad_points",
+                        rr.Points3D(pts.astype(np.float32, copy=False), colors=cols),
+                    )
+        
+        # Log TCP points from API (cyan spheres)
+        if robot_tcp_points:
+            fps = args.sync_fps if args.sync_fps > 0 else 30.0
+            valid_pts = any(pt is not None and len(pt) == 3 for pt in robot_tcp_points)
+            if valid_pts:
+                count = sum(1 for pt in robot_tcp_points if pt is not None and len(pt) == 3)
+                tcp_radius = getattr(args, "tcp_point_radius", 0.01)
+                print(f"[INFO] Logging {count} TCP points from API to Rerun (cyan, radius={tcp_radius}m)...")
+                for idx, pt in enumerate(robot_tcp_points):
+                    if pt is None or len(pt) != 3:
+                        continue
+                    rr.set_time_seconds("frame", idx / fps)
+                    # Log as a single cyan point with larger radius
+                    rr.log(
+                        "points/tcp_point",
+                        rr.Points3D(
+                            pt.reshape(1, 3).astype(np.float32, copy=False),
+                            colors=np.array([[0, 255, 255]], dtype=np.uint8),  # Cyan
+                            radii=np.array([0.02], dtype=np.float32),  # Increased for visibility
+                        ),
+                    )
+        
+        # Log object points from API (yellow spheres)
+        if robot_object_points:
+            fps = args.sync_fps if args.sync_fps > 0 else 30.0
+            valid_pts = any(pt is not None and len(pt) == 3 for pt in robot_object_points)
+            if valid_pts:
+                count = sum(1 for pt in robot_object_points if pt is not None and len(pt) == 3)
+                print(f"[INFO] Logging {count} object points from API to Rerun (yellow)...")
+                for idx, pt in enumerate(robot_object_points):
+                    if pt is None or len(pt) != 3:
+                        continue
+                    rr.set_time_seconds("frame", idx / fps)
+                    # Log as a single yellow point
+                    rr.log(
+                        "points/object_point",
+                        rr.Points3D(
+                            pt.reshape(1, 3).astype(np.float32, copy=False),
+                            colors=np.array([[255, 255, 0]], dtype=np.uint8),  # Yellow
+                            radii=np.array([0.025], dtype=np.float32),  # Increased for visibility
+                        ),
+                    )
+
+
+    if getattr(args, "export_bbox_video", False):
+        try:
+            _export_gripper_bbox_videos(
+                args,
+                rgbs,
+                intrs,
+                extrs,
+                robot_gripper_boxes,
+                final_cam_ids,
+            )
+        except Exception as exc:
+            print(f"[WARN] Failed to export bounding box videos: {exc}")
+
+
+# --- COLMAP Integration Functions ---
+
+def setup_colmap_workspace(
+    workspace_dir: Path,
+    rgbs: np.ndarray,
+    intrs: np.ndarray,
+    extrs: np.ndarray,
+    camera_ids: List[str],
+) -> Path:
+    """
+    Set up COLMAP workspace with images and camera parameters.
+    
+    Args:
+        workspace_dir: Path to COLMAP workspace directory
+        rgbs: RGB images (C, T, H, W, 3)
+        intrs: Camera intrinsics (C, T, 3, 3)
+        extrs: Camera extrinsics (C, T, 3, 4)
+        camera_ids: List of camera IDs
+    
+    Returns:
+        Path to the created workspace
+    """
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+    images_dir = workspace_dir / "images"
+    images_dir.mkdir(exist_ok=True)
+    
+    C, T, H, W, _ = rgbs.shape
+    
+    # Export images
+    print(f"[INFO] Exporting {C * T} images to COLMAP workspace...")
+    for c_idx in range(C):
+        for t_idx in range(T):
+            img = rgbs[c_idx, t_idx]
+            img_path = images_dir / f"cam_{camera_ids[c_idx]}_frame_{t_idx:04d}.jpg"
+            Image.fromarray(img).save(img_path, quality=95)
+    
+    # Create cameras.txt
+    cameras_file = workspace_dir / "cameras.txt"
+    with open(cameras_file, 'w') as f:
+        f.write("# Camera list with one line of data per camera:\n")
+        f.write("#   CAMERA_ID, MODEL, WIDTH, HEIGHT, PARAMS[]\n")
+        for c_idx in range(C):
+            K = intrs[c_idx, 0]  # Use first frame's intrinsics
+            fx, fy = K[0, 0], K[1, 1]
+            cx, cy = K[0, 2], K[1, 2]
+            # COLMAP PINHOLE model: fx, fy, cx, cy
+            f.write(f"{c_idx} PINHOLE {W} {H} {fx} {fy} {cx} {cy}\n")
+    
+    # Create images.txt
+    images_file = workspace_dir / "images.txt"
+    with open(images_file, 'w') as f:
+        f.write("# Image list with two lines of data per image:\n")
+        f.write("#   IMAGE_ID, QW, QX, QY, QZ, TX, TY, TZ, CAMERA_ID, NAME\n")
+        f.write("#   POINTS2D[] as (X, Y, POINT3D_ID)\n")
+        img_id = 1
+        for c_idx in range(C):
+            for t_idx in range(T):
+                E = extrs[c_idx, t_idx]  # 3x4 world-to-camera
+                R = E[:3, :3]
+                t = E[:3, 3]
+                
+                # Convert rotation matrix to quaternion (w, x, y, z)
+                quat = _rotation_matrix_to_quaternion(R)
+                
+                img_name = f"cam_{camera_ids[c_idx]}_frame_{t_idx:04d}.jpg"
+                f.write(f"{img_id} {quat[0]} {quat[1]} {quat[2]} {quat[3]} ")
+                f.write(f"{t[0]} {t[1]} {t[2]} {c_idx} {img_name}\n")
+                f.write("\n")  # Empty line for POINTS2D
+                img_id += 1
+    
+    print(f"[INFO] COLMAP workspace created at {workspace_dir}")
+    return workspace_dir
+
+
+def _rotation_matrix_to_quaternion(R: np.ndarray) -> np.ndarray:
+    """Convert 3x3 rotation matrix to quaternion (w, x, y, z)."""
+    trace = np.trace(R)
+    if trace > 0:
+        s = 0.5 / np.sqrt(trace + 1.0)
+        w = 0.25 / s
+        x = (R[2, 1] - R[1, 2]) * s
+        y = (R[0, 2] - R[2, 0]) * s
+        z = (R[1, 0] - R[0, 1]) * s
+    else:
+        if R[0, 0] > R[1, 1] and R[0, 0] > R[2, 2]:
+            s = 2.0 * np.sqrt(1.0 + R[0, 0] - R[1, 1] - R[2, 2])
+            w = (R[2, 1] - R[1, 2]) / s
+            x = 0.25 * s
+            y = (R[0, 1] + R[1, 0]) / s
+            z = (R[0, 2] + R[2, 0]) / s
+        elif R[1, 1] > R[2, 2]:
+            s = 2.0 * np.sqrt(1.0 + R[1, 1] - R[0, 0] - R[2, 2])
+            w = (R[0, 2] - R[2, 0]) / s
+            x = (R[0, 1] + R[1, 0]) / s
+            y = 0.25 * s
+            z = (R[1, 2] + R[2, 1]) / s
+        else:
+            s = 2.0 * np.sqrt(1.0 + R[2, 2] - R[0, 0] - R[1, 1])
+            w = (R[1, 0] - R[0, 1]) / s
+            x = (R[0, 2] + R[2, 0]) / s
+            y = (R[1, 2] + R[2, 1]) / s
+            z = 0.25 * s
+    return np.array([w, x, y, z])
+
+
+
+def run_colmap_feature_extraction(workspace_dir: Path, database_path: Path, images_dir: Path) -> bool:
+    """Run COLMAP feature extraction using pycolmap."""
+    try:
+        print(f"[INFO] Running pycolmap feature extraction...")
+        pycolmap.extract_features(database_path, images_dir)
+        print("[INFO] Feature extraction completed successfully")
+        return True
+    except Exception as e:
+        print(f"[ERROR] Feature extraction failed: {e}")
+        return False
+
+
+def run_colmap_matching(workspace_dir: Path, database_path: Path) -> tuple[bool, int]:
+    """Run COLMAP feature matching using pycolmap.
+    
+    Returns:
+        (success, num_matches): Whether matching succeeded and number of image pairs with matches
+    """
+    try:
+        print(f"[INFO] Running pycolmap feature matching...")
+        
+        # Try sequential matching first (faster)
+        print("[INFO] Trying sequential matching (overlap=5)...")
+        pycolmap.match_sequential(
+            database_path=str(database_path),
+            matching_options=pycolmap.SequentialMatchingOptions(overlap=5)
+        )
+        
+        # Query database for match statistics
+        import sqlite3
+        conn = sqlite3.connect(str(database_path))
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM two_view_geometries WHERE rows > 0")
+        num_matches = cursor.fetchone()[0]
+        conn.close()
+        
+        print(f"[INFO] Sequential matching found {num_matches} image pairs with matches")
+        
+        # If sequential matching found very few matches, try exhaustive (slower but more thorough)
+        if num_matches < 5:
+            print("[INFO] Few matches found, trying exhaustive matching...")
+            pycolmap.match_exhaustive(database_path)
+            
+            conn = sqlite3.connect(str(database_path))
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM two_view_geometries WHERE rows > 0")
+            num_matches = cursor.fetchone()[0]
+            conn.close()
+            
+            print(f"[INFO] Exhaustive matching found {num_matches} image pairs with matches")
+        
+        if num_matches == 0:
+            print("[WARN] No feature matches found between images!")
+            print("[WARN] This usually means:")
+            print("[WARN]   1. Images have insufficient texture/features")
+            print("[WARN]   2. Cameras don't share overlapping views (check alignment above)")
+            print("[WARN]   3. Images are too different (lighting, blur, etc.)")
+        
+        return True, num_matches
+    except Exception as e:
+        print(f"[ERROR] Feature matching failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False, 0
+
+
+def run_colmap_mapper(workspace_dir: Path, database_path: Path, images_dir: Path, output_dir: Path, use_known_poses: bool = True) -> tuple[bool, dict]:
+    """Run COLMAP mapper to reconstruct scene using pycolmap.
+    
+    Args:
+        use_known_poses: Ignored for now - always uses standard incremental mapping
+    
+    Returns:
+        (success, stats): Whether mapping succeeded and reconstruction statistics
+    """
+    try:
+        print(f"[INFO] Running pycolmap mapper...")
+        
+        # Use standard incremental mapping - it's more robust and handles everything
+        # The calibration is provided via cameras.txt which COLMAP will use as initial guess
+        maps = pycolmap.incremental_mapping(database_path, images_dir, output_dir)
+        
+        if len(maps) == 0:
+            print("[ERROR] No reconstruction created")
+            print("[ERROR] This usually means:")
+            print("[ERROR]   1. No good initial image pair found (insufficient feature matches)")
+            print("[ERROR]   2. Reconstruction failed to grow beyond initial pair")
+            print("[ERROR]   3. Geometric verification failed (inconsistent camera poses)")
+            return False, {}
+        
+        # Get statistics from first (usually best) reconstruction
+        reconstruction = maps[0]
+        stats = {
+            'num_reconstructions': len(maps),
+            'num_registered_images': reconstruction.num_images(),
+            'num_points3d': reconstruction.num_points3D(),
+            'num_observations': sum(len(p.track.elements) for p in reconstruction.points3D.values())
+        }
+        
+        print(f"[INFO] Mapping completed successfully:")
+        print(f"[INFO]   - {stats['num_reconstructions']} reconstruction(s)")
+        print(f"[INFO]   - {stats['num_registered_images']} registered images")
+        print(f"[INFO]   - {stats['num_points3d']} 3D points")
+        print(f"[INFO]   - {stats['num_observations']} observations")
+        
+        return True, stats
+    except Exception as e:
+        print(f"[ERROR] Mapping failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False, {}
+
+
+def verify_camera_alignment(
+    rgbs: np.ndarray,
+    depths: np.ndarray,
+    intrs: np.ndarray,
+    extrs: np.ndarray,
+    camera_ids: List[str],
+) -> Dict[str, Any]:
+    """
+    Verify camera alignment by checking multi-view consistency.
+    
+    Args:
+        rgbs: (C, T, H, W, 3) RGB images
+        depths: (C, T, H, W) depth maps
+        intrs: (C, T, 3, 3) intrinsics
+        extrs: (C, T, 3, 4) extrinsics (world-to-camera)
+    
+    Returns:
+        Dictionary with alignment diagnostics
+    """
+    print("\n[INFO] ========== Camera Alignment Verification ==========")
+    
+    C, T, H, W = depths.shape
+    
+    # Check 1: Are extrinsics valid?
+    print("[INFO] Checking camera extrinsics...")
+    for c_idx in range(C):
+        E = extrs[c_idx, 0]  # First frame
+        R = E[:3, :3]
+        t = E[:3, 3]
+        
+        # Check if rotation matrix is valid (determinant should be ~1)
+        det = np.linalg.det(R)
+        orthogonality = np.linalg.norm(R @ R.T - np.eye(3))
+        
+        print(f"[INFO]   Camera {camera_ids[c_idx]}: det(R)={det:.4f}, orthogonality_error={orthogonality:.6f}")
+        
+        if abs(det - 1.0) > 0.1:
+            print(f"[WARN]   Camera {camera_ids[c_idx]}: Rotation matrix determinant is {det:.4f} (should be ~1.0)")
+        if orthogonality > 0.01:
+            print(f"[WARN]   Camera {camera_ids[c_idx]}: Rotation matrix is not orthogonal (error={orthogonality:.6f})")
+    
+    # Check 2: Do cameras have overlapping views?
+    print("\n[INFO] Checking camera view overlap...")
+    frame_idx = T // 2  # Use middle frame
+    
+    # Project points from one camera to another
+    overlap_matrix = np.zeros((C, C))
+    
+    for c1 in range(C):
+        depth1 = depths[c1, frame_idx]
+        K1 = intrs[c1, frame_idx]
+        E1 = extrs[c1, frame_idx]
+        
+        # Get valid depth points (sample to speed up)
+        valid_mask = depth1 > 0
+        v_coords, u_coords = np.where(valid_mask)
+        
+        if len(u_coords) == 0:
+            continue
+        
+        # Sample points (max 1000 for speed)
+        if len(u_coords) > 1000:
+            indices = np.random.choice(len(u_coords), 1000, replace=False)
+            u_coords = u_coords[indices]
+            v_coords = v_coords[indices]
+        
+        # Backproject to 3D in camera frame
+        z1 = depth1[v_coords, u_coords]
+        x1 = (u_coords - K1[0, 2]) * z1 / K1[0, 0]
+        y1 = (v_coords - K1[1, 2]) * z1 / K1[1, 1]
+        pts_cam1 = np.stack([x1, y1, z1], axis=1)
+        
+        # Transform to world frame
+        R1 = E1[:3, :3]
+        t1 = E1[:3, 3]
+        R1_inv = R1.T
+        t1_inv = -R1_inv @ t1
+        pts_world = (R1_inv @ pts_cam1.T).T + t1_inv
+        
+        # Project to other cameras
+        for c2 in range(C):
+            if c1 == c2:
+                overlap_matrix[c1, c2] = 1.0
+                continue
+            
+            K2 = intrs[c2, frame_idx]
+            E2 = extrs[c2, frame_idx]
+            R2 = E2[:3, :3]
+            t2 = E2[:3, 3]
+            
+            # Transform to camera 2 frame
+            pts_cam2 = (R2 @ pts_world.T).T + t2
+            
+            # Project to image
+            valid_in_front = pts_cam2[:, 2] > 0
+            pts_cam2_valid = pts_cam2[valid_in_front]
+            
+            if len(pts_cam2_valid) == 0:
+                overlap_matrix[c1, c2] = 0.0
+                continue
+            
+            u2 = K2[0, 0] * pts_cam2_valid[:, 0] / pts_cam2_valid[:, 2] + K2[0, 2]
+            v2 = K2[1, 1] * pts_cam2_valid[:, 1] / pts_cam2_valid[:, 2] + K2[1, 2]
+            
+            # Check how many points are visible in camera 2
+            visible = (u2 >= 0) & (u2 < W) & (v2 >= 0) & (v2 < H)
+            overlap_ratio = visible.sum() / len(pts_cam2_valid)
+            overlap_matrix[c1, c2] = overlap_ratio
+    
+    print("\n[INFO] Camera overlap matrix (fraction of points visible):")
+    print("[INFO]          ", end="")
+    for c in range(C):
+        print(f"Cam{camera_ids[c][:4]:>6}", end="  ")
+    print()
+    for c1 in range(C):
+        print(f"[INFO] Cam{camera_ids[c1][:4]:<5}", end="")
+        for c2 in range(C):
+            if c1 == c2:
+                print(f"  ---  ", end="  ")
+            else:
+                print(f" {overlap_matrix[c1, c2]:>5.2%}", end="  ")
+        print()
+    
+    # Check if overlap is too low
+    avg_overlap = np.mean(overlap_matrix[np.triu_indices(C, k=1)])
+    print(f"\n[INFO] Average camera overlap: {avg_overlap:.2%}")
+    
+    if avg_overlap < 0.1:
+        print("[WARN] Very low camera overlap (<10%)! Cameras may not see the same scene.")
+        print("[WARN] This will cause:")
+        print("[WARN]   - COLMAP to fail (no common features)")
+        print("[WARN]   - 'Seeing everything twice' (inconsistent views)")
+        print("[WARN] Possible causes:")
+        print("[WARN]   - Wrong camera extrinsics (R, t)")
+        print("[WARN]   - Cameras pointing at different objects")
+        print("[WARN]   - Wrong world coordinate frame")
+    elif avg_overlap < 0.3:
+        print("[WARN] Low camera overlap (<30%). COLMAP may struggle.")
+    
+    print("[INFO] ========== Alignment Verification Complete ==========\n")
+    
+    return {
+        'overlap_matrix': overlap_matrix,
+        'avg_overlap': avg_overlap,
+    }
+
+
+def evaluate_depth_quality(depths: np.ndarray) -> np.ndarray:
+    """
+    Evaluate depth quality for each camera based on multiple metrics.
+    
+    Args:
+        depths: (C, T, H, W) array of depth values
+    
+    Returns:
+        (C,) array of quality scores (higher is better)
+    """
+    C, T, H, W = depths.shape
+    scores = np.zeros(C)
+    
+    for c_idx in range(C):
+        cam_depths = depths[c_idx]  # (T, H, W)
+        
+        # Metric 1: Coverage (% of valid depth values)
+        valid_mask = cam_depths > 0
+        coverage = valid_mask.sum() / (T * H * W)
+        
+        # Metric 2: Depth variance (higher = more 3D structure)
+        # Use valid depths only
+        valid_depths = cam_depths[valid_mask]
+        if len(valid_depths) > 0:
+            depth_variance = np.std(valid_depths)
+        else:
+            depth_variance = 0.0
+        
+        # Metric 3: Edge sharpness (gradient magnitude)
+        # Compute depth gradients for each frame
+        edge_scores = []
+        for t in range(T):
+            d = cam_depths[t]
+            valid = d > 0
+            if valid.sum() > 100:  # Need enough valid pixels
+                # Compute gradients
+                dy, dx = np.gradient(d)
+                grad_mag = np.sqrt(dx**2 + dy**2)
+                # Only consider gradients at valid depth locations
+                valid_grads = grad_mag[valid]
+                edge_scores.append(np.mean(valid_grads))
+        
+        edge_sharpness = np.mean(edge_scores) if edge_scores else 0.0
+        
+        # Combine metrics (normalized to 0-1 range approximately)
+        # Higher coverage, variance, and sharpness = better depth
+        score = (
+            coverage * 100 +  # 0-100 range
+            depth_variance * 10 +  # Scale to similar range
+            edge_sharpness * 10
+        )
+        scores[c_idx] = score
+    
+    return scores
+
+
+def evaluate_feature_richness(rgbs: np.ndarray) -> np.ndarray:
+    """
+    Evaluate feature richness for each camera (independent of COLMAP reconstruction).
+    
+    Args:
+        rgbs: (C, T, H, W, 3) array of RGB images
+    
+    Returns:
+        (C,) array of feature richness scores (higher is better)
+    """
+    C, T, H, W, _ = rgbs.shape
+    scores = np.zeros(C)
+    
+    for c_idx in range(C):
+        cam_rgbs = rgbs[c_idx]  # (T, H, W, 3)
+        
+        # Convert to grayscale and compute statistics
+        texture_scores = []
+        for t in range(min(T, 10)):  # Sample up to 10 frames
+            rgb = cam_rgbs[t]
+            gray = 0.299 * rgb[..., 0] + 0.587 * rgb[..., 1] + 0.114 * rgb[..., 2]
+            
+            # Metric 1: Intensity variance (texture)
+            intensity_var = np.var(gray)
+            
+            # Metric 2: Edge strength (Sobel)
+            dy, dx = np.gradient(gray)
+            edge_strength = np.mean(np.sqrt(dx**2 + dy**2))
+            
+            # Metric 3: Local variance (fine texture)
+            # Compute variance in 8x8 blocks
+            block_vars = []
+            for i in range(0, H - 8, 8):
+                for j in range(0, W - 8, 8):
+                    block = gray[i:i+8, j:j+8]
+                    block_vars.append(np.var(block))
+            local_var = np.mean(block_vars) if block_vars else 0.0
+            
+            # Combine metrics
+            texture_score = intensity_var + edge_strength * 10 + local_var
+            texture_scores.append(texture_score)
+        
+        scores[c_idx] = np.mean(texture_scores) if texture_scores else 0.0
+    
+    return scores
+
+
+def evaluate_camera_quality_from_colmap(workspace_dir: Path, camera_ids: List[str]) -> Dict[str, float]:
+    """
+    Evaluate camera quality based on COLMAP reconstruction.
+    
+    Returns a dictionary mapping camera_id to quality score (higher is better).
+    Quality is based on number of registered 3D points visible in each camera.
+    """
+    sparse_dir = workspace_dir / "sparse" / "0"
+    if not sparse_dir.exists():
+        print("[WARN] No COLMAP reconstruction found, cannot score cameras by reconstruction")
+        return {cid: 0.0 for cid in camera_ids}
+    
+    # Parse images.txt to get registered images and their points
+    images_file = sparse_dir / "images.txt"
+    if not images_file.exists():
+        print("[WARN] No images.txt found in COLMAP output")
+        return {cid: 0.0 for cid in camera_ids}
+    
+    camera_scores = {cid: 0.0 for cid in camera_ids}
+    camera_registered_count = {cid: 0 for cid in camera_ids}
+    
+    with open(images_file, 'r') as f:
+        lines = f.readlines()
+    
+    # Skip header lines
+    lines = [l for l in lines if not l.startswith('#')]
+    
+    # Parse image entries (two lines per image)
+    for i in range(0, len(lines), 2):
+        if i + 1 >= len(lines):
+            break
+        
+        # First line: IMAGE_ID, QW, QX, QY, QZ, TX, TY, TZ, CAMERA_ID, NAME
+        img_line = lines[i].strip().split()
+        if len(img_line) < 10:
+            continue
+        
+        img_name = img_line[9]
+        
+        # Second line: POINTS2D as (X, Y, POINT3D_ID) triplets
+        points_line = lines[i + 1].strip()
+        if not points_line:
+            continue
+        
+        points = points_line.split()
+        # Count valid 3D points (POINT3D_ID != -1)
+        num_points = 0
+        for j in range(2, len(points), 3):  # Every third element is POINT3D_ID
+            if j < len(points):
+                point3d_id = int(points[j])
+                if point3d_id != -1:
+                    num_points += 1
+        
+        # Extract camera_id from image name
+        for cid in camera_ids:
+            if f"cam_{cid}_" in img_name:
+                camera_scores[cid] += num_points
+                camera_registered_count[cid] += 1
+                break
+    
+    print(f"[INFO] COLMAP camera scores (3D points observed):")
+    for cid in camera_ids:
+        reg_count = camera_registered_count[cid]
+        print(f"[INFO]   Camera {cid}: {camera_scores[cid]:.0f} points in {reg_count} registered images")
+    
+    return camera_scores
+
+
+def select_best_cameras(
+    camera_ids: List[str],
+    camera_scores: Dict[str, float],
+    depth_scores: np.ndarray,
+    feature_scores: np.ndarray,
+    limit: int,
+) -> List[int]:
+    """
+    Select indices of best N cameras based on combined quality scores.
+    
+    Args:
+        camera_ids: List of camera IDs
+        camera_scores: COLMAP reconstruction scores (0 if reconstruction failed)
+        depth_scores: Depth quality scores
+        feature_scores: Feature richness scores
+        limit: Number of cameras to keep
+    
+    Returns:
+        List of camera indices to keep (sorted by combined score, descending)
+    """
+    # Normalize scores to 0-1 range
+    def normalize(arr):
+        arr = np.array(arr)
+        if arr.max() > 0:
+            return arr / arr.max()
+        return arr
+    
+    colmap_scores_arr = np.array([camera_scores.get(cid, 0.0) for cid in camera_ids])
+    colmap_scores_norm = normalize(colmap_scores_arr)
+    depth_scores_norm = normalize(depth_scores)
+    feature_scores_norm = normalize(feature_scores)
+    
+    # Combine scores with weights
+    # If COLMAP reconstruction succeeded (max score > 0), use it
+    # Otherwise, rely entirely on depth and feature quality
+    if colmap_scores_arr.max() > 0:
+        print("[INFO] Using combined scoring: 40% COLMAP + 30% depth quality + 30% features")
+        combined_scores = (
+            0.4 * colmap_scores_norm +
+            0.3 * depth_scores_norm +
+            0.3 * feature_scores_norm
+        )
+    else:
+        print("[INFO] COLMAP reconstruction failed, using: 60% depth quality + 40% features")
+        combined_scores = (
+            0.6 * depth_scores_norm +
+            0.4 * feature_scores_norm
+        )
+    
+    # Sort cameras by combined score
+    scored_cameras = [(idx, cid, combined_scores[idx]) 
+                      for idx, cid in enumerate(camera_ids)]
+    scored_cameras.sort(key=lambda x: x[2], reverse=True)
+    
+    # Select top N
+    selected = scored_cameras[:limit]
+    selected_indices = sorted([idx for idx, _, _ in selected])
+    
+    print(f"[INFO] Selected {len(selected_indices)} best cameras:")
+    for idx, cid, combined_score in selected:
+        if idx in selected_indices:
+            print(f"[INFO]   Camera {cid}: combined={combined_score:.3f} "
+                  f"(COLMAP={colmap_scores_norm[idx]:.3f}, depth={depth_scores_norm[idx]:.3f}, features={feature_scores_norm[idx]:.3f})")
+    
+    return selected_indices
+
+
 
 def main():
     """Parses arguments and orchestrates the entire data processing workflow."""

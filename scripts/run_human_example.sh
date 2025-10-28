@@ -91,13 +91,11 @@ echo "generating masks for objects manipulated by human hands - using HoistForme
 
 cd third_party/HOISTFormer
 ./run_demo_hand_object.sh
-./run_sam2_tracking.sh
+# ./run_sam2_tracking.sh # for now we do not need to track the object for the whole time lets use the mask we already have
+#but we need to know whan it starts..
 cd ../..
 echo "Done with HoistFormer processing."
 
-# python demo.py --temporal_stride 1 --spatial_downsample 1 --depth_estimator vggt_raw --depth_cache_dir ./depth_cache --rerun save --sample-path "$SAMPLE_PATH_HAND_TRACKED" --tracker cotracker3_offline --rrd "./vggt_raw_mvtracker_raw.rrd"
-# cp -r ./vggt_raw_mvtracker_raw.rrd /data/rh20t_api/test_data_generated_human
-#add also for with depth added 
 
 # python demo.py --temporal_stride 1 --spatial_downsample 1 --depth_estimator vggt_raw --depth_cache_dir ./depth_cache --rerun save --sample-path "$SAMPLE_PATH" --tracker mvtracker --rrd vggt_raw_mvtracker_demo.rrd
 
@@ -113,4 +111,7 @@ cp -r ./mvtracker_demo.rrd /data/rh20t_api/test_data_generated_human
 
 
 
+echo "Running MVTracker demo with VGGt depth estimator"
+python demo.py --temporal_stride 1 --spatial_downsample 1 --depth_estimator vggt_raw --depth_cache_dir ./depth_cache --rerun save --sample-path "$SAMPLE_PATH_HAND_TRACKED" --tracker mvtracker --rrd "./vggt_raw_mvtracker_raw.rrd"
+cp -r ./vggt_raw_mvtracker_raw.rrd /data/rh20t_api/test_data_generated_human
 
