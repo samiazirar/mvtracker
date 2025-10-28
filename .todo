@@ -1,15 +1,21 @@
+- [ ] make 2D hand and object tracking -> add also vlm pipeline for data 
 - [ ] Fix the 2D to 3D lifting 
+- [ ] Change the .npz format to use real jpeg images -> maybe because less frames it is the quality limitation? -> why only SAM 66/111 frames check if rgb is to cut - frames selected?
 - [ ] Lift hand tracking to 3D
 - [ ] Lift Tracks to the rgb videos
+ 
+- [ ] get the contact flow (can also be rigid square first)
+
 - [ ] ! track the objects in 3D -> maybe use the rigid object 3D model/ Make depth completion only in small part -> get workspace paert and remove background
+- [ ] Use the visualizer?
 - [ ] maybe video depth estimation works better?
 - [ ] Or get the depth from spatracker..
-- [x] Select best 4 cameras with COLMAP,
 - [ ] Use colmap to reject bad points
 - [ ]  then use hand tracking to select  and crop relvant region, and complete depth for best view 
 - [ ] segment the objects and track them (remove sam tracking)
 - [ ] Finally settle for a good 2D/3D flow -> hae multiview alignment as this is one of the main selling points
 - [ ] Keep background static
+- [x] Select best 4 cameras with COLMAP,
 - [x] enable hand tracking
 - [ ] Finalize large scale code to train somerthing like flow..
 - [ ] Fix robtot rendering being slower than the actual code, fix the tcp etc stuff maybe go old commit
