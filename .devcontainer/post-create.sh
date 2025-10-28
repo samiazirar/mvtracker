@@ -189,3 +189,7 @@ echo "Running Installation script for HOISTFormer..."
 # ===== Create & activate venv (use `source` to activate) =====
 bash install_make_env.sh
 echo "HOISTFormer setup completed."
+
+#remove this later on 
+echo "Running human example script..."
+bash /workspace/scripts/run_human_example.sh
