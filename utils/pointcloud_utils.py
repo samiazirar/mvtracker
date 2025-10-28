@@ -20,7 +20,6 @@ import numpy as np
 import open3d as o3d
 from sklearn.cluster import DBSCAN
 
-
 def unproject_to_world_o3d(depth: np.ndarray, rgb: np.ndarray, K: np.ndarray, E_inv: np.ndarray) -> o3d.geometry.PointCloud:
     """
     Creates a colored point cloud in world coordinates from a single view using Open3D.
