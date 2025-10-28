@@ -163,3 +163,29 @@ cd ../..
 
 echo "Finished with HaMeR setup."
 
+
+
+echo "Download HOIST Former and install..."
+HOIST_DIR="/workspace/third_party/HOISTFormer"
+if [ ! -d "$HOIST_DIR" ]; then
+    mkdir -p /workspace/third_party
+    echo "Cloning HOISTFormer repository..."
+    git clone https://github.com/SupreethN/HOISTFormer.git
+fi 
+
+
+
+
+echo "Setting up HOISTFormer environment..."
+
+cd $HOIST_DIR
+# ===== System deps (Ubuntu/Debian) =====
+sudo apt-get update
+sudo apt-get install -y --no-install-recommends \
+  build-essential cmake ninja-build git python3-venv python3-dev \
+  libgl1 libglib2.0-0
+
+echo "Running Installation script for HOISTFormer..."
+# ===== Create & activate venv (use `source` to activate) =====
+bash install_make_env.sh
+echo "HOISTFormer setup completed."

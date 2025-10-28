@@ -37,7 +37,7 @@ python create_sparse_depth_map.py \
   --high-res-folder "$RGB_FOLDER" \
   --out-dir "$OUT_DIR" \
   --dataset-type human \
-  --max-frames 50 \
+  --max-frames 111 \
   --frame-selection first \
   --frames-for-tracking 1 \
   --no-sharpen-edges-with-mesh \
@@ -84,6 +84,17 @@ echo "Running MVTracker demo"
 python demo.py --temporal_stride 1 --spatial_downsample 1 --depth_estimator gt --depth_cache_dir ./depth_cache --rerun save --sample-path "$SAMPLE_PATH_HAND_TRACKED" --tracker cotracker3_offline
 # python demo.py --temporal_stride 1 --spatial_downsample 1 --depth_estimator gt --depth_cache_dir ./depth_cache --rerun save --sample-path "$SAMPLE_PATH_HAND_TRACKED" --tracker mvtracker
 
+
+echo "generating masks for objects manipulated by human hands - using HoistFormer"
+
+cd third_party/HOISTFormer
+./run_demo_hand_object.sh
+./run_sam2_tracking.sh
+cd ../..
+echo "Done with HoistFormer processing."
+
+# python demo.py --temporal_stride 1 --spatial_downsample 1 --depth_estimator vggt_raw --depth_cache_dir ./depth_cache --rerun save --sample-path "$SAMPLE_PATH_HAND_TRACKED" --tracker cotracker3_offline --rrd "./vggt_raw_mvtracker_raw.rrd"
+# cp -r ./vggt_raw_mvtracker_raw.rrd /data/rh20t_api/test_data_generated_human
 #add also for with depth added 
 
 # python demo.py --temporal_stride 1 --spatial_downsample 1 --depth_estimator vggt_raw --depth_cache_dir ./depth_cache --rerun save --sample-path "$SAMPLE_PATH" --tracker mvtracker --rrd vggt_raw_mvtracker_demo.rrd

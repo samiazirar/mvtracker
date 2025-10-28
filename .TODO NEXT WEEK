@@ -1,0 +1,3 @@
+-> if possible use spatracker to identify backgroudn
+-> use GEMENI to identify the time stamps where the grasping happens! (or if to near to table) and then add a sam mask on the object modified -> maybe just if below certain z value
+https://github.com/SupreethN/HOISTFormer
