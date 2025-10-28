@@ -3,11 +3,13 @@
 Visualize hand tracking results from _hand_tracked.npz files.
 Creates a Rerun visualization showing:
 1. RGB point clouds from depth maps
-2. Lifted SAM hand masks as 3D point clouds
+2. Lifted SAM hand masks as 3D point clouds (using utility functions)
 3. Query points derived from hand keypoints
 4. Original query points for debugging alignment
 
 This helps debug why query points may not align in 3D even when they look correct in 2D.
+
+Note: This script now uses the standardized mask lifting utilities from utils/
 """
 
 import argparse
@@ -18,47 +20,8 @@ import rerun as rr
 from typing import Optional, List
 import warnings
 
-
-def lift_mask_to_3d(mask, depth, intr, extr):
-    """
-    Lift a binary mask to 3D world coordinates using depth map.
-    
-    Args:
-        mask: Binary mask [H, W]
-        depth: Depth map [H, W]
-        intr: Intrinsic matrix [3, 3]
-        extr: Extrinsic matrix [3, 4] (world_T_cam)
-    
-    Returns:
-        points_3d: 3D points in world coordinates [N, 3]
-    """
-    H, W = mask.shape
-    ys, xs = np.nonzero(mask)
-    
-    if len(xs) == 0:
-        return np.empty((0, 3), dtype=np.float32)
-    
-    # Get depth values at mask locations
-    z = depth[ys, xs].astype(np.float32)
-    valid = z > 0
-    
-    if not np.any(valid):
-        return np.empty((0, 3), dtype=np.float32)
-    
-    xs = xs[valid]
-    ys = ys[valid]
-    z = z[valid]
-    
-    # Create homogeneous pixel coordinates
-    pixels = np.stack([xs, ys, np.ones_like(xs)], axis=0).astype(np.float32) * z
-    
-    # Backproject to camera space
-    cam_points = np.linalg.inv(intr) @ pixels
-    
-    # Transform to world space
-    world_points = (extr[:3, :3] @ cam_points + extr[:3, 3:4]).T
-    
-    return world_points.astype(np.float32)
+# Import the new utility functions
+from utils.mask_lifting_utils import lift_mask_to_3d, visualize_mask_3d
 
 
 def visualize_hand_tracking(npz_path: Path, output_rrd: Path, max_frames: Optional[int] = None):
@@ -188,23 +151,19 @@ def visualize_hand_tracking(npz_path: Path, output_rrd: Path, max_frames: Option
                     )
                 )
             
-            # Lift hand mask to 3D and visualize
+            # Lift hand mask to 3D and visualize using utility function
             if mask.any():
-                hand_mask_points = lift_mask_to_3d(mask, depth, intr_t, extr_t)
-                
-                if len(hand_mask_points) > 0:
-                    # Color hand mask points in magenta
-                    magenta = np.array([255, 0, 255], dtype=np.uint8)
-                    hand_colors = np.tile(magenta, (len(hand_mask_points), 1))
-                    
-                    rr.log(
-                        f"world/hand_masks/{cam_id}",
-                        rr.Points3D(
-                            positions=hand_mask_points,
-                            colors=hand_colors,
-                            radii=-1.5  # Slightly larger for visibility
-                        )
-                    )
+                # Use the standardized visualization function
+                num_points = visualize_mask_3d(
+                    mask=mask,
+                    depth=depth,
+                    intr=intr_t,
+                    extr=extr_t,
+                    entity_path=f"world/hand_masks/{cam_id}",
+                    color=np.array([255, 0, 255], dtype=np.uint8),  # Magenta
+                    radius=0.008,  # Slightly larger for visibility
+                    time_seconds=time_seconds,
+                )
             
             # Log the pre-computed hand points (if any)
             if isinstance(hand_points[t], np.ndarray) and len(hand_points[t]) > 0:
