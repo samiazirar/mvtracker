@@ -1,4 +1,4 @@
-- [ ] make 2D hand and object tracking -> add also vlm pipeline for data 
+- [ ] make 2D hand and object tracking -> add also vlm pipeline for data (einfach wo hand am nächsten ist) - visualize hand - erstmal alle masken tracken
 - [ ] Fix the 2D to 3D lifting 
 - [ ] VGGT Tracking
 - [ ] SAM STEP WEGLASSEN OBJECT TRACKCKEN FERTIG

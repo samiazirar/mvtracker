@@ -6,30 +6,48 @@ This script visualizes the full scene including RGB point clouds, camera frustum
 and 2D masks lifted to 3D. The masks appear as a togglable layer in Rerun, allowing
 you to compare them with the RGB point clouds.
 
+Global ID Mode (NEW):
+---------------------
+Use --use-global-ids to match masks across cameras and assign consistent IDs.
+This is useful when the same object is tracked by multiple cameras but has
+different local IDs in each camera's output.
+
+Example: Camera 0 has IDs [0, 1, 2] and Camera 1 has IDs [0, 1]. The global ID
+assignment will match them based on 3D position, so if Camera 1's ID 0 is close
+to Camera 0's ID 2 in 3D space, they'll both get the same global ID.
+
 Usage Examples:
 ---------------
 
-# 1. Visualize hand masks from processed human data (after run_human_example.sh)
+# 1. Visualize with GLOBAL IDs (match masks across cameras)
+python lift_and_visualize_masks.py \
+    --npz third_party/HOISTFormer/hoist_output/task_0045_user_0020_scene_0004_cfg_0006_human_processed_hand_tracked_hoist.npz \
+    --mask-key hoist_masks \
+    --use-global-ids \
+    --distance-threshold 0.15 \
+    --max-frames 111
+
+# 2. Visualize SAM2 tracking output with global IDs
+python lift_and_visualize_masks.py \
+    --npz third_party/HOISTFormer/sam2_tracking_output/task_0045_user_0020_scene_0004_cfg_0006_human_processed_hand_tracked_hoist_sam2.npz \
+    --mask-key sam2_predictions \
+    --use-global-ids \
+    --distance-threshold 0.20 \
+    --max-frames 111
+
+# 3. Original per-camera mode (without global IDs)
 python lift_and_visualize_masks.py \
     --npz data/human_high_res_filtered/task_0045_user_0020_scene_0004_cfg_0006_human_processed_hand_tracked.npz \
     --mask-key sam_hand_masks \
     --color 255 0 255 \
     --max-frames 50
 
-# 2. Visualize with RGB colors from images (match mask colors to scene)
+# 4. Visualize with RGB colors from images (match mask colors to scene)
 python lift_and_visualize_masks.py \
     --npz data/human_high_res_filtered/task_0045_user_0020_scene_0004_cfg_0006_human_processed_hand_tracked.npz \
     --mask-key sam_hand_masks \
     --use-rgb-colors \
     --max-frames 50
-
-# 3. Save to custom output location with specific FPS
-python lift_and_visualize_masks.py \
-    --npz data/human_high_res_filtered/task_0045_user_0020_scene_0004_cfg_0006_human_processed_hand_tracked.npz \
-    --mask-key sam_hand_masks \
-    --color 255 0 255 \
-    --output hand_masks_3d.rrd \
-    --fps 12.0
 
 Features:
 ---------
@@ -38,6 +56,7 @@ Features:
 - 3D mask visualization as point clouds (togglable)
 - World coordinate axes (X=Red, Y=Green, Z=Blue)
 - Temporal playback with configurable FPS
+- Global ID assignment across cameras with distance threshold
 """
 
 import argparse
@@ -47,7 +66,7 @@ import numpy as np
 import torch
 import rerun as rr
 
-from utils.mask_lifting_utils import visualize_masks_batch
+from utils.mask_lifting_utils import visualize_masks_batch, visualize_masks_with_global_ids
 from mvtracker.utils.visualizer_rerun import log_pointclouds_to_rerun
 
 
@@ -56,7 +75,7 @@ def load_data_from_npz(npz_path: Path, mask_key: str = "masks"):
     Load mask data and camera parameters from NPZ file.
     
     Expected NPZ format:
-        - masks or {mask_key}: [C, T, H, W] binary masks
+        - masks or {mask_key}: [C, T, H, W] binary masks OR dict of masks {name: [C, T, H, W]}
         - depths: [C, T, H, W] depth maps
         - intrs: [C, T, 3, 3] or [C, 3, 3] intrinsics
         - extrs: [C, T, 3, 4] or [C, 3, 4] extrinsics
@@ -64,11 +83,10 @@ def load_data_from_npz(npz_path: Path, mask_key: str = "masks"):
         - camera_ids: [C] optional camera identifiers
     
     Returns:
-        Dictionary with loaded data
+        Dictionary with loaded data. 'masks' will be a dict {mask_name: mask_array}
     """
     print(f"[INFO] Loading data from {npz_path}...")
     data = np.load(npz_path, allow_pickle=True)
-    
     # Load masks
     if mask_key not in data:
         available_keys = list(data.keys())
@@ -77,13 +95,29 @@ def load_data_from_npz(npz_path: Path, mask_key: str = "masks"):
             f"Available keys: {available_keys}"
         )
     
-    masks = data[mask_key]
-    print(f"[INFO] Loaded masks with shape: {masks.shape}")
+    masks_raw = data[mask_key]
     
-    # Ensure masks are boolean
-    if masks.dtype != bool:
-        print(f"[INFO] Converting masks from {masks.dtype} to bool")
-        masks = masks > 0
+    # Handle both single mask array and dictionary of masks
+    if isinstance(masks_raw, dict) or (isinstance(masks_raw, np.ndarray) and masks_raw.dtype == object and isinstance(masks_raw.item(), dict)):
+        # Dictionary of masks
+        if isinstance(masks_raw, np.ndarray):
+            masks_raw = masks_raw.item()
+        masks_dict = {}
+        for name, mask_array in masks_raw.items():
+            if mask_array.dtype != bool:
+                print(f"[INFO] Converting mask '{name}' from {mask_array.dtype} to bool")
+                mask_array = mask_array > 0
+            masks_dict[name] = mask_array
+            print(f"[INFO] Loaded mask '{name}' with shape: {mask_array.shape}")
+        masks = masks_dict
+    else:
+        # Single mask array
+        print(f"[INFO] Loaded masks with shape: {masks_raw.shape}")
+        # Ensure masks are boolean
+        if masks_raw.dtype != bool:
+            print(f"[INFO] Converting masks from {masks_raw.dtype} to bool")
+            masks_raw = masks_raw > 0
+        masks = {"default": masks_raw}
     
     # Load required data
     required_keys = ["depths", "intrs", "extrs"]
@@ -116,12 +150,15 @@ def load_data_from_npz(npz_path: Path, mask_key: str = "masks"):
         print(f"[INFO] Found camera IDs: {camera_ids}")
     
     # Validate shapes
-    C, T = masks.shape[0], masks.shape[1]
+    first_mask = list(masks.values())[0]
+    C, T = first_mask.shape[0], first_mask.shape[1]
     print(f"[INFO] Data summary:")
+    print(f"[INFO]   Number of mask types: {len(masks)}")
+    print(f"[INFO]   Mask names: {list(masks.keys())}")
     print(f"[INFO]   Cameras: {C}")
     print(f"[INFO]   Frames: {T}")
-    print(f"[INFO]   Resolution: {masks.shape[2]}x{masks.shape[3]}")
-    print(f"[INFO]   Masks dtype: {masks.dtype}")
+    print(f"[INFO]   Resolution: {first_mask.shape[2]}x{first_mask.shape[3]}")
+    print(f"[INFO]   Masks dtype: {first_mask.dtype}")
     print(f"[INFO]   Depths range: [{depths.min():.3f}, {depths.max():.3f}]")
     
     return {
@@ -223,6 +260,25 @@ def main():
         help="Spawn Rerun viewer automatically",
     )
     
+    # Global ID options
+    parser.add_argument(
+        "--use-global-ids",
+        action="store_true",
+        help="Assign global IDs to masks across cameras based on 3D proximity",
+    )
+    parser.add_argument(
+        "--distance-threshold",
+        type=float,
+        default=0.15,
+        help="Max distance (meters) to match masks across cameras (default: 0.15)",
+    )
+    parser.add_argument(
+        "--frame-for-matching",
+        type=int,
+        default=0,
+        help="Which frame to use for computing global ID assignments (default: 0)",
+    )
+    
     args = parser.parse_args()
     
     # Validate input
@@ -235,7 +291,6 @@ def main():
     
     # Load data
     data = load_data_from_npz(args.npz, mask_key=args.mask_key)
-    
     # Prepare color
     color = None
     if args.color is not None:
@@ -309,35 +364,87 @@ def main():
         )
         print("[INFO] Logged RGB point clouds and camera frustums")
     
-    # Visualize masks as togglable layer
-    print(f"\n[INFO] ========== Visualizing Masks (Togglable Layer) ==========")
-    stats = visualize_masks_batch(
-        masks=data["masks"],
-        depths=data["depths"],
-        intrs=data["intrs"],
-        extrs=data["extrs"],
-        entity_base_path=args.entity_path,
-        camera_ids=data["camera_ids"],
-        rgbs=rgbs,
-        color=color,
-        radius=args.radius,
-        min_depth=args.min_depth,
-        max_depth=args.max_depth,
-        fps=args.fps,
-        max_frames=args.max_frames,
-    )
+    # Visualize masks as togglable layers
+    print(f"\n[INFO] ========== Visualizing Masks (Togglable Layers) ==========")
+    
+    masks_dict = data["masks"]
+    all_stats = {}
+    
+    if args.use_global_ids:
+        # Use global ID assignment for consistent IDs across cameras
+        print(f"[INFO] Using GLOBAL ID mode (matching across cameras)")
+        print(f"[INFO]   Distance threshold: {args.distance_threshold}m")
+        print(f"[INFO]   Frame for matching: {args.frame_for_matching}")
+        
+        stats = visualize_masks_with_global_ids(
+            masks_dict=masks_dict,
+            depths=data["depths"],
+            intrs=data["intrs"],
+            extrs=data["extrs"],
+            entity_base_path=args.entity_path,
+            camera_ids=data["camera_ids"],
+            rgbs=rgbs,
+            radius=args.radius,
+            min_depth=args.min_depth,
+            max_depth=args.max_depth,
+            fps=args.fps,
+            max_frames=args.max_frames,
+            distance_threshold=args.distance_threshold,
+            frame_for_matching=args.frame_for_matching,
+        )
+        
+        all_stats = stats["mask_stats"]
+        print(f"\n[INFO] Global ID Mapping:")
+        for mask_name, id_mapping in stats["global_id_mapping"].items():
+            print(f"[INFO]   {mask_name}:")
+            for cam_idx, mapping in id_mapping.items():
+                print(f"[INFO]     Camera {cam_idx}: {mapping}")
+    
+    else:
+        # Original per-camera visualization
+        print(f"[INFO] Using PER-CAMERA mode (separate layers per camera)")
+        
+        for mask_name, mask_array in masks_dict.items():
+            print(f"\n[INFO] --- Processing mask type: '{mask_name}' ---")
+            
+            # Each mask type gets its own entity path
+            mask_entity_path = f"{args.entity_path}/{mask_name}"
+            
+            stats = visualize_masks_batch(
+                masks=mask_array,
+                depths=data["depths"],
+                intrs=data["intrs"],
+                extrs=data["extrs"],
+                entity_base_path=mask_entity_path,
+                camera_ids=data["camera_ids"],
+                rgbs=rgbs,
+                color=color,
+                radius=args.radius,
+                min_depth=args.min_depth,
+                max_depth=args.max_depth,
+                fps=args.fps,
+                max_frames=args.max_frames,
+            )
+            
+            all_stats[mask_name] = stats
+            print(f"[INFO] Statistics for '{mask_name}':")
+            print(f"[INFO]   Total points: {stats['total_points']}")
+            print(f"[INFO]   Cameras: {stats['num_cameras']}")
+            print(f"[INFO]   Frames: {stats['num_frames']}")
+            print(f"[INFO]   Points per camera: {stats['points_per_camera']}")
     
     print(f"\n[INFO] ========== Visualization Complete ==========")
-    print(f"[INFO] Statistics:")
-    print(f"[INFO]   Total points: {stats['total_points']}")
-    print(f"[INFO]   Cameras: {stats['num_cameras']}")
-    print(f"[INFO]   Frames: {stats['num_frames']}")
-    print(f"[INFO]   Points per camera: {stats['points_per_camera']}")
+    print(f"[INFO] Processed {len(masks_dict)} mask type(s): {list(masks_dict.keys())}")
+    if args.use_global_ids:
+        total_points_all = sum(s['total_points'] for s in all_stats.values())
+    else:
+        total_points_all = sum(s['total_points'] for s in all_stats.values())
+    print(f"[INFO] Total points across all masks: {total_points_all}")
     
     # Save recording
     print(f"\n[INFO] Saving visualization to {args.output}...")
     rr.save(str(args.output))
-    print(f"[INFO] Done! View with: rerun {args.output}")
+    print(f"[INFO] Done! View with: rerun {args.output} --web-viewer")
     
     if not args.spawn:
         print(f"[INFO] Or spawn viewer now with --spawn flag")
