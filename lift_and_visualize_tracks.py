@@ -391,62 +391,107 @@ def visualize_tracks_rerun(
     print(f"[INFO] Total tracks: {all_positions.shape[1]}")
     print(f"[INFO] Frames: {T}")
     
-    # Generate colors for tracks (by camera)
-    num_cameras = len(camera_ids)
-    colors = plt.cm.rainbow(np.linspace(0, 1, num_cameras))[:, :3] * 255
-    colors = colors.astype(np.uint8)
+    # Get unique instance IDs
+    unique_instances = np.unique(all_instance_ids)
+    if unique_instances[0] == -1 and len(unique_instances) > 1:
+        # Remove -1 (unassigned) if we have other instances
+        unique_instances = unique_instances[1:]
     
-    track_colors = colors[all_camera_indices]  # [N_total, 3]
+    print(f"[INFO] Unique instances: {len(unique_instances)}")
     
-    # Log tracks frame by frame
-    for t in tqdm(range(T), desc="Logging tracks"):
-        time_seconds = t / fps
-        rr.set_time_seconds("frame", time_seconds)
+    # Generate colors per instance
+    if len(unique_instances) > 0 and unique_instances[0] != -1:
+        # Use tab20 colormap for better distinction
+        if len(unique_instances) <= 20:
+            instance_colors_map = plt.cm.tab20(np.linspace(0, 1, 20))[:, :3] * 255
+        else:
+            instance_colors_map = plt.cm.rainbow(np.linspace(0, 1, len(unique_instances)))[:, :3] * 255
+        instance_colors_map = instance_colors_map.astype(np.uint8)
         
-        # Get visible tracks at this frame - ensure boolean arrays
-        visibility_bool = all_visibility[t].astype(bool)
-        positions_finite = np.isfinite(all_positions[t]).all(axis=1)
-        visible_mask = visibility_bool & positions_finite
+        # Map instance IDs to colors
+        instance_to_color = {int(inst_id): instance_colors_map[i % len(instance_colors_map)] 
+                            for i, inst_id in enumerate(unique_instances)}
+    else:
+        # Fallback: color by camera
+        num_cameras = len(camera_ids)
+        colors = plt.cm.rainbow(np.linspace(0, 1, num_cameras))[:, :3] * 255
+        colors = colors.astype(np.uint8)
+        instance_to_color = None
+    
+    # Assign colors to each track
+    if instance_to_color is not None:
+        track_colors = np.array([instance_to_color.get(int(inst_id), [128, 128, 128]) 
+                                for inst_id in all_instance_ids])
+    else:
+        track_colors = colors[all_camera_indices]  # [N_total, 3]
+    
+    # Group tracks by instance ID
+    instance_to_tracks = {}
+    for n, inst_id in enumerate(all_instance_ids):
+        inst_id = int(inst_id)
+        if inst_id not in instance_to_tracks:
+            instance_to_tracks[inst_id] = []
+        instance_to_tracks[inst_id].append(n)
+    
+    # Log tracks per instance
+    print(f"[INFO] Logging tracks by instance...")
+    for inst_id in tqdm(sorted(instance_to_tracks.keys()), desc="Logging instances"):
+        track_indices = instance_to_tracks[inst_id]
         
-        if visible_mask.any():
-            positions_t = all_positions[t, visible_mask]  # [N_vis, 3]
-            colors_t = track_colors[visible_mask]  # [N_vis, 3]
+        # Create entity path for this instance
+        entity_path = f"world/instance_{inst_id}" if inst_id >= 0 else "world/unassigned"
+        
+        # Log frame-by-frame points
+        for t in range(T):
+            time_seconds = t / fps
+            rr.set_time_seconds("frame", time_seconds)
             
-            # Log as points
+            # Get visible tracks for this instance at this frame
+            visible_tracks = []
+            colors_t = []
+            
+            for n in track_indices:
+                visibility_bool = bool(all_visibility[t, n])
+                positions_finite = np.isfinite(all_positions[t, n]).all()
+                
+                if visibility_bool and positions_finite:
+                    visible_tracks.append(all_positions[t, n])
+                    colors_t.append(track_colors[n])
+            
+            if visible_tracks:
+                rr.log(
+                    f"{entity_path}/points",
+                    rr.Points3D(
+                        positions=np.array(visible_tracks),
+                        colors=np.array(colors_t),
+                        radii=0.01,
+                    ),
+                )
+        
+        # Log complete trajectories (static)
+        for n in track_indices:
+            # Get complete trajectory for this track
+            vis_traj = all_visibility[:, n].astype(bool)
+            pos_finite = np.isfinite(all_positions[:, n]).all(axis=1)
+            traj_mask = vis_traj & pos_finite
+            
+            if traj_mask.sum() < 2:
+                continue
+            
+            traj_positions = all_positions[:, n][traj_mask]  # [T_valid, 3]
+            
+            # Log as static line strip
             rr.log(
-                "world/tracks/points",
-                rr.Points3D(
-                    positions=positions_t,
-                    colors=colors_t,
-                    radii=0.01,
+                f"{entity_path}/trajectories/track_{n}",
+                rr.LineStrips3D(
+                    [traj_positions],
+                    colors=[track_colors[n]],
+                    radii=0.003,
                 ),
+                static=True,
             )
     
-    # Log complete trajectories after processing all frames (static, not time-dependent)
-    print(f"[INFO] Logging complete trajectories...")
-    for n in tqdm(range(all_positions.shape[1]), desc="Logging trajectories"):
-        # Get complete trajectory for this track
-        vis_traj = all_visibility[:, n].astype(bool)
-        pos_finite = np.isfinite(all_positions[:, n]).all(axis=1)
-        traj_mask = vis_traj & pos_finite
-        
-        if traj_mask.sum() < 2:
-            continue
-        
-        traj_positions = all_positions[:, n][traj_mask]  # [T_valid, 3]
-        
-        # Log as static line strip (not time-dependent)
-        rr.log(
-            f"world/tracks/trajectories/track_{n}",
-            rr.LineStrips3D(
-                [traj_positions],
-                colors=[track_colors[n]],
-                radii=0.003,
-            ),
-            static=True,  # Mark as static so it persists across all time steps
-        )
-    
-    print(f"[INFO] Logged {all_positions.shape[1]} tracks")
+    print(f"[INFO] Logged {len(instance_to_tracks)} instances with {all_positions.shape[1]} total tracks")
     
     # Save recording
     if output_path is None:

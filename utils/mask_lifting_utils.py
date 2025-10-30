@@ -729,7 +729,9 @@ def lift_mask_to_3d(
         print(
             f"[INFO] Auto-detected resolution mismatch: mask {W_mask}x{H_mask}, depth {W_depth}x{H_depth}. "
             f"Scaling by ({scale_x:.3f}, {scale_y:.3f})"
+            "CURRENTLY NOT USING THE FUNCTION scale_intrinsics_matrix!!"
         )
+        #TODO: use the function from !!
     else:
         # No resolution mismatch
         scale_x = 1.0
