@@ -45,6 +45,11 @@ from utils.mask_instance_utils import (
     verify_instance_npz,
 )
 from utils.rerun_combine_utils import combine_tracking_results
+from utils.batch_processing_utils import (
+    split_query_points_into_batches,
+    create_batch_npzs,
+    verify_batch_npzs,
+)
 
 
 def run_command(cmd: List[str], description: str, check: bool = True) -> subprocess.CompletedProcess:
@@ -146,6 +151,8 @@ def process_masks_independently(
     depth_cache_dir: Path = Path("./depth_cache"),
     skip_split: bool = False,
     instances_dir: Optional[Path] = None,
+    max_query_points_per_batch: Optional[int] = None,
+    batch_strategy: str = "temporal",
 ) -> Dict[str, Path]:
     """
     Main workflow: process each mask instance independently.
@@ -165,6 +172,8 @@ def process_masks_independently(
         depth_cache_dir: Directory for depth cache
         skip_split: Skip splitting if instance files already exist
         instances_dir: Directory with pre-split instance NPZ files
+        max_query_points_per_batch: Max query points per batch (None = no batching)
+        batch_strategy: Batching strategy ("temporal" or "random")
         
     Returns:
         Dictionary with result paths:
@@ -226,36 +235,114 @@ def process_masks_independently(
         
         query_npzs[inst_id] = query_npz
     
-    # Step 3: Run tracking for each instance
+    # Step 3: Run tracking for each instance (with optional batching)
     print(f"\n[INFO] Step 3: Running tracking for each instance")
     tracking_rrds = {}
     
     for inst_id, query_npz in query_npzs.items():
         print(f"\n[INFO] --- Tracking {inst_id} ---")
         
-        output_rrd = output_dir / f"{base_name}_{tracker}_{inst_id}.rrd"
-        
-        tracking_rrd = run_tracking_for_instance(
-            query_npz=query_npz,
-            tracker=tracker,
-            output_rrd=output_rrd,
-            temporal_stride=temporal_stride,
-            spatial_downsample=spatial_downsample,
-            depth_estimator=depth_estimator,
-            depth_cache_dir=depth_cache_dir,
-        )
-        
-        tracking_rrds[inst_id] = tracking_rrd
+        # Check if batching is needed
+        if max_query_points_per_batch is not None:
+            # Load query points to check size
+            data = np.load(query_npz, allow_pickle=True)
+            query_points = data["query_points"]
+            num_points = len(query_points)
+            
+            print(f"[INFO] Query points: {num_points}, batch limit: {max_query_points_per_batch}")
+            
+            if num_points > max_query_points_per_batch:
+                # Need batching
+                print(f"[INFO] Batching enabled: splitting into multiple tracking runs")
+                
+                # Create batches
+                batches = split_query_points_into_batches(
+                    query_points=query_points,
+                    max_points_per_batch=max_query_points_per_batch,
+                    strategy=batch_strategy,
+                )
+                
+                # Create batch NPZ files
+                batch_dir = instances_dir / f"{inst_id}_batches"
+                batch_npzs = create_batch_npzs(
+                    input_npz=query_npz,
+                    query_points_batches=batches,
+                    output_dir=batch_dir,
+                    base_name=f"{query_npz.stem}",
+                )
+                
+                # Track each batch
+                batch_rrds = []
+                for i, batch_npz in enumerate(batch_npzs):
+                    batch_rrd = output_dir / f"{base_name}_{tracker}_{inst_id}_batch_{i}.rrd"
+                    
+                    print(f"\n[INFO] Tracking batch {i}/{len(batch_npzs)-1}")
+                    tracking_rrd = run_tracking_for_instance(
+                        query_npz=batch_npz,
+                        tracker=tracker,
+                        output_rrd=batch_rrd,
+                        temporal_stride=temporal_stride,
+                        spatial_downsample=spatial_downsample,
+                        depth_estimator=depth_estimator,
+                        depth_cache_dir=depth_cache_dir,
+                    )
+                    batch_rrds.append(tracking_rrd)
+                
+                # Store all batch RRDs for this instance
+                tracking_rrds[inst_id] = batch_rrds
+                print(f"[INFO] Completed {len(batch_rrds)} batches for {inst_id}")
+            else:
+                # No batching needed
+                print(f"[INFO] No batching needed ({num_points} <= {max_query_points_per_batch})")
+                output_rrd = output_dir / f"{base_name}_{tracker}_{inst_id}.rrd"
+                
+                tracking_rrd = run_tracking_for_instance(
+                    query_npz=query_npz,
+                    tracker=tracker,
+                    output_rrd=output_rrd,
+                    temporal_stride=temporal_stride,
+                    spatial_downsample=spatial_downsample,
+                    depth_estimator=depth_estimator,
+                    depth_cache_dir=depth_cache_dir,
+                )
+                
+                tracking_rrds[inst_id] = [tracking_rrd]  # Keep as list for consistency
+        else:
+            # No batching requested
+            output_rrd = output_dir / f"{base_name}_{tracker}_{inst_id}.rrd"
+            
+            tracking_rrd = run_tracking_for_instance(
+                query_npz=query_npz,
+                tracker=tracker,
+                output_rrd=output_rrd,
+                temporal_stride=temporal_stride,
+                spatial_downsample=spatial_downsample,
+                depth_estimator=depth_estimator,
+                depth_cache_dir=depth_cache_dir,
+            )
+            
+            tracking_rrds[inst_id] = [tracking_rrd]  # Keep as list for consistency
     
     # Step 4: Combine results for visualization
     print(f"\n[INFO] Step 4: Combining tracking results")
     
     instance_ids = sorted(tracking_rrds.keys())
-    rrd_paths = [tracking_rrds[inst_id] for inst_id in instance_ids]
+    
+    # Flatten all RRD files (including batches)
+    all_rrd_paths = []
+    all_rrd_labels = []
+    for inst_id in instance_ids:
+        rrd_list = tracking_rrds[inst_id]
+        for i, rrd_path in enumerate(rrd_list):
+            all_rrd_paths.append(rrd_path)
+            if len(rrd_list) > 1:
+                all_rrd_labels.append(f"{inst_id}_batch_{i}")
+            else:
+                all_rrd_labels.append(inst_id)
     
     combined_results = combine_tracking_results(
-        rrd_paths=rrd_paths,
-        instance_ids=instance_ids,
+        rrd_paths=all_rrd_paths,
+        instance_ids=all_rrd_labels,
         output_dir=output_dir,
         output_name=f"{base_name}_{tracker}_combined",
     )
@@ -266,14 +353,19 @@ def process_masks_independently(
     print(f"[INFO] ========================================")
     print(f"[INFO] Processed {len(instance_ids)} mask instances:")
     for inst_id in instance_ids:
-        print(f"[INFO]   - {inst_id}")
+        num_batches = len(tracking_rrds[inst_id])
+        if num_batches > 1:
+            print(f"[INFO]   - {inst_id} ({num_batches} batches)")
+        else:
+            print(f"[INFO]   - {inst_id}")
     print(f"\n[INFO] Output files:")
     print(f"[INFO]   Instance NPZs: {instances_dir}/")
     print(f"[INFO]   Query NPZs: {instances_dir}/")
     print(f"[INFO]   Tracking RRDs: {output_dir}/")
     print(f"\n[INFO] View individual tracking:")
-    for inst_id, rrd_path in tracking_rrds.items():
-        print(f"[INFO]   rerun {rrd_path}")
+    for inst_id in instance_ids:
+        for rrd_path in tracking_rrds[inst_id]:
+            print(f"[INFO]   rerun {rrd_path}")
     print(f"\n[INFO] View all tracking together:")
     print(f"[INFO]   bash {combined_results['viewing_script']}")
     
@@ -377,6 +469,21 @@ def main():
     )
     
     parser.add_argument(
+        "--max-query-points-per-batch",
+        type=int,
+        default=None,
+        help="Max query points per batch (None = no batching, e.g. 5000 to split large masks)",
+    )
+    
+    parser.add_argument(
+        "--batch-strategy",
+        type=str,
+        default="temporal",
+        choices=["temporal", "random"],
+        help="Batching strategy: temporal (preserves coherence) or random (default: temporal)",
+    )
+    
+    parser.add_argument(
         "--skip-split",
         action="store_true",
         help="Skip splitting if instance files already exist",
@@ -415,6 +522,8 @@ def main():
             depth_cache_dir=args.depth_cache_dir,
             skip_split=args.skip_split,
             instances_dir=args.instances_dir,
+            max_query_points_per_batch=args.max_query_points_per_batch,
+            batch_strategy=args.batch_strategy,
         )
         
         print(f"\n[INFO] Success! All masks processed.")
