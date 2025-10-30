@@ -30,6 +30,8 @@ import numpy as np
 import rerun as rr
 from scipy.spatial.distance import cdist
 
+from utils.camera_utils import scale_intrinsics_matrix, infer_calibration_resolution
+
 
 def compute_mask_centroid_3d(
     mask: np.ndarray,
@@ -231,6 +233,436 @@ def assign_global_mask_ids(
     return global_id_mapping
 
 
+def track_masks_temporal(
+    masks: np.ndarray,
+    depths: np.ndarray,
+    intrs: np.ndarray,
+    extrs: np.ndarray,
+    temporal_distance_threshold: float = 0.10,
+    min_depth: float = 0.0,
+    max_depth: float = 10.0,
+) -> Dict[int, List[Tuple[int, int]]]:
+    """
+    Track masks temporally within a single camera using centroid proximity.
+    
+    This function tracks masks frame-to-frame within one camera by matching
+    centroids across consecutive frames. It handles masks appearing/disappearing
+    and assigns temporal track IDs.
+    
+    Args:
+        masks: Mask array for one camera [T, H, W] with integer IDs
+        depths: Depth maps for one camera [T, H, W]
+        intrs: Intrinsics for one camera [T, 3, 3] or [3, 3]
+        extrs: Extrinsics for one camera [T, 3, 4] or [3, 4]
+        temporal_distance_threshold: Max distance (meters) to link masks across frames
+        min_depth: Minimum valid depth threshold
+        max_depth: Maximum valid depth threshold
+    
+    Returns:
+        tracks: Dictionary mapping track_id to list of (frame_idx, local_mask_id) tuples
+                Example: {0: [(0, 1), (1, 1), (2, 2)], 1: [(0, 2), (1, 3)]}
+                Track 0 appears in frames 0,1,2 with local IDs 1,1,2
+    """
+    T, H, W = masks.shape
+    
+    # Handle intrinsics
+    if intrs.ndim == 2:
+        intrs_expanded = np.tile(intrs[None], (T, 1, 1))
+    else:
+        intrs_expanded = intrs
+    
+    # Handle extrinsics
+    if extrs.ndim == 2:
+        extrs_expanded = np.tile(extrs[None], (T, 1, 1))
+    else:
+        extrs_expanded = extrs
+    
+    # Extract masks and centroids for each frame
+    frame_data = []  # List of {local_id: centroid} per frame
+    for t in range(T):
+        mask_frame = masks[t]
+        unique_ids = np.unique(mask_frame)
+        unique_ids = unique_ids[unique_ids > 0]  # Exclude background
+        
+        centroids = {}
+        for local_id in unique_ids:
+            binary_mask = (mask_frame == local_id)
+            centroid = compute_mask_centroid_3d(
+                binary_mask,
+                depths[t],
+                intrs_expanded[t],
+                extrs_expanded[t],
+                min_depth,
+                max_depth,
+            )
+            if centroid is not None:
+                centroids[int(local_id)] = centroid
+        
+        frame_data.append(centroids)
+    
+    # Temporal tracking: link masks across frames
+    tracks = {}  # {track_id: [(frame, local_id), ...]}
+    next_track_id = 0
+    active_tracks = {}  # {track_id: last_centroid}
+    
+    for t in range(T):
+        current_centroids = frame_data[t]
+        
+        if not current_centroids:
+            continue
+        
+        # Match current masks to active tracks
+        current_local_ids = list(current_centroids.keys())
+        current_positions = np.array([current_centroids[lid] for lid in current_local_ids])
+        
+        if active_tracks:
+            # Compute distances to active tracks
+            track_ids = list(active_tracks.keys())
+            track_positions = np.array([active_tracks[tid] for tid in track_ids])
+            
+            distances = cdist(current_positions, track_positions, metric='euclidean')
+            
+            # Greedy matching: assign each mask to closest track if within threshold
+            matched_current = set()
+            matched_tracks = set()
+            
+            for i, local_id in enumerate(current_local_ids):
+                if len(track_ids) == 0:
+                    break
+                    
+                min_dist_idx = np.argmin(distances[i])
+                min_dist = distances[i, min_dist_idx]
+                track_id = track_ids[min_dist_idx]
+                
+                if min_dist < temporal_distance_threshold and min_dist_idx not in matched_tracks:
+                    # Continue existing track
+                    tracks[track_id].append((t, local_id))
+                    active_tracks[track_id] = current_centroids[local_id]
+                    matched_current.add(i)
+                    matched_tracks.add(min_dist_idx)
+            
+            # Create new tracks for unmatched masks
+            for i, local_id in enumerate(current_local_ids):
+                if i not in matched_current:
+                    tracks[next_track_id] = [(t, local_id)]
+                    active_tracks[next_track_id] = current_centroids[local_id]
+                    next_track_id += 1
+        else:
+            # First frame with masks: create new tracks for all
+            for local_id in current_local_ids:
+                tracks[next_track_id] = [(t, local_id)]
+                active_tracks[next_track_id] = current_centroids[local_id]
+                next_track_id += 1
+    
+    return tracks
+
+
+def compute_track_representative_centroid(
+    track: List[Tuple[int, int]],
+    masks: np.ndarray,
+    depths: np.ndarray,
+    intrs: np.ndarray,
+    extrs: np.ndarray,
+    min_depth: float = 0.0,
+    max_depth: float = 10.0,
+    method: str = "median",
+) -> Optional[np.ndarray]:
+    """
+    Compute a representative 3D centroid for a temporal track.
+    
+    Args:
+        track: List of (frame_idx, local_mask_id) tuples
+        masks: Mask array [T, H, W]
+        depths: Depth maps [T, H, W]
+        intrs: Intrinsics [T, 3, 3] or [3, 3]
+        extrs: Extrinsics [T, 3, 4] or [3, 4]
+        min_depth: Minimum valid depth threshold
+        max_depth: Maximum valid depth threshold
+        method: "median" or "mean" for aggregation
+    
+    Returns:
+        representative_centroid: [3] array or None if track is empty
+    """
+    T, H, W = masks.shape
+    
+    # Handle intrinsics
+    if intrs.ndim == 2:
+        intrs_expanded = np.tile(intrs[None], (T, 1, 1))
+    else:
+        intrs_expanded = intrs
+    
+    # Handle extrinsics
+    if extrs.ndim == 2:
+        extrs_expanded = np.tile(extrs[None], (T, 1, 1))
+    else:
+        extrs_expanded = extrs
+    
+    # Compute centroid for each frame in track
+    centroids = []
+    for frame_idx, local_id in track:
+        mask_frame = masks[frame_idx]
+        binary_mask = (mask_frame == local_id)
+        
+        centroid = compute_mask_centroid_3d(
+            binary_mask,
+            depths[frame_idx],
+            intrs_expanded[frame_idx],
+            extrs_expanded[frame_idx],
+            min_depth,
+            max_depth,
+        )
+        
+        if centroid is not None:
+            centroids.append(centroid)
+    
+    if not centroids:
+        return None
+    
+    centroids = np.array(centroids)
+    
+    if method == "median":
+        return np.median(centroids, axis=0)
+    else:  # mean
+        return np.mean(centroids, axis=0)
+
+
+def assign_global_ids_temporal(
+    masks_dict: Dict[str, np.ndarray],
+    depths: np.ndarray,
+    intrs: np.ndarray,
+    extrs: np.ndarray,
+    distance_threshold: float = 0.15,
+    temporal_distance_threshold: float = 0.10,
+    min_depth: float = 0.0,
+    max_depth: float = 10.0,
+) -> Tuple[Dict[str, Dict[int, Dict[int, int]]], Dict[str, Dict[int, Dict[int, List[int]]]]]:
+    """
+    Assign global IDs by matching local mask IDs across cameras using average temporal distance.
+    
+    Key principle: Each local mask ID (e.g., camera A's id0) represents ONE object across all time.
+    We compute the average distance between mask IDs across cameras over all frames where both exist.
+    
+    Args:
+        masks_dict: Dictionary mapping mask names to mask arrays [C, T, H, W]
+                   Masks contain integer IDs (0=background, 1,2,3,...=objects)
+        depths: Depth maps [C, T, H, W]
+        intrs: Intrinsics [C, T, 3, 3] or [C, 3, 3]
+        extrs: Extrinsics [C, T, 3, 4] or [C, 3, 4]
+        distance_threshold: Max average distance (meters) to match masks across cameras
+        temporal_distance_threshold: Unused (kept for API compatibility)
+        min_depth: Minimum valid depth threshold
+        max_depth: Maximum valid depth threshold
+    
+    Returns:
+        global_id_mapping: {mask_name: {camera: {local_id: global_id}}}
+        frames_mapping: {mask_name: {camera: {local_id: [frame_indices]}}}
+    """
+    if not masks_dict:
+        return {}, {}
+    
+    # Get dimensions
+    first_mask_array = list(masks_dict.values())[0]
+    C, T, H, W = first_mask_array.shape
+    
+    # Handle intrinsics
+    if intrs.ndim == 3 and intrs.shape[1] == 3:
+        intrs_per_camera = intrs  # [C, 3, 3]
+    elif intrs.ndim == 4:
+        intrs_per_camera = intrs[:, 0]  # Use first frame [C, 3, 3]
+    else:
+        intrs_per_camera = np.tile(intrs[None], (C, 1, 1))
+    
+    # Handle extrinsics
+    if extrs.ndim == 3 and extrs.shape[1] in [3, 4]:
+        extrs_per_camera = extrs  # [C, 3/4, 4]
+    elif extrs.ndim == 4:
+        extrs_per_camera = extrs[:, 0]  # Use first frame
+    else:
+        extrs_per_camera = np.tile(extrs[None], (C, 1, 1))
+    
+    global_id_mapping = {}
+    frames_mapping = {}
+    
+    for mask_name, masks in masks_dict.items():
+        print(f"\n[INFO] ========== Computing Temporal Averages for '{mask_name}' ==========")
+        
+        # Step 1: For each camera, extract all unique local IDs and their centroids over time
+        camera_local_ids = {}  # {camera: [local_ids]}
+        camera_centroids = {}  # {camera: {local_id: {frame: centroid}}}
+        
+        for c in range(C):
+            print(f"[INFO] Processing camera {c}...")
+            
+            # Get intrinsics/extrinsics for this camera
+            if intrs.ndim == 4:
+                intr_cam = intrs[c]  # [T, 3, 3]
+            else:
+                intr_cam = intrs_per_camera[c]  # [3, 3]
+            
+            if extrs.ndim == 4:
+                extr_cam = extrs[c]  # [T, 3, 4]
+            else:
+                extr_cam = extrs_per_camera[c]  # [3, 4]
+            
+            # Handle intrinsics/extrinsics expansion
+            if intr_cam.ndim == 2:
+                intrs_expanded = np.tile(intr_cam[None], (T, 1, 1))
+            else:
+                intrs_expanded = intr_cam
+            
+            if extr_cam.ndim == 2:
+                extrs_expanded = np.tile(extr_cam[None], (T, 1, 1))
+            else:
+                extrs_expanded = extr_cam
+            
+            # Extract all unique local IDs across all frames
+            all_local_ids = set()
+            for t in range(T):
+                unique_ids = np.unique(masks[c, t])
+                unique_ids = unique_ids[unique_ids > 0]  # Exclude background
+                all_local_ids.update(unique_ids.tolist())
+            
+            all_local_ids = sorted(list(all_local_ids))
+            camera_local_ids[c] = all_local_ids
+            
+            # For each local ID, compute centroids at each frame where it exists
+            centroids_per_id = {}
+            for local_id in all_local_ids:
+                frame_centroids = {}
+                for t in range(T):
+                    mask_frame = masks[c, t]
+                    if local_id in mask_frame:  # Check if this ID exists in this frame
+                        binary_mask = (mask_frame == local_id)
+                        if binary_mask.any():
+                            centroid = compute_mask_centroid_3d(
+                                binary_mask,
+                                depths[c, t],
+                                intrs_expanded[t],
+                                extrs_expanded[t],
+                                min_depth,
+                                max_depth,
+                            )
+                            if centroid is not None:
+                                frame_centroids[t] = centroid
+                
+                centroids_per_id[local_id] = frame_centroids
+                print(f"[INFO]   Camera {c}, local ID {local_id}: visible in {len(frame_centroids)} frames")
+            
+            camera_centroids[c] = centroids_per_id
+        
+        # Step 2: Compute average distances between all pairs of (camera_i, local_id_i) and (camera_j, local_id_j)
+        print(f"\n[INFO] Computing pairwise average distances...")
+        
+        # Build list of all (camera, local_id) pairs
+        all_masks = []
+        for c in range(C):
+            for local_id in camera_local_ids[c]:
+                all_masks.append((c, local_id))
+        
+        # Compute average distance matrix
+        n_masks = len(all_masks)
+        avg_distances = np.full((n_masks, n_masks), np.inf)
+        
+        for i in range(n_masks):
+            cam_i, id_i = all_masks[i]
+            centroids_i = camera_centroids[cam_i][id_i]
+            
+            for j in range(i, n_masks):
+                if i == j:
+                    avg_distances[i, j] = 0.0
+                    continue
+                
+                cam_j, id_j = all_masks[j]
+                
+                # Skip if same camera (can't match within camera)
+                if cam_i == cam_j:
+                    continue
+                
+                centroids_j = camera_centroids[cam_j][id_j]
+                
+                # Find common frames
+                common_frames = set(centroids_i.keys()) & set(centroids_j.keys())
+                
+                if not common_frames:
+                    continue  # No overlap, keep inf
+                
+                # Compute average distance over common frames
+                distances = []
+                for frame in common_frames:
+                    dist = np.linalg.norm(centroids_i[frame] - centroids_j[frame])
+                    distances.append(dist)
+                
+                avg_dist = np.mean(distances)
+                avg_distances[i, j] = avg_dist
+                avg_distances[j, i] = avg_dist  # Symmetric
+        
+        # Step 3: Assign global IDs using greedy matching
+        print(f"\n[INFO] Assigning global IDs...")
+        
+        next_global_id = 0
+        mask_to_global = {}  # {(camera, local_id): global_id}
+        
+        # Start with camera 0
+        for local_id in camera_local_ids[0]:
+            mask_to_global[(0, local_id)] = next_global_id
+            print(f"[INFO]   Camera 0, local ID {local_id} -> global ID {next_global_id}")
+            next_global_id += 1
+        
+        # Match subsequent cameras
+        for c in range(1, C):
+            for local_id in camera_local_ids[c]:
+                # Find index in all_masks
+                idx = all_masks.index((c, local_id))
+                
+                # Find best match among already assigned masks
+                best_match = None
+                best_dist = np.inf
+                
+                for (prev_c, prev_id), global_id in mask_to_global.items():
+                    if prev_c >= c:
+                        continue  # Only look at previously processed cameras
+                    
+                    prev_idx = all_masks.index((prev_c, prev_id))
+                    dist = avg_distances[idx, prev_idx]
+                    
+                    if dist < best_dist:
+                        best_dist = dist
+                        best_match = global_id
+                
+                if best_match is not None and best_dist < distance_threshold:
+                    # Match to existing global ID
+                    mask_to_global[(c, local_id)] = best_match
+                    print(f"[INFO]   Camera {c}, local ID {local_id} -> global ID {best_match} (avg dist: {best_dist:.3f}m)")
+                else:
+                    # Create new global ID
+                    mask_to_global[(c, local_id)] = next_global_id
+                    print(f"[INFO]   Camera {c}, local ID {local_id} -> NEW global ID {next_global_id} (min avg dist: {best_dist:.3f}m)")
+                    next_global_id += 1
+        
+        # Convert to output format
+        local_to_global_per_camera = {}
+        frames_per_camera = {}
+        
+        for c in range(C):
+            local_to_global_per_camera[c] = {}
+            frames_per_camera[c] = {}
+            
+            for local_id in camera_local_ids[c]:
+                global_id = mask_to_global[(c, local_id)]
+                local_to_global_per_camera[c][local_id] = global_id
+                
+                # Store which frames this local_id appears in
+                frames_with_id = list(camera_centroids[c][local_id].keys())
+                frames_per_camera[c][local_id] = frames_with_id
+        
+        global_id_mapping[mask_name] = local_to_global_per_camera
+        frames_mapping[mask_name] = frames_per_camera
+        
+        print(f"[INFO] Assigned {next_global_id} global IDs for '{mask_name}' (simplified approach)")
+    
+    return global_id_mapping, frames_mapping
+
+
 def lift_mask_to_3d(
     mask: np.ndarray,
     depth: np.ndarray,
@@ -239,22 +671,25 @@ def lift_mask_to_3d(
     min_depth: float = 0.0,
     max_depth: float = 10.0,
     rgb: Optional[np.ndarray] = None,
+    mask_resolution: Optional[Tuple[int, int]] = None,  # (W, H) if mask is in different resolution than depth
 ) -> Tuple[np.ndarray, Optional[np.ndarray]]:
     """
     Lift a 2D binary mask to 3D world coordinates using depth map.
     
     This function takes a 2D segmentation mask and projects it into 3D space
-    by using the corresponding depth values. Only pixels where the mask is True
-    and depth is valid are converted to 3D points.
+    by using the corresponding depth values. Handles resolution mismatch between
+    mask (typically from RGB tracking) and depth map by scaling coordinates.
     
     Args:
         mask: Binary mask [H, W], True for pixels to lift
         depth: Depth map [H, W], depth values in meters
-        intr: Intrinsic matrix [3, 3], camera calibration
+        intr: Intrinsic matrix [3, 3], camera calibration (for DEPTH resolution)
         extr: Extrinsic matrix [3, 4] or [4, 4], world-to-camera transform
         min_depth: Minimum valid depth threshold in meters (default: 0.0)
         max_depth: Maximum valid depth threshold in meters (default: 10.0)
         rgb: Optional RGB image [H, W, 3] to extract colors for points
+        mask_resolution: Optional (W, H) tuple if mask is in different resolution than depth
+                        Used to scale mask pixel coordinates to depth space
     
     Returns:
         points_3d: 3D points in world coordinates [N, 3], dtype float32
@@ -271,22 +706,53 @@ def lift_mask_to_3d(
         >>> points, colors = lift_mask_to_3d(mask, depth, K, E)
         >>> print(f"Lifted {len(points)} points to 3D")
     """
-    # Validate inputs
-    if mask.shape != depth.shape:
-        raise ValueError(f"Mask shape {mask.shape} must match depth shape {depth.shape}")
+    # Get dimensions
+    H_mask, W_mask = mask.shape
+    H_depth, W_depth = depth.shape
     
-    H, W = mask.shape
+    # Handle resolution mismatch
+    if mask_resolution is not None:
+        # Mask is in different resolution (e.g., RGB) than depth
+        W_mask_orig, H_mask_orig = mask_resolution
+        if (H_mask, W_mask) != (H_mask_orig, W_mask_orig):
+            raise ValueError(
+                f"Mask shape {(H_mask, W_mask)} doesn't match provided mask_resolution {(H_mask_orig, W_mask_orig)}"
+            )
+        
+        # Compute scale factors from mask space to depth space
+        scale_x = W_depth / W_mask
+        scale_y = H_depth / H_mask
+    elif (H_mask, W_mask) != (H_depth, W_depth):
+        # Auto-detect resolution mismatch
+        scale_x = W_depth / W_mask
+        scale_y = H_depth / H_mask
+        print(
+            f"[INFO] Auto-detected resolution mismatch: mask {W_mask}x{H_mask}, depth {W_depth}x{H_depth}. "
+            f"Scaling by ({scale_x:.3f}, {scale_y:.3f})"
+        )
+    else:
+        # No resolution mismatch
+        scale_x = 1.0
+        scale_y = 1.0
     
-    # Find masked pixels
-    ys, xs = np.nonzero(mask)
+    # Find masked pixels in mask space
+    ys_mask, xs_mask = np.nonzero(mask)
     
-    if len(xs) == 0:
+    if len(xs_mask) == 0:
         empty_points = np.empty((0, 3), dtype=np.float32)
         empty_colors = np.empty((0, 3), dtype=np.uint8) if rgb is not None else None
         return empty_points, empty_colors
     
-    # Get depth values at mask locations
-    z = depth[ys, xs].astype(np.float32)
+    # Scale coordinates to depth space
+    xs_depth = (xs_mask * scale_x).astype(int)
+    ys_depth = (ys_mask * scale_y).astype(int)
+    
+    # Clip to valid depth range
+    xs_depth = np.clip(xs_depth, 0, W_depth - 1)
+    ys_depth = np.clip(ys_depth, 0, H_depth - 1)
+    
+    # Get depth values at scaled locations
+    z = depth[ys_depth, xs_depth].astype(np.float32)
     
     # Filter by depth validity
     valid = (z > min_depth) & (z < max_depth)
@@ -297,14 +763,16 @@ def lift_mask_to_3d(
         return empty_points, empty_colors
     
     # Apply validity mask
-    xs = xs[valid]
-    ys = ys[valid]
+    xs_depth = xs_depth[valid]
+    ys_depth = ys_depth[valid]
+    xs_mask_valid = xs_mask[valid]  # Keep for RGB lookup
+    ys_mask_valid = ys_mask[valid]
     z = z[valid]
     
-    # Backproject to camera coordinates
-    # pixel coordinates -> normalized image coordinates -> camera coordinates
-    x_cam = (xs - intr[0, 2]) * z / intr[0, 0]
-    y_cam = (ys - intr[1, 2]) * z / intr[1, 1]
+    # Backproject to camera coordinates using DEPTH SPACE coordinates
+    # (intrinsics are calibrated for depth resolution)
+    x_cam = (xs_depth - intr[0, 2]) * z / intr[0, 0]
+    y_cam = (ys_depth - intr[1, 2]) * z / intr[1, 1]
     z_cam = z
     
     # Stack into [N, 3] array
@@ -325,12 +793,15 @@ def lift_mask_to_3d(
     t_cw = -R_cw @ t_wc
     points_world = (R_cw @ points_cam.T).T + t_cw
     
-    # Extract colors if RGB image provided
+    # Extract colors if RGB image provided (use mask-space coordinates)
     colors = None
     if rgb is not None:
-        if rgb.shape[:2] != (H, W):
-            raise ValueError(f"RGB shape {rgb.shape[:2]} must match mask shape {(H, W)}")
-        colors = rgb[ys, xs].astype(np.uint8)
+        # RGB should match mask resolution, not depth resolution
+        if rgb.shape[:2] != (H_mask, W_mask):
+            raise ValueError(
+                f"RGB shape {rgb.shape[:2]} must match mask shape {(H_mask, W_mask)}, not depth shape {(H_depth, W_depth)}"
+            )
+        colors = rgb[ys_mask_valid, xs_mask_valid].astype(np.uint8)
     
     return points_world.astype(np.float32), colors
 
@@ -853,5 +1324,206 @@ def visualize_masks_with_global_ids(
     return {
         "mask_stats": all_stats,
         "global_id_mapping": global_id_mapping,
+        "total_points": total_points_all,
+    }
+
+
+def visualize_masks_with_temporal_global_ids(
+    masks_dict: Dict[str, np.ndarray],
+    depths: np.ndarray,
+    intrs: np.ndarray,
+    extrs: np.ndarray,
+    entity_base_path: str,
+    camera_ids: Optional[List[str]] = None,
+    rgbs: Optional[np.ndarray] = None,
+    radius: float = 0.005,
+    min_depth: float = 0.0,
+    max_depth: float = 10.0,
+    fps: float = 30.0,
+    max_frames: Optional[int] = None,
+    distance_threshold: float = 0.15,
+    temporal_distance_threshold: float = 0.10,
+) -> Dict[str, any]:
+    """
+    Visualize masks with globally consistent IDs using average temporal distance.
+    
+    Key principle: Each local mask ID represents ONE object across all time.
+    Matches objects by computing average 3D distance across all frames where both exist.
+    
+    Args:
+        masks_dict: Dictionary of mask arrays {mask_name: [C, T, H, W]}
+                   Note: masks should contain integer IDs (not binary)
+        depths: Depth maps [C, T, H, W]
+        intrs: Intrinsics [C, T, 3, 3] or [C, 3, 3]
+        extrs: Extrinsics [C, T, 3, 4] or [C, 3, 4]
+        entity_base_path: Base path for entities (e.g., "world/masks")
+        camera_ids: Optional list of camera ID strings [C]
+        rgbs: Optional RGB images [C, T, H, W, 3]
+        radius: Point radius for visualization
+        min_depth: Minimum valid depth threshold
+        max_depth: Maximum valid depth threshold
+        fps: Frame rate for temporal logging
+        max_frames: Optional limit on number of frames to visualize
+        distance_threshold: Max average distance (meters) to match masks across cameras
+        temporal_distance_threshold: Unused (kept for API compatibility)
+    
+    Returns:
+        stats: Dictionary with statistics including global_id_mapping and frames_mapping
+    
+    Example:
+        >>> # Camera A has local IDs [0, 1], Camera B has local IDs [0, 1, 3]
+        >>> # Each local ID persists across time (with possible temporal gaps)
+        >>> masks = {"hand": hand_masks}  # [2, 50, 480, 640] with values 0, 1, 2, 3, ...
+        >>> stats = visualize_masks_with_temporal_global_ids(
+        ...     {"hand": masks},
+        ...     depths, intrs, extrs,
+        ...     "world/hands",
+        ...     distance_threshold=0.15,  # 15cm average distance threshold
+        ... )
+        >>> # If cam_A_id0 and cam_B_id1 have avg distance < 0.15m, they get same global ID
+    """
+    # Assign global IDs using temporal tracking
+    print(f"[INFO] ========== Temporal Tracking & Global ID Assignment ==========")
+    global_id_mapping, track_mapping = assign_global_ids_temporal(
+        masks_dict=masks_dict,
+        depths=depths,
+        intrs=intrs,
+        extrs=extrs,
+        distance_threshold=distance_threshold,
+        temporal_distance_threshold=temporal_distance_threshold,
+        min_depth=min_depth,
+        max_depth=max_depth,
+    )
+    
+    # Get dimensions
+    first_mask_array = list(masks_dict.values())[0]
+    C, T, H, W = first_mask_array.shape
+    
+    if max_frames is not None and T > max_frames:
+        T = max_frames
+    
+    # Handle intrinsics
+    if intrs.ndim == 3 and intrs.shape[1] == 3:
+        intrs_expanded = np.tile(intrs[:, None], (1, T, 1, 1))
+    else:
+        intrs_expanded = intrs
+    
+    # Handle extrinsics
+    if extrs.ndim == 3 and extrs.shape[1] in [3, 4]:
+        extrs_expanded = np.tile(extrs[:, None], (1, T, 1, 1))
+    else:
+        extrs_expanded = extrs
+    
+    # Color palette
+    color_palette = [
+        np.array([255, 0, 0], dtype=np.uint8),    # Red
+        np.array([0, 255, 0], dtype=np.uint8),    # Green
+        np.array([0, 0, 255], dtype=np.uint8),    # Blue
+        np.array([255, 255, 0], dtype=np.uint8),  # Yellow
+        np.array([255, 0, 255], dtype=np.uint8),  # Magenta
+        np.array([0, 255, 255], dtype=np.uint8),  # Cyan
+        np.array([255, 128, 0], dtype=np.uint8),  # Orange
+        np.array([128, 0, 255], dtype=np.uint8),  # Purple
+    ]
+    
+    print(f"\n[INFO] ========== Visualizing with Temporal Global IDs ==========")
+    
+    all_stats = {}
+    
+    for mask_name, masks in masks_dict.items():
+        print(f"\n[INFO] --- Processing mask type: '{mask_name}' ---")
+        
+        # Get mappings for this mask type
+        local_to_global_per_camera = global_id_mapping[mask_name]
+        frames_per_camera = track_mapping[mask_name]
+        
+        # Determine all global IDs
+        all_global_ids = set()
+        for cam_mapping in local_to_global_per_camera.values():
+            all_global_ids.update(cam_mapping.values())
+        all_global_ids = sorted(list(all_global_ids))
+        
+        print(f"[INFO] Global IDs for '{mask_name}': {all_global_ids}")
+        print(f"[INFO] Visualizing across {C} cameras, {T} frames...")
+        
+        # Visualize each global ID
+        global_id_stats = {}
+        
+        for global_id in all_global_ids:
+            entity_path = f"{entity_base_path}/{mask_name}/global_id_{global_id}"
+            color = color_palette[global_id % len(color_palette)]
+            
+            total_points = 0
+            
+            # Process each camera and frame
+            for c in range(C):
+                cam_id = camera_ids[c] if camera_ids is not None else f"cam_{c:03d}"
+                local_to_global = local_to_global_per_camera[c]
+                
+                # Find local IDs that map to this global ID
+                local_ids_for_global = [lid for lid, gid in local_to_global.items() if gid == global_id]
+                
+                if not local_ids_for_global:
+                    continue
+                
+                for t in range(T):
+                    time_seconds = t / fps
+                    
+                    # Get frame data
+                    mask_frame = masks[c, t]
+                    depth = depths[c, t]
+                    intr = intrs_expanded[c, t]
+                    extr = extrs_expanded[c, t]
+                    rgb_frame = rgbs[c, t] if rgbs is not None else None
+                    
+                    # Create binary mask for this global ID (combine all local IDs that map to it)
+                    binary_mask = np.zeros_like(mask_frame, dtype=bool)
+                    for local_id in local_ids_for_global:
+                        binary_mask |= (mask_frame == local_id)
+                    
+                    if not binary_mask.any():
+                        continue
+                    
+                    # Visualize
+                    num_points = visualize_mask_3d(
+                        mask=binary_mask,
+                        depth=depth,
+                        intr=intr,
+                        extr=extr,
+                        entity_path=entity_path,
+                        rgb=rgb_frame,
+                        color=color,
+                        radius=radius,
+                        min_depth=min_depth,
+                        max_depth=max_depth,
+                        time_seconds=time_seconds,
+                    )
+                    
+                    total_points += num_points
+            
+            global_id_stats[global_id] = total_points
+            print(f"[INFO]   Global ID {global_id}: {total_points} points (color: RGB{tuple(color)}, path: '{entity_path}')")
+        
+        all_stats[mask_name] = {
+            "global_id_stats": global_id_stats,
+            "total_points": sum(global_id_stats.values()),
+            "num_global_ids": len(all_global_ids),
+            "local_ids_per_camera": {c: len(local_to_global_per_camera[c]) for c in range(C)},
+        }
+    
+    print(f"\n[INFO] ========== Visualization Complete ==========")
+    total_points_all = sum(s['total_points'] for s in all_stats.values())
+    print(f"[INFO] Total points across all masks: {total_points_all}")
+    
+    # Print summary
+    for mask_name in all_stats:
+        print(f"[INFO] '{mask_name}' summary:")
+        for c, num_local_ids in all_stats[mask_name]['local_ids_per_camera'].items():
+            print(f"[INFO]   Camera {c}: {num_local_ids} local mask IDs")
+    
+    return {
+        "mask_stats": all_stats,
+        "global_id_mapping": global_id_mapping,
+        "frames_mapping": track_mapping,
         "total_points": total_points_all,
     }

@@ -8,7 +8,7 @@ set -euo pipefail
 # Human example from configuration 3 (default)
 #maybe calib files are wrong TODO:
 # Lets use cfg 5...
-TASK_FOLDER="task_0035_user_0020_scene_0006_cfg_0006_human"
+TASK_FOLDER="task_0006_user_0014_scene_0007_cfg_0006_human"
 # TASK_FOLDER="task_0092_user_0010_scene_0004_cfg_0003_human"
 DEPTH_FOLDER="/data/rh20t_api/data/low_res_data/RH20T_cfg6/$TASK_FOLDER"
 # RGB_FOLDER="/data/rh20t_api/data/RH20T/RH20T_cfg6/$TASK_FOLDER" # Does not exist rn
@@ -33,18 +33,6 @@ RGB_ROOT_PARENT="$(dirname "$RGB_FOLDER")"
 echo "running both in low res for now"
 # TODO: USE OLD Point CLoud! THEN FIX SAM MASK UPLIFING
 # TODO: raise error if calib files not found
-python create_sparse_depth_map.py \
-  --task-folder "$DEPTH_FOLDER" \
-  --high-res-folder "$DEPTH_FOLDER" \
-  --out-dir "$OUT_DIR" \
-  --dataset-type human \
-  --max-frames 111 \
-  --frame-selection first \
-  --frames-for-tracking 1 \
-  --no-sharpen-edges-with-mesh \
-  --pc-clean-radius 0.05 \
-  --pc-clean-min-points 5 \
-  "$@"
 
 
 #  --no-color-alignment-check \
@@ -53,15 +41,6 @@ python create_sparse_depth_map.py \
 
 
 # echo "Adding the Sam Masks"
-cd third_party/hamer
-source .hamer/bin/activate
-python add_hand_mask_from_sam_to_rh20t.py \
-  --npz "../.$OUT_DIR/${TASK_FOLDER}_processed.npz" \
-  --out-dir "../.$OUT_DIR"
-
-pip install rerun-sdk==0.21.0
-deactivate
-cd ../..
 # #use video sam?
 # echo "Sam Masks added."
 
@@ -82,7 +61,6 @@ echo "Running MVTracker demo"
 
 # erst mal ohne SAM
 # TODO -> 
-python demo.py --temporal_stride 1 --spatial_downsample 1 --depth_estimator gt --depth_cache_dir ./depth_cache --rerun save --sample-path "$SAMPLE_PATH_HAND_TRACKED" --tracker spatialtrackerv2 --rrd "./mvtracker_demo_hands_spatracker.rrd"
 
 # python demo.py --temporal_stride 1 --spatial_downsample 1 --depth_estimator gt --depth_cache_dir ./depth_cache --rerun save --sample-path "$SAMPLE_PATH_HAND_TRACKED" --tracker cotracker3_offline
 # python demo.py --temporal_stride 1 --spatial_downsample 1 --depth_estimator gt --depth_cache_dir ./depth_cache --rerun save --sample-path "$SAMPLE_PATH_HAND_TRACKED" --tracker mvtracker
