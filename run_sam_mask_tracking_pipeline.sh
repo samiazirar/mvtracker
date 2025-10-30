@@ -16,8 +16,7 @@ set -e  # Exit on error
 # ============================================================================
 # CONFIGURATION - EDIT THESE VARIABLES
 # ============================================================================
-
-TASK_FOLDER="task_0006_user_0014_scene_0007_cfg_0006_human"
+TASK_FOLDER="task_0009_user_0014_scene_0009_cfg_0006_human"
 # Input NPZ file with SAM2 masks (output from demo_sam2_object_tracking_debug.py)
 NPZ_FILE="third_party/HOISTFormer/sam2_tracking_output/${TASK_FOLDER}_processed_hand_tracked_hoist_sam2.npz"
 

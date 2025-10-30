@@ -8,7 +8,7 @@ set -euo pipefail
 # Human example from configuration 3 (default)
 #maybe calib files are wrong TODO:
 # Lets use cfg 5...
-TASK_FOLDER="task_0035_user_0020_scene_0006_cfg_0006_human"
+TASK_FOLDER="task_0034_user_0014_scene_0004_cfg_0006_human"
 # TASK_FOLDER="task_0092_user_0010_scene_0004_cfg_0003_human"
 DEPTH_FOLDER="/data/rh20t_api/data/low_res_data/RH20T_cfg6/$TASK_FOLDER"
 # RGB_FOLDER="/data/rh20t_api/data/RH20T/RH20T_cfg6/$TASK_FOLDER" # Does not exist rn
@@ -38,7 +38,7 @@ python create_sparse_depth_map.py \
   --high-res-folder "$DEPTH_FOLDER" \
   --out-dir "$OUT_DIR" \
   --dataset-type human \
-  --max-frames 111 \
+  --max-frames 50 \
   --frame-selection first \
   --frames-for-tracking 1 \
   --no-sharpen-edges-with-mesh \
@@ -82,7 +82,9 @@ echo "Running MVTracker demo"
 
 # erst mal ohne SAM
 # TODO -> 
-python demo.py --temporal_stride 1 --spatial_downsample 1 --depth_estimator gt --depth_cache_dir ./depth_cache --rerun save --sample-path "$SAMPLE_PATH_HAND_TRACKED" --tracker spatialtrackerv2 --rrd "./mvtracker_demo_hands_spatracker.rrd"
+python demo.py --temporal_stride 1 --spatial_downsample 1 --depth_estimator gt --depth_cache_dir ./depth_cache --rerun save --sample-path "$SAMPLE_PATH_HAND_TRACKED" --tracker spatialtrackerv2 --rrd "./mvtracker_demo_hands_spatracker_${TASK_FOLDER}.rrd"
+
+python demo.py --temporal_stride 1 --spatial_downsample 1 --depth_estimator gt --depth_cache_dir ./depth_cache --rerun save --sample-path "$SAMPLE_PATH_HAND_TRACKED" --tracker mvtracker --rrd "./mvtracker_demo_hands_mvtracker_${TASK_FOLDER}.rrd"
 
 # python demo.py --temporal_stride 1 --spatial_downsample 1 --depth_estimator gt --depth_cache_dir ./depth_cache --rerun save --sample-path "$SAMPLE_PATH_HAND_TRACKED" --tracker cotracker3_offline
 # python demo.py --temporal_stride 1 --spatial_downsample 1 --depth_estimator gt --depth_cache_dir ./depth_cache --rerun save --sample-path "$SAMPLE_PATH_HAND_TRACKED" --tracker mvtracker
@@ -154,13 +156,16 @@ echo "Creating query points from masks and running MVTracker demo with GT depth 
 SAMPLE_PATH_SAM_HAND_TRACKED="third_party/HOISTFormer/sam2_tracking_output/${TASK_FOLDER}_processed_hand_tracked_hoist_sam2_query.npz"
 SAMPLE_PATH_HAND_TRACKED="third_party/HOISTFormer/sam2_tracking_output/${TASK_FOLDER}_processed_hand_tracked_hoist_sam2.npz"
 
-python create_query_points_from_masks.py --npz $SAMPLE_PATH_HAND_TRACKED --frames-before 3 --frames-after 15 --output $SAMPLE_PATH_HAND_TRACKED  --key sam2_masks --use-first-frame
+python create_query_points_from_masks.py --npz $SAMPLE_PATH_HAND_TRACKED --frames-before 3 --frames-after 5 --output $SAMPLE_PATH_HAND_TRACKED  --key sam2_masks --use-first-frame
 
 
 echo "Running MVTracker demo with GT depth estimator"
 
 
-python demo.py --temporal_stride 1 --spatial_downsample 1 --depth_estimator gt --depth_cache_dir ./depth_cache --rerun save --sample-path "$SAMPLE_PATH_HAND_TRACKED" --tracker spatialtrackerv2
+python demo.py --temporal_stride 1 --spatial_downsample 1 --depth_estimator gt --depth_cache_dir ./depth_cache --rerun save --sample-path "$SAMPLE_PATH_HAND_TRACKED" --tracker spatialtrackerv2 --rrd mvtracker_demo_hands_mvtracker_${TASK_FOLDER}_hoist_sam2.rrd
+
+python demo.py --temporal_stride 1 --spatial_downsample 1 --depth_estimator gt --depth_cache_dir ./depth_cache --rerun save --sample-path "$SAMPLE_PATH_HAND_TRACKED" --tracker mvtracker --rrd mvtracker_demo_hands_mvtracker_${TASK_FOLDER}_hoist_sam2.rrd
+
 
 # python demo.py --temporal_stride 1 --spatial_downsample 1 --depth_estimator vggt_raw --depth_cache_dir ./depth_cache --rerun save --sample-path "$SAMPLE_PATH" --tracker mvtracker --rrd vggt_raw_mvtracker_demo.rrd
 
@@ -180,3 +185,6 @@ python demo.py --temporal_stride 1 --spatial_downsample 1 --depth_estimator gt -
 # python demo.py --temporal_stride 1 --spatial_downsample 1 --depth_estimator vggt_raw --depth_cache_dir ./depth_cache --rerun save --sample-path "$SAMPLE_PATH_HAND_TRACKED" --tracker mvtracker --rrd "./vggt_raw_mvtracker_raw.rrd"
 # cp -r ./vggt_raw_mvtracker_raw.rrd /data/rh20t_api/test_data_generated_human
 
+
+# TODO: track per mask ->
+# Max points

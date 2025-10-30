@@ -1067,7 +1067,7 @@ def main():
     if args.rerun == "save":
         rr.save(args.rrd)
         print(f"Saved Rerun recording to: {os.path.abspath(args.rrd)}")
-        print(f"View with rerun view {os.path.abspath(args.rrd)} --web-viewer")
+        print(f"View with rerun {os.path.abspath(args.rrd)} --web-viewer")
 
 
 if __name__ == "__main__":

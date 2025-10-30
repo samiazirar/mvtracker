@@ -421,32 +421,30 @@ def visualize_tracks_rerun(
                     radii=0.01,
                 ),
             )
-            
-            # Log trajectories (lines from previous positions)
-            if t > 0:
-                for n in range(all_positions.shape[1]):
-                    if not visible_mask[n]:
-                        continue
-                    
-                    # Get trajectory up to current frame
-                    vis_traj = all_visibility[:t+1, n].astype(bool)
-                    pos_finite = np.isfinite(all_positions[:t+1, n]).all(axis=1)
-                    traj_mask = vis_traj & pos_finite
-                    
-                    if traj_mask.sum() < 2:
-                        continue
-                    
-                    traj_positions = all_positions[:t+1, n][traj_mask]  # [T_valid, 3]
-                    
-                    # Log as line strip
-                    rr.log(
-                        f"world/tracks/trajectories/track_{n}",
-                        rr.LineStrips3D(
-                            [traj_positions],
-                            colors=[track_colors[n]],
-                            radii=0.003,
-                        ),
-                    )
+    
+    # Log complete trajectories after processing all frames (static, not time-dependent)
+    print(f"[INFO] Logging complete trajectories...")
+    for n in tqdm(range(all_positions.shape[1]), desc="Logging trajectories"):
+        # Get complete trajectory for this track
+        vis_traj = all_visibility[:, n].astype(bool)
+        pos_finite = np.isfinite(all_positions[:, n]).all(axis=1)
+        traj_mask = vis_traj & pos_finite
+        
+        if traj_mask.sum() < 2:
+            continue
+        
+        traj_positions = all_positions[:, n][traj_mask]  # [T_valid, 3]
+        
+        # Log as static line strip (not time-dependent)
+        rr.log(
+            f"world/tracks/trajectories/track_{n}",
+            rr.LineStrips3D(
+                [traj_positions],
+                colors=[track_colors[n]],
+                radii=0.003,
+            ),
+            static=True,  # Mark as static so it persists across all time steps
+        )
     
     print(f"[INFO] Logged {all_positions.shape[1]} tracks")
     
