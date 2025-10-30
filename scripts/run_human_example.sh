@@ -38,7 +38,7 @@ python create_sparse_depth_map.py \
   --high-res-folder "$DEPTH_FOLDER" \
   --out-dir "$OUT_DIR" \
   --dataset-type human \
-  --max-frames 50 \
+  --max-frames 100 \
   --frame-selection first \
   --frames-for-tracking 1 \
   --no-sharpen-edges-with-mesh \
