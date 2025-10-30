@@ -5,10 +5,11 @@
 
 set -euo pipefail
 
+
 # Human example from configuration 3 (default)
 #maybe calib files are wrong TODO:
 # Lets use cfg 5...
-TASK_FOLDER="task_0034_user_0014_scene_0004_cfg_0006_human"
+TASK_FOLDER="task_0035_user_0020_scene_0006_cfg_0006_human"
 # TASK_FOLDER="task_0092_user_0010_scene_0004_cfg_0003_human"
 DEPTH_FOLDER="/data/rh20t_api/data/low_res_data/RH20T_cfg6/$TASK_FOLDER"
 # RGB_FOLDER="/data/rh20t_api/data/RH20T/RH20T_cfg6/$TASK_FOLDER" # Does not exist rn

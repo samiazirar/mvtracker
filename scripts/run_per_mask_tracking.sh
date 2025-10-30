@@ -1,12 +1,37 @@
 #!/usr/bin/env bash
 
-# Example script showing how to run per-mask tracking
-# This is a template - adapt the paths and parameters to your needs
+# Per-Mask Independent Tracking Pipeline
+# 
+# This script processes SAM2 masks and runs tracking on each mask independently.
+# 
+# INPUT: NPZ file with SAM2 masks
+# OUTPUT: 
+#   - RRD visualization files (one per mask instance)
+#   - NPZ tracking results files (for post-processing/refinement)
+# 
+# Output structure:
+#   ./tracking_per_mask/${TASK_FOLDER}/
+#     ├── instances/                                    # Input NPZ files per instance
+#     │   ├── task_name_instance_0.npz                 # (query points + masks)
+#     │   ├── task_name_instance_0_query.npz
+#     │   ├── task_name_instance_1.npz
+#     │   └── task_name_instance_1_query.npz
+#     ├── task_name_tracker_instance_0.rrd             # Tracking visualization
+#     ├── task_name_tracker_instance_0_tracked.npz     # Tracking results (NEW!)
+#     ├── task_name_tracker_instance_1.rrd
+#     ├── task_name_tracker_instance_1_tracked.npz     # Tracking results (NEW!)
+#     ├── task_name_tracker_combined.rrd               # Combined visualization
+#     └── view_task_name_tracker_combined.sh           # Script to view all
+# 
+# NEXT STEPS after running this script:
+#   1. View results: bash ${OUTPUT_DIR}/view_${TASK_FOLDER}_${TRACKER}_combined.sh
+#   2. Or view individual: rerun ${OUTPUT_DIR}/${TASK_FOLDER}_${TRACKER}_instance_0.rrd
+#   3. Post-process: bash scripts/run_track_refinement_pipeline.sh
 
 set -euo pipefail
 
 # Configuration
-TASK_FOLDER="task_0034_user_0014_scene_0004_cfg_0006_human"
+TASK_FOLDER="task_0035_user_0020_scene_0006_cfg_0006_human"
 BASE_DIR="third_party/HOISTFormer/sam2_tracking_output"
 
 # Input NPZ with SAM2 masks (output from your existing pipeline)

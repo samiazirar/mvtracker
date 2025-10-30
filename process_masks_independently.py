@@ -105,6 +105,7 @@ def run_tracking_for_instance(
     query_npz: Path,
     tracker: str,
     output_rrd: Path,
+    output_npz: Optional[Path] = None,
     temporal_stride: int = 1,
     spatial_downsample: int = 1,
     depth_estimator: str = "gt",
@@ -112,6 +113,9 @@ def run_tracking_for_instance(
 ) -> Path:
     """
     Run demo.py tracking for a single instance.
+    
+    Args:
+        output_npz: Optional path to save tracking results as NPZ
     
     Returns path to output .rrd file.
     """
@@ -127,6 +131,10 @@ def run_tracking_for_instance(
         "--tracker", tracker,
         "--rrd", str(output_rrd),
     ]
+    
+    # Add NPZ export if requested
+    if output_npz is not None:
+        cmd.extend(["--save-npz", str(output_npz)])
     
     run_command(cmd, f"Running {tracker} tracking for {query_npz.stem}")
     
@@ -273,20 +281,24 @@ def process_masks_independently(
                 
                 # Track each batch
                 batch_rrds = []
+                batch_npzs_tracking = []
                 for i, batch_npz in enumerate(batch_npzs):
                     batch_rrd = output_dir / f"{base_name}_{tracker}_{inst_id}_batch_{i}.rrd"
+                    batch_npz_out = output_dir / f"{base_name}_{tracker}_{inst_id}_batch_{i}_tracked.npz"
                     
                     print(f"\n[INFO] Tracking batch {i}/{len(batch_npzs)-1}")
                     tracking_rrd = run_tracking_for_instance(
                         query_npz=batch_npz,
                         tracker=tracker,
                         output_rrd=batch_rrd,
+                        output_npz=batch_npz_out,
                         temporal_stride=temporal_stride,
                         spatial_downsample=spatial_downsample,
                         depth_estimator=depth_estimator,
                         depth_cache_dir=depth_cache_dir,
                     )
                     batch_rrds.append(tracking_rrd)
+                    batch_npzs_tracking.append(batch_npz_out)
                 
                 # Store all batch RRDs for this instance
                 tracking_rrds[inst_id] = batch_rrds
@@ -295,11 +307,13 @@ def process_masks_independently(
                 # No batching needed
                 print(f"[INFO] No batching needed ({num_points} <= {max_query_points_per_batch})")
                 output_rrd = output_dir / f"{base_name}_{tracker}_{inst_id}.rrd"
+                output_npz_tracking = output_dir / f"{base_name}_{tracker}_{inst_id}_tracked.npz"
                 
                 tracking_rrd = run_tracking_for_instance(
                     query_npz=query_npz,
                     tracker=tracker,
                     output_rrd=output_rrd,
+                    output_npz=output_npz_tracking,
                     temporal_stride=temporal_stride,
                     spatial_downsample=spatial_downsample,
                     depth_estimator=depth_estimator,
@@ -310,11 +324,13 @@ def process_masks_independently(
         else:
             # No batching requested
             output_rrd = output_dir / f"{base_name}_{tracker}_{inst_id}.rrd"
+            output_npz_tracking = output_dir / f"{base_name}_{tracker}_{inst_id}_tracked.npz"
             
             tracking_rrd = run_tracking_for_instance(
                 query_npz=query_npz,
                 tracker=tracker,
                 output_rrd=output_rrd,
+                output_npz=output_npz_tracking,
                 temporal_stride=temporal_stride,
                 spatial_downsample=spatial_downsample,
                 depth_estimator=depth_estimator,
