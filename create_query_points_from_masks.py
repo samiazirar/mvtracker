@@ -207,6 +207,10 @@ def lift_instance_masks_to_query_points(
         print(f"[INFO]   Camera {cam_id_str} (index {c}): contact at frame {contact_frame}, using frames {frame_range}")
         
         # Lift masks for each frame in range
+        # Note: When use_first_frame=True, we lift masks from multiple frames but assign all
+        # query points to frame 0. This ensures the tracker receives all points at the same
+        # starting frame and can track them forward properly. The frame_range determines which
+        # mask frames to sample points from (spatial diversity), not the temporal query frames.
         for t in frame_range:
             mask = masks[c, t]
             
@@ -242,11 +246,14 @@ def lift_instance_masks_to_query_points(
             
             # Create query points with frame index
             # Format: [frame_idx, x, y, z]
-            frame_indices = np.full((len(points_3d), 1), t, dtype=np.float32)
+            # When using use_first_frame mode, always set query frame to 0 (the first frame)
+            # even if we're lifting masks from later frames
+            query_frame_idx = 0 if use_first_frame else t
+            frame_indices = np.full((len(points_3d), 1), query_frame_idx, dtype=np.float32)
             query_points_t = np.hstack([frame_indices, points_3d])  # [N, 4]
             
             all_query_points.append(query_points_t)
-            print(f"[INFO]     Frame {t}: Added {len(points_3d)} query points")
+            print(f"[INFO]     Frame {t}: Added {len(points_3d)} query points (query_frame={query_frame_idx})")
     
     if not all_query_points:
         print(f"[WARN]   No query points generated for {instance_name}")

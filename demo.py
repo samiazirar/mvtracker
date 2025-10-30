@@ -547,6 +547,16 @@ def main():
         ),
     )
     p.add_argument(
+        "--save-npz",
+        default=None,
+        type=str,
+        help=(
+            "Path to save tracking results as NPZ file. "
+            "The NPZ will contain tracks_3d, visibilities, query_points, and other data. "
+            "This is useful for post-processing pipelines like refinement and video export."
+        ),
+    )
+    p.add_argument(
         "--include-robot",
         action="store_true",
         help="Overlay the robot URDF as a static mesh in the Rerun visualization."
@@ -1068,6 +1078,44 @@ def main():
         rr.save(args.rrd)
         print(f"Saved Rerun recording to: {os.path.abspath(args.rrd)}")
         print(f"View with rerun {os.path.abspath(args.rrd)} --web-viewer")
+    
+    # Save tracking results as NPZ if requested
+    if args.save_npz:
+        save_path = Path(args.save_npz)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        print(f"\n[INFO] Saving tracking results to NPZ: {save_path}")
+        
+        # Prepare data for saving
+        save_data = {
+            # Tracking results (compatible with refine_tracks.py)
+            "tracks_3d": pred_tracks.numpy(),  # [T, N, 3]
+            "visibilities": pred_vis.numpy(),  # [T, N]
+            "query_points": query_points.numpy(),  # [N, 4]
+            
+            # Camera data
+            "rgbs": rgbs.numpy(),  # [V, T, C, H, W]
+            "depths": depths.numpy(),  # [V, T, 1, H, W]
+            "intrs": intrs.numpy(),  # [V, T, 3, 3]
+            "extrs": extrs.numpy(),  # [V, T, 3, 4]
+            "camera_ids": camera_ids,
+            
+            # Metadata
+            "tracker": args.tracker,
+            "temporal_stride": args.temporal_stride,
+            "spatial_downsample": args.spatial_downsample,
+        }
+        
+        # Add optional data if available
+        if "per_camera_timestamps" in sample:
+            save_data["per_camera_timestamps"] = sample["per_camera_timestamps"]
+        if "timestamps" in sample:
+            save_data["timestamps"] = sample["timestamps"]
+        
+        np.savez_compressed(save_path, **save_data)
+        print(f"[INFO] Saved tracking results with keys: {list(save_data.keys())}")
+        print(f"[INFO] Tracks shape: {pred_tracks.shape}, Visibilities: {pred_vis.shape}")
+        print(f"[INFO] NPZ file: {os.path.abspath(save_path)}")
 
 
 if __name__ == "__main__":

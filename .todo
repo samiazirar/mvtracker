@@ -6,6 +6,9 @@
 - [x] Lift hand tracking to 3D
 - [ ] Lift Tracks to the rgb videos
  
+- [ ] Jan sein Workstation einstellen! Team viewer drauf - workstation: elm.informatik.uni-bonn.de
+
+
 - [ ] get the contact flow (can also be rigid square first)
 
 - [ ] ! track the objects in 3D -> maybe use the rigid object 3D model/ Make depth completion only in small part -> get workspace paert and remove background
