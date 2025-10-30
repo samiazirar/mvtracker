@@ -1103,6 +1103,13 @@ def main():
         id_to_dir_high = {cid: d for cid, d in zip(cam_ids_high, cam_dirs_high)}
 
         final_cam_ids = [cid for cid in shared_ids if cid in id_to_dir_low and cid in id_to_dir_high]
+        
+        # Filter out cameras with letters (in-hand cameras)
+        cameras_to_remove = [cid for cid in final_cam_ids if any(c.isalpha() for c in str(cid))]
+        if cameras_to_remove:
+            print(f"[INFO] Removing {len(cameras_to_remove)} camera(s) with non-numeric IDs (in-hand cameras): {cameras_to_remove}")
+            final_cam_ids = [cid for cid in final_cam_ids if cid not in cameras_to_remove]
+        
         cam_dirs_low = [id_to_dir_low[cid] for cid in final_cam_ids]
         cam_dirs_high = [id_to_dir_high[cid] for cid in final_cam_ids]
 

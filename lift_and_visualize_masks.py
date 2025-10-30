@@ -19,13 +19,12 @@ to Camera 0's ID 2 in 3D space, they'll both get the same global ID.
 Usage Examples:
 ---------------
 
+
+python lift_and_visualize_masks.py --npz third_party/HOISTFormer/sam2_tracking_output/task_0045_user_0020_scene_0004_cfg_0006_human_processed_hand_tracked_hoist_sam2.npz --mask-key hoist_masks     --use-global-ids     --distance-threshold 0.15 --max-frames 111
+
+
 # 1. Visualize with GLOBAL IDs (match masks across cameras)
-python lift_and_visualize_masks.py \
-    --npz third_party/HOISTFormer/hoist_output/task_0045_user_0020_scene_0004_cfg_0006_human_processed_hand_tracked_hoist.npz \
-    --mask-key hoist_masks \
-    --use-global-ids \
-    --distance-threshold 0.15 \
-    --max-frames 111
+python lift_and_visualize_masks.py --npz third_party/HOISTFormer/hoist_output/task_0045_user_0020_scene_0004_cfg_0006_human_processed_hand_tracked_hoist.npz     --mask-key hoist_masks     --use-global-ids     --distance-threshold 0.15 --max-frames 111
 
 # 2. Visualize SAM2 tracking output with global IDs
 python lift_and_visualize_masks.py \
@@ -66,7 +65,11 @@ import numpy as np
 import torch
 import rerun as rr
 
-from utils.mask_lifting_utils import visualize_masks_batch, visualize_masks_with_global_ids
+from utils.mask_lifting_utils import (
+    visualize_masks_batch, 
+    visualize_masks_with_global_ids,
+    visualize_masks_with_temporal_global_ids,
+)
 from mvtracker.utils.visualizer_rerun import log_pointclouds_to_rerun
 
 
@@ -263,8 +266,15 @@ def main():
     # Global ID options
     parser.add_argument(
         "--use-global-ids",
+        default=True,
         action="store_true",
-        help="Assign global IDs to masks across cameras based on 3D proximity",
+        help="Assign global IDs to masks across cameras based on 3D proximity (single frame)",
+    )
+    parser.add_argument(
+        "--use-temporal-global-ids",
+        default=True,
+        action="store_true",
+        help="Assign global IDs using temporal tracking (RECOMMENDED for masks appearing/disappearing)",
     )
     parser.add_argument(
         "--distance-threshold",
@@ -273,10 +283,16 @@ def main():
         help="Max distance (meters) to match masks across cameras (default: 0.15)",
     )
     parser.add_argument(
+        "--temporal-distance-threshold",
+        type=float,
+        default=0.10,
+        help="Max distance (meters) to link masks across frames (default: 0.10)",
+    )
+    parser.add_argument(
         "--frame-for-matching",
         type=int,
         default=0,
-        help="Which frame to use for computing global ID assignments (default: 0)",
+        help="Which frame to use for computing global ID assignments (only for --use-global-ids)",
     )
     
     args = parser.parse_args()
@@ -370,9 +386,44 @@ def main():
     masks_dict = data["masks"]
     all_stats = {}
     
-    if args.use_global_ids:
-        # Use global ID assignment for consistent IDs across cameras
-        print(f"[INFO] Using GLOBAL ID mode (matching across cameras)")
+    if args.use_temporal_global_ids:
+        # Use temporal tracking for global ID assignment (RECOMMENDED)
+        print(f"[INFO] Using TEMPORAL GLOBAL ID mode (with temporal tracking)")
+        print(f"[INFO]   Spatial distance threshold: {args.distance_threshold}m")
+        print(f"[INFO]   Temporal distance threshold: {args.temporal_distance_threshold}m")
+        
+        stats = visualize_masks_with_temporal_global_ids(
+            masks_dict=masks_dict,
+            depths=data["depths"],
+            intrs=data["intrs"],
+            extrs=data["extrs"],
+            entity_base_path=args.entity_path,
+            camera_ids=data["camera_ids"],
+            rgbs=rgbs,
+            radius=args.radius,
+            min_depth=args.min_depth,
+            max_depth=args.max_depth,
+            fps=args.fps,
+            max_frames=args.max_frames,
+            distance_threshold=args.distance_threshold,
+            temporal_distance_threshold=args.temporal_distance_threshold,
+        )
+        
+        all_stats = stats["mask_stats"]
+        print(f"\n[INFO] Global ID Mapping (per local ID):")
+        for mask_name, id_mapping in stats["global_id_mapping"].items():
+            print(f"[INFO]   {mask_name}:")
+            for cam_idx, mapping in id_mapping.items():
+                print(f"[INFO]     Camera {cam_idx}: {mapping}")
+                # Show which frames each local ID appears in
+                if cam_idx in stats["frames_mapping"][mask_name]:
+                    for local_id, frames in stats["frames_mapping"][mask_name][cam_idx].items():
+                        global_id = mapping.get(local_id, "?")
+                        print(f"[INFO]       local_id={local_id} -> global_id={global_id}, frames={len(frames)}")
+    
+    elif args.use_global_ids:
+        # Use single-frame global ID assignment
+        print(f"[INFO] Using GLOBAL ID mode (single frame matching)")
         print(f"[INFO]   Distance threshold: {args.distance_threshold}m")
         print(f"[INFO]   Frame for matching: {args.frame_for_matching}")
         
@@ -435,7 +486,7 @@ def main():
     
     print(f"\n[INFO] ========== Visualization Complete ==========")
     print(f"[INFO] Processed {len(masks_dict)} mask type(s): {list(masks_dict.keys())}")
-    if args.use_global_ids:
+    if args.use_global_ids or args.use_temporal_global_ids:
         total_points_all = sum(s['total_points'] for s in all_stats.values())
     else:
         total_points_all = sum(s['total_points'] for s in all_stats.values())
