@@ -16,8 +16,14 @@ INPUT_NPZ="${BASE_DIR}/${TASK_FOLDER}_processed_hand_tracked_hoist_sam2.npz"
 OUTPUT_DIR="./tracking_per_mask/${TASK_FOLDER}"
 
 # Tracking parameters
-TRACKER="mvtracker"  # Options: mvtracker, spatialtrackerv2, cotracker3_offline
+# TRACKER="mvtracker"  # Options: mvtracker, spatialtrackerv2, cotracker3_offline
+TRACKER="spatialtrackerv2"  # Options: mvtracker, spatialtrackerv2, cotracker3_offline
+
 MASK_KEY="sam2_masks"  # Key for masks in NPZ
+
+# Optional: Batch processing for large masks (set to empty string to disable)
+# MAX_QUERY_POINTS_PER_BATCH=""  # Disabled
+MAX_QUERY_POINTS_PER_BATCH="5000"  # Split masks with >5000 query points into batches
 
 echo "=========================================="
 echo "Per-Mask Independent Tracking Pipeline"
@@ -25,22 +31,35 @@ echo "=========================================="
 echo "Input NPZ: ${INPUT_NPZ}"
 echo "Output directory: ${OUTPUT_DIR}"
 echo "Tracker: ${TRACKER}"
+if [ -n "${MAX_QUERY_POINTS_PER_BATCH}" ]; then
+  echo "Batch processing: enabled (${MAX_QUERY_POINTS_PER_BATCH} points per batch)"
+else
+  echo "Batch processing: disabled"
+fi
 echo ""
 
-# Run the per-mask tracking pipeline
-python process_masks_independently.py \
-  --npz "${INPUT_NPZ}" \
-  --mask-key "${MASK_KEY}" \
-  --tracker "${TRACKER}" \
-  --output-dir "${OUTPUT_DIR}" \
-  --base-name "${TASK_FOLDER}" \
+# Build command
+CMD="python process_masks_independently.py \
+  --npz \"${INPUT_NPZ}\" \
+  --mask-key \"${MASK_KEY}\" \
+  --tracker \"${TRACKER}\" \
+  --output-dir \"${OUTPUT_DIR}\" \
+  --base-name \"${TASK_FOLDER}\" \
   --frames-before 3 \
   --frames-after 10 \
   --use-first-frame \
   --temporal-stride 1 \
   --spatial-downsample 1 \
   --depth-estimator gt \
-  --depth-cache-dir ./depth_cache
+  --depth-cache-dir ./depth_cache"
+
+# Add batch limit if set
+if [ -n "${MAX_QUERY_POINTS_PER_BATCH}" ]; then
+  CMD="${CMD} --max-query-points-per-batch ${MAX_QUERY_POINTS_PER_BATCH}"
+fi
+
+# Run the per-mask tracking pipeline
+eval $CMD
 
 echo ""
 echo "=========================================="
