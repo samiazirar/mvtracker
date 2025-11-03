@@ -77,9 +77,21 @@ def load_tracking_results(npz_path: Path) -> Dict:
     }
     
     # Copy other useful keys
-    for key in ["rgbs", "intrinsics", "extrinsics", "camera_ids", "depths"]:
+    for key in ["rgbs", "camera_ids", "depths", "tracker", "temporal_stride", "spatial_downsample", "timestamps", "per_camera_timestamps"]:
         if key in data:
             result[key] = data[key]
+    
+    # Handle intrinsics (might be 'intrs' or 'intrinsics')
+    if "intrinsics" in data:
+        result["intrinsics"] = data["intrinsics"]
+    elif "intrs" in data:
+        result["intrs"] = data["intrs"]
+    
+    # Handle extrinsics (might be 'extrs' or 'extrinsics')
+    if "extrinsics" in data:
+        result["extrinsics"] = data["extrinsics"]
+    elif "extrs" in data:
+        result["extrs"] = data["extrs"]
     
     print(f"[INFO] Loaded tracks: {tracks.shape}, visibilities: {visibilities.shape}")
     if query_points is not None:
@@ -123,7 +135,25 @@ def save_refined_results(
         save_data["query_points"] = query_points
     
     # Copy additional keys from original data
-    for key in ["rgbs", "intrinsics", "extrinsics", "camera_ids", "depths"]:
+    # Handle both 'intrs'/'extrs' and 'intrinsics'/'extrinsics' naming
+    for key in ["rgbs", "camera_ids", "depths"]:
+        if key in original_data:
+            save_data[key] = original_data[key]
+    
+    # Handle intrinsics (might be 'intrs' or 'intrinsics')
+    if "intrinsics" in original_data:
+        save_data["intrinsics"] = original_data["intrinsics"]
+    elif "intrs" in original_data:
+        save_data["intrinsics"] = original_data["intrs"]
+    
+    # Handle extrinsics (might be 'extrs' or 'extrinsics')
+    if "extrinsics" in original_data:
+        save_data["extrinsics"] = original_data["extrinsics"]
+    elif "extrs" in original_data:
+        save_data["extrinsics"] = original_data["extrs"]
+    
+    # Copy optional metadata
+    for key in ["tracker", "temporal_stride", "spatial_downsample", "timestamps", "per_camera_timestamps"]:
         if key in original_data:
             save_data[key] = original_data[key]
     

@@ -83,9 +83,10 @@ echo "Running MVTracker demo"
 
 # erst mal ohne SAM
 # TODO -> 
-python demo.py --temporal_stride 1 --spatial_downsample 1 --depth_estimator gt --depth_cache_dir ./depth_cache --rerun save --sample-path "$SAMPLE_PATH_HAND_TRACKED" --tracker spatialtrackerv2 --rrd "./mvtracker_demo_hands_spatracker_${TASK_FOLDER}.rrd"
-
 python demo.py --temporal_stride 1 --spatial_downsample 1 --depth_estimator gt --depth_cache_dir ./depth_cache --rerun save --sample-path "$SAMPLE_PATH_HAND_TRACKED" --tracker mvtracker --rrd "./mvtracker_demo_hands_mvtracker_${TASK_FOLDER}.rrd"
+
+
+python demo.py --temporal_stride 1 --spatial_downsample 1 --depth_estimator gt --depth_cache_dir ./depth_cache --rerun save --sample-path "$SAMPLE_PATH_HAND_TRACKED" --tracker spatialtrackerv2 --rrd "./mvtracker_demo_hands_spatracker_${TASK_FOLDER}.rrd"
 
 # python demo.py --temporal_stride 1 --spatial_downsample 1 --depth_estimator gt --depth_cache_dir ./depth_cache --rerun save --sample-path "$SAMPLE_PATH_HAND_TRACKED" --tracker cotracker3_offline
 # python demo.py --temporal_stride 1 --spatial_downsample 1 --depth_estimator gt --depth_cache_dir ./depth_cache --rerun save --sample-path "$SAMPLE_PATH_HAND_TRACKED" --tracker mvtracker
@@ -163,7 +164,7 @@ python create_query_points_from_masks.py --npz $SAMPLE_PATH_HAND_TRACKED --frame
 echo "Running MVTracker demo with GT depth estimator"
 
 
-python demo.py --temporal_stride 1 --spatial_downsample 1 --depth_estimator gt --depth_cache_dir ./depth_cache --rerun save --sample-path "$SAMPLE_PATH_HAND_TRACKED" --tracker spatialtrackerv2 --rrd mvtracker_demo_hands_mvtracker_${TASK_FOLDER}_hoist_sam2.rrd
+python demo.py --temporal_stride 1 --spatial_downsample 1 --depth_estimator gt --depth_cache_dir ./depth_cache --rerun save --sample-path "$SAMPLE_PATH_HAND_TRACKED" --tracker spatialtrackerv2 --rrd spatialtracker_demo_hands_mvtracker_${TASK_FOLDER}_hoist_sam2.rrd
 
 python demo.py --temporal_stride 1 --spatial_downsample 1 --depth_estimator gt --depth_cache_dir ./depth_cache --rerun save --sample-path "$SAMPLE_PATH_HAND_TRACKED" --tracker mvtracker --rrd mvtracker_demo_hands_mvtracker_${TASK_FOLDER}_hoist_sam2.rrd
 
@@ -188,4 +189,6 @@ python demo.py --temporal_stride 1 --spatial_downsample 1 --depth_estimator gt -
 
 
 # TODO: track per mask ->
-# Max points
+# Max points#
+
+python demo.py --temporal_stride 1 --spatial_downsample 1 --depth_estimator gt --depth_cache_dir ./depth_cache --rerun save --sample-path "./conversions/behave_converted/Date01_Sub01_backpack_back.npz" --tracker spatialtrackerv2 --rrd Date01_Sub01_backpack_back.rrd

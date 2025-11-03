@@ -110,3 +110,7 @@ _DATA
 detectron2
 detectron2/
 detectron2/*
+
+conversions/behave_converted
+conversions/behave_converted/
+conversions/behave_converted/*

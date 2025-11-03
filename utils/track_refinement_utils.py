@@ -22,8 +22,8 @@ def calculate_track_motion(
     Calculate motion metric for each track.
     
     Args:
-        tracks: Track trajectories [T, N, 3] in 3D world coordinates
-        visibilities: Track visibility mask [T, N] (optional)
+        tracks: Track trajectories [T, N, 3] or [C, T, N, 3] in 3D world coordinates
+        visibilities: Track visibility mask [T, N] or [C, T, N] (optional)
         method: Motion metric to compute:
             - "total_displacement": Sum of all frame-to-frame distances
             - "max_displacement": Maximum distance from starting point
@@ -33,11 +33,26 @@ def calculate_track_motion(
     Returns:
         motion: Motion metric per track [N]
     """
+    # Handle different input shapes
+    if tracks.ndim == 4:
+        # [C, T, N, 3] - squeeze out camera dimension (assume single camera or already merged)
+        assert tracks.shape[0] == 1, "Multiple cameras not supported, expected shape [1, T, N, 3]"
+        tracks = tracks[0]  # [T, N, 3]
+    
     T, N, D = tracks.shape
     assert D == 3, "Tracks must be 3D"
     
     if visibilities is None:
         visibilities = np.ones((T, N), dtype=bool)
+    else:
+        # Handle different visibility shapes and dtypes
+        if visibilities.ndim == 3:
+            assert visibilities.shape[0] == 1, "Multiple cameras not supported"
+            visibilities = visibilities[0]  # [T, N]
+        
+        # Convert to boolean if needed (some trackers output confidence scores)
+        if visibilities.dtype != bool:
+            visibilities = visibilities > 0.5  # Threshold at 0.5
     
     motion = np.zeros(N)
     
@@ -108,7 +123,20 @@ def filter_static_tracks(
         filtered_query_points: Query points for filtered tracks [N_filtered, 4] (if provided)
         stats: Dictionary with filtering statistics
     """
+    # Ensure tracks is [T, N, 3]
+    if tracks.ndim == 4:
+        assert tracks.shape[0] == 1, "Multiple cameras not supported"
+        tracks = tracks[0]
+    
     T, N, D = tracks.shape
+    
+    # Ensure visibilities is [T, N]
+    if visibilities is not None:
+        if visibilities.ndim == 3:
+            assert visibilities.shape[0] == 1, "Multiple cameras not supported"
+            visibilities = visibilities[0]
+        if visibilities.dtype != bool:
+            visibilities = visibilities > 0.5
     
     # Calculate motion for each track
     motion = calculate_track_motion(tracks, visibilities, method=motion_method)
@@ -132,19 +160,19 @@ def filter_static_tracks(
     
     # Compute statistics
     stats = {
-        "n_original": N,
-        "n_moving": n_moving,
-        "n_static": N - n_moving,
-        "fraction_moving": n_moving / N if N > 0 else 0.0,
-        "motion_threshold": motion_threshold,
+        "n_original": int(N),
+        "n_moving": int(n_moving),
+        "n_static": int(N - n_moving),
+        "fraction_moving": float(n_moving / N) if N > 0 else 0.0,
+        "motion_threshold": float(motion_threshold),
         "motion_method": motion_method,
-        "motion_min": motion.min(),
-        "motion_max": motion.max(),
-        "motion_mean": motion.mean(),
-        "motion_median": np.median(motion),
-        "motion_moving_min": motion[moving_mask].min() if n_moving > 0 else 0.0,
-        "motion_moving_mean": motion[moving_mask].mean() if n_moving > 0 else 0.0,
-        "motion_static_max": motion[~moving_mask].max() if (N - n_moving) > 0 else 0.0,
+        "motion_min": float(motion.min()),
+        "motion_max": float(motion.max()),
+        "motion_mean": float(motion.mean()),
+        "motion_median": float(np.median(motion)),
+        "motion_moving_min": float(motion[moving_mask].min()) if n_moving > 0 else 0.0,
+        "motion_moving_mean": float(motion[moving_mask].mean()) if n_moving > 0 else 0.0,
+        "motion_static_max": float(motion[~moving_mask].max()) if (N - n_moving) > 0 else 0.0,
     }
     
     return filtered_tracks, filtered_visibilities, filtered_query_points, stats
@@ -170,7 +198,19 @@ def align_tracks_to_points(
         aligned_query_points: Query points for valid tracks [N_valid, 4]
         stats: Dictionary with alignment statistics
     """
+    # Ensure tracks is [T, N, 3]
+    if tracks.ndim == 4:
+        assert tracks.shape[0] == 1, "Multiple cameras not supported"
+        tracks = tracks[0]
+    
     T, N, D = tracks.shape
+    
+    # Ensure visibilities is [T, N] and boolean
+    if visibilities.ndim == 3:
+        assert visibilities.shape[0] == 1, "Multiple cameras not supported"
+        visibilities = visibilities[0]
+    if visibilities.dtype != bool:
+        visibilities = visibilities > 0.5
     
     # Check which tracks have at least one visible point
     has_visible_points = visibilities.any(axis=0)  # [N]
@@ -184,13 +224,13 @@ def align_tracks_to_points(
     # Compute statistics
     visibility_counts = visibilities.sum(axis=0)  # [N]
     stats = {
-        "n_original": N,
-        "n_valid": n_valid,
-        "n_invalid": N - n_valid,
-        "fraction_valid": n_valid / N if N > 0 else 0.0,
-        "visibility_min": visibility_counts[has_visible_points].min() if n_valid > 0 else 0,
-        "visibility_max": visibility_counts[has_visible_points].max() if n_valid > 0 else 0,
-        "visibility_mean": visibility_counts[has_visible_points].mean() if n_valid > 0 else 0.0,
+        "n_original": int(N),
+        "n_valid": int(n_valid),
+        "n_invalid": int(N - n_valid),
+        "fraction_valid": float(n_valid / N) if N > 0 else 0.0,
+        "visibility_min": int(visibility_counts[has_visible_points].min()) if n_valid > 0 else 0,
+        "visibility_max": int(visibility_counts[has_visible_points].max()) if n_valid > 0 else 0,
+        "visibility_mean": float(visibility_counts[has_visible_points].mean()) if n_valid > 0 else 0.0,
     }
     
     return aligned_tracks, aligned_visibilities, aligned_query_points, stats
@@ -211,8 +251,8 @@ def refine_tracks(
     2. Filter static tracks based on motion threshold
     
     Args:
-        tracks: Track trajectories [T, N, 3]
-        visibilities: Track visibility mask [T, N] (optional)
+        tracks: Track trajectories [T, N, 3] or [C, T, N, 3]
+        visibilities: Track visibility mask [T, N] or [C, T, N] (optional)
         query_points: Query points [N, 4] where cols=[t, x, y, z] (optional)
         motion_threshold: Minimum motion to keep a track
         motion_method: Method to compute motion
@@ -225,12 +265,23 @@ def refine_tracks(
         refined_query_points: Query points for refined tracks [N_refined, 4] (if provided)
         stats: Dictionary with all refinement statistics
     """
+    # Normalize input shapes
+    if tracks.ndim == 4:
+        assert tracks.shape[0] == 1, "Multiple cameras not supported"
+        tracks = tracks[0]
+    
     T, N, D = tracks.shape
     
     if visibilities is None:
         visibilities = np.ones((T, N), dtype=bool)
+    else:
+        if visibilities.ndim == 3:
+            assert visibilities.shape[0] == 1, "Multiple cameras not supported"
+            visibilities = visibilities[0]
+        if visibilities.dtype != bool:
+            visibilities = visibilities > 0.5
     
-    all_stats = {"n_original": N}
+    all_stats = {"n_original": int(N)}
     
     # Step 1: Remove invalid tracks (no visible points)
     if remove_invalid:
@@ -256,8 +307,8 @@ def refine_tracks(
               f"mean={motion_stats['motion_mean']:.4f}, median={motion_stats['motion_median']:.4f}")
     
     # Final statistics
-    all_stats["n_refined"] = tracks.shape[1]
-    all_stats["total_reduction_factor"] = N / tracks.shape[1] if tracks.shape[1] > 0 else float('inf')
+    all_stats["n_refined"] = int(tracks.shape[1])
+    all_stats["total_reduction_factor"] = float(N / tracks.shape[1]) if tracks.shape[1] > 0 else float('inf')
     
     if verbose:
         print(f"[INFO] Total refinement: {N} -> {all_stats['n_refined']} tracks "
@@ -274,40 +325,51 @@ def compute_track_statistics(
     Compute comprehensive statistics about tracks.
     
     Args:
-        tracks: Track trajectories [T, N, 3]
-        visibilities: Track visibility mask [T, N]
+        tracks: Track trajectories [T, N, 3] or [C, T, N, 3]
+        visibilities: Track visibility mask [T, N] or [C, T, N]
     
     Returns:
         stats: Dictionary with track statistics
     """
+    # Normalize input shapes
+    if tracks.ndim == 4:
+        assert tracks.shape[0] == 1, "Multiple cameras not supported"
+        tracks = tracks[0]
+    
     T, N, D = tracks.shape
     
     if visibilities is None:
         visibilities = np.ones((T, N), dtype=bool)
+    else:
+        if visibilities.ndim == 3:
+            assert visibilities.shape[0] == 1, "Multiple cameras not supported"
+            visibilities = visibilities[0]
+        if visibilities.dtype != bool:
+            visibilities = visibilities > 0.5
     
     # Basic info
     stats = {
-        "n_frames": T,
-        "n_tracks": N,
-        "dimensionality": D,
+        "n_frames": int(T),
+        "n_tracks": int(N),
+        "dimensionality": int(D),
     }
     
     # Visibility statistics
     visibility_counts = visibilities.sum(axis=0)  # Visible frames per track
     stats.update({
-        "visibility_min": visibility_counts.min(),
-        "visibility_max": visibility_counts.max(),
-        "visibility_mean": visibility_counts.mean(),
-        "visibility_median": np.median(visibility_counts),
+        "visibility_min": int(visibility_counts.min()),
+        "visibility_max": int(visibility_counts.max()),
+        "visibility_mean": float(visibility_counts.mean()),
+        "visibility_median": float(np.median(visibility_counts)),
     })
     
     # Motion statistics (using total displacement)
     motion = calculate_track_motion(tracks, visibilities, method="total_displacement")
     stats.update({
-        "motion_total_disp_min": motion.min(),
-        "motion_total_disp_max": motion.max(),
-        "motion_total_disp_mean": motion.mean(),
-        "motion_total_disp_median": np.median(motion),
+        "motion_total_disp_min": float(motion.min()),
+        "motion_total_disp_max": float(motion.max()),
+        "motion_total_disp_mean": float(motion.mean()),
+        "motion_total_disp_median": float(np.median(motion)),
     })
     
     # Spatial extent
@@ -315,12 +377,12 @@ def compute_track_statistics(
     visible_tracks[~visibilities] = np.nan  # Mark invisible as NaN
     
     stats.update({
-        "spatial_extent_x": np.nanmax(tracks[:, :, 0]) - np.nanmin(tracks[:, :, 0]),
-        "spatial_extent_y": np.nanmax(tracks[:, :, 1]) - np.nanmin(tracks[:, :, 1]),
-        "spatial_extent_z": np.nanmax(tracks[:, :, 2]) - np.nanmin(tracks[:, :, 2]),
-        "center_x": np.nanmean(tracks[:, :, 0]),
-        "center_y": np.nanmean(tracks[:, :, 1]),
-        "center_z": np.nanmean(tracks[:, :, 2]),
+        "spatial_extent_x": float(np.nanmax(tracks[:, :, 0]) - np.nanmin(tracks[:, :, 0])),
+        "spatial_extent_y": float(np.nanmax(tracks[:, :, 1]) - np.nanmin(tracks[:, :, 1])),
+        "spatial_extent_z": float(np.nanmax(tracks[:, :, 2]) - np.nanmin(tracks[:, :, 2])),
+        "center_x": float(np.nanmean(tracks[:, :, 0])),
+        "center_y": float(np.nanmean(tracks[:, :, 1])),
+        "center_z": float(np.nanmean(tracks[:, :, 2])),
     })
     
     return stats
