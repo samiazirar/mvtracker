@@ -1,0 +1,29 @@
+{
+  "n_original": 343,
+  "alignment": {
+    "n_original": 343,
+    "n_valid": 343,
+    "n_invalid": 0,
+    "fraction_valid": 1.0,
+    "visibility_min": 22,
+    "visibility_max": 43,
+    "visibility_mean": 25.27405247813411
+  },
+  "motion_filtering": {
+    "n_original": 343,
+    "n_moving": 236,
+    "n_static": 107,
+    "fraction_moving": 0.6880466472303207,
+    "motion_threshold": 0.01,
+    "motion_method": "total_displacement",
+    "motion_min": 0.0022108741104602814,
+    "motion_max": 1.954117774963379,
+    "motion_mean": 0.02073681162556215,
+    "motion_median": 0.01245755422860384,
+    "motion_moving_min": 0.01001390814781189,
+    "motion_moving_mean": 0.02705467301341942,
+    "motion_static_max": 0.00983302854001522
+  },
+  "n_refined": 236,
+  "total_reduction_factor": 1.4533898305084745
+}

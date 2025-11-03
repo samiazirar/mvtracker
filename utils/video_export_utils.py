@@ -75,8 +75,8 @@ def project_tracks_to_camera(
     Args:
         tracks_3d: 3D track trajectories [T, N, 3]
         visibilities: Track visibility mask [T, N]
-        intrinsics: Camera intrinsics [3, 3]
-        extrinsics: Camera extrinsics [4, 4]
+        intrinsics: Camera intrinsics [3, 3] or [T, 3, 3]
+        extrinsics: Camera extrinsics [3, 4] or [4, 4] or [T, 3, 4] or [T, 4, 4]
         image_shape: Image dimensions (H, W)
     
     Returns:
@@ -86,8 +86,38 @@ def project_tracks_to_camera(
     T, N, _ = tracks_3d.shape
     H, W = image_shape
     
-    # Project all points
-    tracks_2d, depths = project_3d_to_2d(tracks_3d, intrinsics, extrinsics)
+    # Handle temporal dimension in intrinsics/extrinsics
+    has_temporal = intrinsics.ndim == 3
+    
+    if has_temporal:
+        # Process frame by frame
+        tracks_2d = np.zeros((T, N, 2), dtype=np.float32)
+        depths = np.zeros((T, N), dtype=np.float32)
+        
+        for t in range(T):
+            K = intrinsics[t]  # [3, 3]
+            E = extrinsics[t]  # [3, 4] or [4, 4]
+            
+            # Ensure extrinsics is [4, 4]
+            if E.shape == (3, 4):
+                E_4x4 = np.eye(4)
+                E_4x4[:3, :] = E
+                E = E_4x4
+            
+            tracks_2d[t], depths[t] = project_3d_to_2d(tracks_3d[t], K, E)
+    else:
+        # Single intrinsics/extrinsics for all frames
+        K = intrinsics  # [3, 3]
+        E = extrinsics  # [3, 4] or [4, 4]
+        
+        # Ensure extrinsics is [4, 4]
+        if E.shape == (3, 4):
+            E_4x4 = np.eye(4)
+            E_4x4[:3, :] = E
+            E = E_4x4
+        
+        # Project all points
+        tracks_2d, depths = project_3d_to_2d(tracks_3d, K, E)
     
     # Update visibility: must be visible, in front of camera, and in frame
     in_front = depths > 0
@@ -324,8 +354,8 @@ def export_tracks_to_videos_per_camera(
         rgbs: RGB frames [V, T, 3, H, W] (float32 in [0, 1] or uint8)
         tracks_3d: 3D track trajectories [T, N, 3]
         visibilities: Track visibility [T, N]
-        intrinsics: Camera intrinsics [V, 3, 3]
-        extrinsics: Camera extrinsics [V, 4, 4]
+        intrinsics: Camera intrinsics [V, T, 3, 3] or [V, 3, 3]
+        extrinsics: Camera extrinsics [V, T, 3, 4] or [V, 3, 4]
         camera_ids: Camera identifiers (optional)
         query_points: Query points [N, 4] where cols=[t, x, y, z] (optional)
         fps: Frames per second
