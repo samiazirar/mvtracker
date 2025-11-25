@@ -49,9 +49,9 @@ RUN git config --system url."ssh://git@github.com/".insteadOf https://github.com
 # Pre-populate GitHub host key to avoid prompts in fresh containers
 RUN mkdir -p /etc/ssh && ssh-keyscan -t rsa,ecdsa,ed25519 github.com >> /etc/ssh/ssh_known_hosts 2>/dev/null || true
 
-
+COPY requirements.txt /tmp/
 # Copy requirements (if you have them) and install
-COPY requirements.txt requirements.full.txt /tmp/
+# COPY requirements.txt requirements.full.txt /tmp/
 # RUN pip install -r /tmp/requirements.full.txt && rm /tmp/requirements.txt /tmp/requirements.full.txt
 
 # --- Git/SSH quality-of-life (kept minimal; relies on agent forwarding or mounted ~/.ssh) ---

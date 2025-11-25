@@ -114,3 +114,9 @@ detectron2/*
 conversions/behave_converted
 conversions/behave_converted/
 conversions/behave_converted/*
+
+point_clouds
+point_clouds/
+point_clouds/*
+
+conversions/droid/debug/CalibrationExample.ipynb

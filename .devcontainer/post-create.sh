@@ -84,12 +84,16 @@ git config --global credential.helper store || true
 echo "Post-create setup completed successfully!"
 unset TORCH_CUDA_ARCH_LIST
 #clone if does not exist
-if [ ! -d "pytorch3d" ]; then
+
+if [ ! -d "/workspace/third_party/pytorch3d" ]; then
     echo "Cloning PyTorch3D repository..."
+    cd /workspace/third_party
     git clone https://github.com/facebookresearch/pytorch3d.git
 fi
 # PyTorch3D's setup.py imports torch, so disable build isolation so torch from the main env is available
-pip install --no-build-isolation -e ./pytorch3d
+cd /workspace/third_party/pytorch3d
+pip install --no-build-isolation -e .
+cd /workspace/
 # echo "if errors invoke unset TORCH_CUDA_ARCH_LIST"
 
 apt-get update
@@ -102,7 +106,8 @@ pip install -v --no-build-isolation \
 
 pip install trimesh
 
-if [ ! -d "spatialtrackerv2" ]; then
+if [ ! -d "/workspace/third_party/spatialtrackerv2" ]; then
+    cd /workspace/third_party
     echo "Cloning SpaTrackerV2 repository..."
     git clone https://github.com/henry123-boy/SpaTrackerV2.git spatialtrackerv2
     cd spatialtrackerv2
@@ -120,18 +125,19 @@ pip install pyceres==2.4
 pip install jaxtyping
 pip install decord
 # Update the threshold for weighted_procrustes_torch from 1e-3 to 5e-3
-cd spatialtrackerv2
+cd /workspace/third_party/spatialtrackerv2
 sed -i 's/(torch.det(R) - 1).abs().max() < 1e-3/(torch.det(R) - 1).abs().max() < 5e-3/' ./models/SpaTrackV2/models/tracker3D/spatrack_modules/utils.py
 
 # Verify the change: this should print a line with 5e-3
 cat ./models/SpaTrackV2/models/tracker3D/spatrack_modules/utils.py | grep "(torch.det(R) - 1).abs().max()"
-cd ..
+cd /workspace/
 
 echo "Installing HaMeR Hand tracking..."
 HAMER_DIR="/workspace/third_party/hamer"
 if [ ! -d "$HAMER_DIR" ]; then
     mkdir -p /workspace/third_party
     echo "Cloning HaMER repository..."
+    cd /workspace/third_party
     git clone --recursive https://github.com/geopavlakos/hamer.git
     cd $HAMER_DIR
     bash fetch_demo_data.sh
@@ -145,6 +151,13 @@ fi
 #pip install --upgrade --no-cache-dir --force-reinstall scikit-image
 
 cd $HAMER_DIR
+#create a virtual environment and install hamer if not already done
+if [ ! -d ".hamer" ]; then
+    echo "Creating HaMeR virtual environment..."
+    python -m venv .hamer
+else
+    echo "HaMeR virtual environment already exists, skipping creation."
+fi
 source .hamer/bin/activate
 unset TORCH_CUDA_ARCH_LIST
 export TORCH_CUDA_ARCH_LIST="8.0 8.6 8.9 9.0"
@@ -168,7 +181,8 @@ export PYOPENGL_PLATFORM=osmesa
 # pip install mmpose mmengine mmdet
 # pip install "mmcv>=2.0.0rc4,<=3.0.0"
 echo "installing Sam2 inside HaMeR..."
-pip install -e ../sam2
+pip install -e ../sam2 
+#change --config-settings editable_mode=compat if annoys just skipping if already installed
 echo "deactivating HaMeR virtual environment..."
 deactivate
 cd ../..
@@ -182,7 +196,7 @@ HOIST_DIR="/workspace/third_party/HOISTFormer"
 if [ ! -d "$HOIST_DIR" ]; then
     mkdir -p /workspace/third_party
     echo "Cloning HOISTFormer repository..."
-    git clone https://github.com/SupreethN/HOISTFormer.git
+    git clone https://github.com/SupreethN/HOISTFormer.git "$HOIST_DIR"
 fi 
 
 
@@ -325,6 +339,30 @@ echo "Grounding DINO installation completed."
 pip install yourdfpy --no-build-isolation
 
 echo "Almost ready just installing some stuff for convinience"
-apt install rsync
+apt install -y rsync
+
+if [ ! -d "/workspace/third_party/robotiq_arg85_description" ]; then
+    echo "loading the model for the gripper..."
+    cd /workspace/third_party
+    git clone https://github.com/a-price/robotiq_arg85_description.git 
+fi
+
+if [ ! -d "/workspace/third_party/CtRNet-X" ]; then
+    echo "Cloning CtRNet-X repository..."
+    cd /workspace/third_party
+    git clone https://github.com/darthandvader/CtRNet-X.git
+fi
+
+if [ ! -d "/workspace/third_party/robosuite" ]; then
+    echo "Cloning robosuite repository..."
+    cd /workspace/third_party
+    git clone https://github.com/ARISE-Initiative/robosuite.git
+fi
+
+if [ ! -d "/workspace/third_party/droid_policy_learning" ]; then
+    echo "Cloning droid_policy_learning repository..."
+    cd /workspace/third_party
+    git clone https://github.com/droid-dataset/droid_policy_learning.git
+fi
 
 echo "Setup complete!"
