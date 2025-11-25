@@ -1,4 +1,5 @@
 - [ ] Fit the urd grippper model on the robot
+- [ ] make transformations with pytransform3d not rerun
 - [ ] Align gripper and wrist camera and CtRNet-X callibration for optimal alignment
 - [ ] Fuse point cloud and improve with cleaning and plane-to-plane ICP
 - [ ] Mask the robot with CtRNet-X Framework, test if it is alignet etc.
