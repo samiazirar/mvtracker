@@ -30,6 +30,6 @@ librosa
 pynput
 scipy
 Pillow
-
-
-
+pybullet
+gdown
+h5py

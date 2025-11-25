@@ -1,53 +1,8 @@
-- [x] make 2D hand and object tracking -> add also vlm pipeline for data (einfach wo hand am nächsten ist) - visualize hand - erstmal alle masken tracken
-- [x] Fix the 2D to 3D lifting 
-- [ ] VGGT Tracking
-- [x] SAM STEP WEGLASSEN OBJECT TRACKCKEN FERTIG
-- [ ] Change the .npz format to use real jpeg images -> maybe because less frames it is the quality limitation? -> why only SAM 66/111 frames check if rgb is to cut - frames selected? - are tracked points also close to the hand or gripper? 
-- [x] Lift hand tracking to 3D
-- [ ] Lift Tracks to the rgb videos
- 
-- [ ] Jan sein Workstation einstellen! Team viewer drauf - workstation: elm.informatik.uni-bonn.de
+- [ ] Fit the urd grippper model on the robot
+- [ ] Align gripper and wrist camera and CtRNet-X callibration for optimal alignment
+- [ ] Fuse point cloud and improve with cleaning and plane-to-plane ICP
+- [ ] Mask the robot with CtRNet-X Framework, test if it is alignet etc.
 
+- [ ] Track with SpaTrackV2 and MVTracker the object in 3D
 
-- [ ] get the contact flow (can also be rigid square first)
-
-- [ ] ! track the objects in 3D -> maybe use the rigid object 3D model/ Make depth completion only in small part -> get workspace paert and remove background
-- [ ] Use the visualizer?
-- [ ] maybe video depth estimation works better?
-- [ ] Or get the depth from spatracker..
-- [ ] Use colmap to reject bad points
-- [ ]  then use hand tracking to select  and crop relvant region, and complete depth for best view 
-- [ ] segment the objects and track them (remove sam tracking)
-- [ ] Finally settle for a good 2D/3D flow -> hae multiview alignment as this is one of the main selling points
-- [ ] Keep background static
-- [x] Select best 4 cameras with COLMAP,
-- [x] enable hand tracking
-- [ ] Finalize large scale code to train somerthing like flow..
-- [ ] Fix robtot rendering being slower than the actual code, fix the tcp etc stuff maybe go old commit
-- [ ] Try low red data without reprojecting
-- [x] Update the date for lab course
--  [ ] for grasping - data generation for side grasps? 
-- [ ] Use Code from Visualizer
--  [x] Check if someone has the same camera as we and check then Intel Realsense d435i and d405
-- add the robot and work with low res data
-- all untouched by robot remains static for better colorization and grer to
-add more points to the object modified and make it retain if on it gripper for contact flow
-- [ ] Source gripper meshes per robot config and integrate: WSG-50 (ipa320/schunk_modular_robotics), Robotiq 2F-85 (ros-industrial/robotiq_85_description), DH Robotics AG-95 (vendor CAD/dh_gripper_ros). Update RH20T/models URDFs or load meshes alongside robot_pcd. Leave README note with download paths/licenses.
-- remove the gripper and just track
-
-- color clustrering 
-- dbscan für gripper points
-- remove the gripper along and keep the object points
-- enable batch query
-
-- write explainer of project with phd stud from zorah
-- write MT Proposal
-
-- if the ws code dev remote is not wrking over usb iphone disable dynamic forwarding
-
-TODO: Apply a mask on the gripper 
-Force the tracked points to be inside the gripper
-Do the same for the objects
-SOmehow make objects remain consistent
-FIX COTRACKER AND MVTRACKER
--> maybe use the dense low resution stuff first
+- [ ] Create 3D object model on the fly wiht Sam3D and track the intersection between the object and the gripper w/o tracking
