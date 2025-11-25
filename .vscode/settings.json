@@ -1,0 +1,7 @@
+{
+    "geminicodeassist.agentYoloMode": true,
+    "geminicodeassist.contextExclusionGitignore": false,
+    "geminicodeassist.contextExclusionFile": "",
+    "geminicodeassist.agentDebugMode": true,
+    "geminicodeassist.inlineSuggestions.nextEditPredictions": true
+}
