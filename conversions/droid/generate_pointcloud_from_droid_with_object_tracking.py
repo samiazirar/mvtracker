@@ -7,9 +7,17 @@ import h5py
 import trimesh
 from scipy.spatial.transform import Rotation as R
 import rerun as rr
+from PIL import Image
+import torch
+from torchvision.ops import box_convert
 
 # ZED SDK
 import pyzed.sl as sl
+
+# Grounding DINO
+sys.path.append("/workspace/third_party/groundingdino-cu128")
+from groundingdino.util.inference import load_model, predict
+import groundingdino.datasets.transforms as T
 
 # =============================================================================
 # CONFIGURATION
@@ -34,6 +42,13 @@ CONFIG = {
     "radii_size": 0.001,    # Point size in meters
     "gripper_rot": [0, 0, np.pi/2], # Fixed rotation offset for gripper visualization
     "gripper_wrist_offset": [0, 0, 0.014], # Meters (in the frame of the end effector)
+
+    # Object Detection
+    "object_prompt": "drill",
+    "box_threshold": 0.35,
+    "text_threshold": 0.25,
+    "gdino_config": "/workspace/third_party/groundingdino-cu128/groundingdino/config/GroundingDINO_SwinT_OGC.py",
+    "gdino_weights": "/workspace/weights/groundingdino_swint_ogc.pth",
 }
 
 # =============================================================================
@@ -118,6 +133,60 @@ def get_filtered_cloud(zed, runtime, stride=4, max_depth=2.0, min_depth=0.1):
     valid_mask = np.isfinite(xyz).all(axis=1) & (z_vals > min_depth) & (z_vals < max_depth)
     
     return xyz[valid_mask], rgb[valid_mask]
+
+# =============================================================================
+# OBJECT DETECTOR
+# =============================================================================
+
+class ObjectDetector:
+    def __init__(self, config_path, checkpoint_path, device="cuda"):
+        self.device = device
+        if not os.path.exists(checkpoint_path):
+            print(f"[INFO] Downloading GroundingDINO weights to {checkpoint_path}...")
+            os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
+            url = "https://github.com/IDEA-Research/GroundingDINO/releases/download/v0.1.0-alpha/groundingdino_swint_ogc.pth"
+            os.system(f"wget {url} -O {checkpoint_path}")
+        
+        self.model = load_model(config_path, checkpoint_path, device=device)
+
+    def detect(self, image_numpy, prompt, box_threshold=0.35, text_threshold=0.25):
+        # image_numpy: (H, W, 3) RGB
+        transform = T.Compose([
+            T.RandomResize([800], max_size=1333),
+            T.ToTensor(),
+            T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+        ])
+        
+        image_pil = Image.fromarray(image_numpy)
+        image_tensor, _ = transform(image_pil, None)
+        
+        boxes, logits, phrases = predict(
+            self.model,
+            image_tensor,
+            prompt,
+            box_threshold,
+            text_threshold,
+            device=self.device
+        )
+        return boxes
+
+def boxes_to_mask(boxes, H, W):
+    mask = np.zeros((H, W), dtype=bool)
+    if boxes.shape[0] == 0:
+        return mask
+        
+    # Convert to xyxy pixel coords
+    boxes_xyxy = boxes * torch.Tensor([W, H, W, H])
+    boxes_xyxy = box_convert(boxes=boxes_xyxy, in_fmt="cxcywh", out_fmt="xyxy").numpy()
+    
+    for box in boxes_xyxy:
+        x1, y1, x2, y2 = box.astype(int)
+        x1 = max(0, x1)
+        y1 = max(0, y1)
+        x2 = min(W, x2)
+        y2 = min(H, y2)
+        mask[y1:y2, x1:x2] = True
+    return mask
 
 # =============================================================================
 # GRIPPER VISUALIZER
@@ -275,6 +344,9 @@ def main():
     gripper_viz = GripperVisualizer()
     gripper_viz.init_rerun()
 
+    # Init Object Detector
+    detector = ObjectDetector(CONFIG['gdino_config'], CONFIG['gdino_weights'])
+
     # --- 2. Calculate Wrist Transforms ---
     wrist_cam_transforms = []
     wrist_serial = None
@@ -416,9 +488,40 @@ def main():
 
             # -- EXTERNAL CAMERA LOGIC --
             else:
-                # 1. Get Local Points
-                xyz, rgb = get_filtered_cloud(zed, cam['runtime'], CONFIG['stride'], CONFIG['ext_max_depth'], CONFIG['min_depth'])
-                if xyz is None: continue
+                # 1. Get Image & Cloud Data
+                mat_image = sl.Mat()
+                zed.retrieve_image(mat_image, sl.VIEW.LEFT)
+                image_data = mat_image.get_data() # (H, W, 4)
+                rgb_full = image_data[:, :, :3] # RGB
+                
+                # Detect Object
+                boxes = detector.detect(rgb_full, CONFIG['object_prompt'], CONFIG['box_threshold'], CONFIG['text_threshold'])
+                obj_mask = boxes_to_mask(boxes, rgb_full.shape[0], rgb_full.shape[1])
+                
+                # Get Cloud
+                mat_cloud = sl.Mat()
+                err = zed.retrieve_measure(mat_cloud, sl.MEASURE.XYZRGBA)
+                if err != sl.ERROR_CODE.SUCCESS: continue
+                
+                # Subsample
+                stride = CONFIG['stride']
+                cloud_data = mat_cloud.get_data()[::stride, ::stride]
+                xyz_full = cloud_data[:, :, :3].reshape(-1, 3)
+                rgb_sub = image_data[::stride, ::stride, :3].reshape(-1, 3)
+                obj_mask_sub = obj_mask[::stride, ::stride].reshape(-1)
+                
+                # Filter Depth
+                z_vals = xyz_full[:, 2]
+                valid_depth = np.isfinite(xyz_full).all(axis=1) & (z_vals > CONFIG['min_depth']) & (z_vals < CONFIG['ext_max_depth'])
+                
+                # Scene Points (All valid depth points)
+                xyz_scene = xyz_full[valid_depth]
+                rgb_scene = rgb_sub[valid_depth]
+                
+                # Object Points (Valid depth AND inside mask)
+                valid_obj = valid_depth & obj_mask_sub
+                xyz_obj = xyz_full[valid_obj]
+                rgb_obj = rgb_sub[valid_obj]
 
                 # 2. Transform to World (External cams are static, so we just do the math once per frame)
                 T = cam['world_T_cam']
@@ -446,9 +549,15 @@ def main():
                 # 3. Log to World (as child of transform now)
                 rr.log(
                     f"world/external_cams/{serial}/points",
-                    rr.Points3D(xyz, colors=rgb, radii=CONFIG['radii_size']
+                    rr.Points3D(xyz_scene, colors=rgb_scene, radii=CONFIG['radii_size'])
                 )
-                )
+                
+                # 4. Log Object Points
+                if len(xyz_obj) > 0:
+                    rr.log(
+                        f"world/external_cams/{serial}/object_points",
+                        rr.Points3D(xyz_obj, colors=rgb_obj, radii=CONFIG['radii_size']*2)
+                    )
 
     # Cleanup
     for c in active_cams.values(): c['zed'].close()
