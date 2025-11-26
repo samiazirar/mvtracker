@@ -1,4 +1,5 @@
 - [ ] Fit the urd grippper model on the robot
+- [ ] Wrist cam relies on gripper -> fir the grippr in the external cameras and with the robot urdf and then fit the wrist cam based on the gripper and test if the other depths aligm mooe or less afterward (which is better the locaiton of the ee or the wrist cam) -> but wrist cam relies on gripper so gripper should be more accurate
 - [ ] make transformations with pytransform3d not rerun
 - [ ] Align gripper and wrist camera and CtRNet-X callibration for optimal alignment
 - [ ] Fuse point cloud and improve with cleaning and plane-to-plane ICP
@@ -6,4 +7,4 @@
 
 - [ ] Track with SpaTrackV2 and MVTracker the object in 3D
 
-- [ ] Create 3D object model on the fly wiht Sam3D and track the intersection between the object and the gripper w/o tracking
+- [ ] Create 3D object model on the fly wiht Sam3D and track the intersection between the object and the gripper w/o trackingconvention 
