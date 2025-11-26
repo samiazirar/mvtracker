@@ -16,7 +16,7 @@ from utils import (
     get_filtered_cloud,
     GripperVisualizer
 )
-
+#only for debugging
 
 def main():
     # Load configuration
