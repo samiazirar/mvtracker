@@ -122,3 +122,5 @@ point_clouds/*
 conversions/droid/debug/CalibrationExample.ipynb
 
 .env
+
+weights/groundingdino_swint_ogc.pth

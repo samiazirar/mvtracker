@@ -23,6 +23,7 @@ from .camera_utils import (
 )
 from .gripper_visualizer import GripperVisualizer
 from .object_detector import ObjectDetector, boxes_to_mask
+from .video_utils import VideoRecorder, project_points_to_image, draw_points_on_image
 
 __all__ = [
     # Basic transform utilities
@@ -47,4 +48,8 @@ __all__ = [
     'GripperVisualizer',
     'ObjectDetector',
     'boxes_to_mask',
+    # Video
+    'VideoRecorder',
+    'project_points_to_image',
+    'draw_points_on_image',
 ]
