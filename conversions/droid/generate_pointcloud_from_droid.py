@@ -10,6 +10,10 @@ import pyzed.sl as sl
 from utils import (
     pose6_to_T,
     rvec_tvec_to_matrix,
+    transform_points,
+    compute_wrist_cam_offset,
+    precompute_wrist_trajectory,
+    external_cam_to_world,
     find_svo_for_camera,
     find_episode_data_by_date,
     get_zed_intrinsics,
@@ -60,14 +64,11 @@ def main():
         wrist_pose_t0 = meta.get("wrist_cam_extrinsics")
 
         if wrist_pose_t0:
-            T_base_cam0 = pose6_to_T(wrist_pose_t0)
-            T_base_ee0 = pose6_to_T(cartesian_positions[0])
-            # Constant offset: EE -> Camera
-            T_ee_cam = np.linalg.inv(T_base_ee0) @ T_base_cam0
-
-            for t in range(num_frames):
-                T_base_ee_t = pose6_to_T(cartesian_positions[t])
-                wrist_cam_transforms.append(T_base_ee_t @ T_ee_cam)
+            # Calculate constant offset
+            T_ee_cam = compute_wrist_cam_offset(wrist_pose_t0, cartesian_positions[0])
+            
+            # Precompute all wrist camera poses
+            wrist_cam_transforms = precompute_wrist_trajectory(cartesian_positions, T_ee_cam)
     
     # --- 3. Init Cameras ---
     cameras = {} # Holds all cameras (Ext + Wrist)
@@ -82,7 +83,7 @@ def main():
                 cameras[cam_id] = {
                     "type": "external",
                     "svo": svo,
-                    "world_T_cam": rvec_tvec_to_matrix(transform_list)
+                    "world_T_cam": external_cam_to_world(transform_list)
                 }
 
     # B. Wrist Camera
@@ -166,11 +167,13 @@ def main():
                 xyz, rgb = get_filtered_cloud(zed, cam['runtime'], CONFIG['wrist_max_depth'], CONFIG['min_depth_wrist'])
                 if xyz is None: continue
 
-                # 3. Log Points as CHILD of wrist_cam
+                # 3. Transform Points to World
+                xyz_world = transform_points(xyz, T_wrist)
+
+                # 4. Log Points (in World Frame)
                 rr.log(
-                    "world/wrist_cam/points",
-                    rr.Points3D(xyz, colors=rgb, radii=CONFIG['radii_size']
-                )
+                    "world/points/wrist_cam",
+                    rr.Points3D(xyz_world, colors=rgb, radii=CONFIG['radii_size'])
                 )
 
             # -- EXTERNAL CAMERA LOGIC --
@@ -202,11 +205,13 @@ def main():
                     )
                 )
 
-                # 3. Log to World (as child of transform now)
+                # 3. Transform Points to World
+                xyz_world = transform_points(xyz, T)
+
+                # 4. Log Points (in World Frame)
                 rr.log(
-                    f"world/external_cams/{serial}/points",
-                    rr.Points3D(xyz, colors=rgb, radii=CONFIG['radii_size']
-                )
+                    f"world/points/external_cams/{serial}",
+                    rr.Points3D(xyz_world, colors=rgb, radii=CONFIG['radii_size'])
                 )
 
     # Cleanup

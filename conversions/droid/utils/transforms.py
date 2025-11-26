@@ -103,3 +103,100 @@ def invert_transform(transform_matrix):
         4x4 numpy array representing the inverted transformation
     """
     return pt.invert_transform(transform_matrix)
+
+
+# =============================================================================
+# DROID Specific Transform Logic
+# =============================================================================
+
+def compute_wrist_cam_offset(wrist_pose_t0, cartesian_position_t0):
+    """
+    Calculate the constant offset from End-Effector to Wrist Camera.
+    
+    Args:
+        wrist_pose_t0: 6-element array [x,y,z,r,p,y] of wrist camera at t=0
+        cartesian_position_t0: 6-element array [x,y,z,r,p,y] of EE at t=0
+        
+    Returns:
+        4x4 numpy array representing T_ee_cam
+    """
+    T_base_cam0 = pose6_to_T(wrist_pose_t0)
+    T_base_ee0 = pose6_to_T(cartesian_position_t0)
+    # T_ee_cam = inv(T_base_ee0) @ T_base_cam0
+    return np.linalg.inv(T_base_ee0) @ T_base_cam0
+
+
+def wrist_cam_to_world(cartesian_position_t, T_ee_cam):
+    """
+    Calculate Wrist Camera pose in World frame at time t.
+    
+    Args:
+        cartesian_position_t: 6-element array [x,y,z,r,p,y] of EE at time t
+        T_ee_cam: 4x4 offset matrix (EE -> Camera)
+        
+    Returns:
+        4x4 numpy array representing T_world_cam
+    """
+    T_base_ee_t = pose6_to_T(cartesian_position_t)
+    return T_base_ee_t @ T_ee_cam
+
+
+def wrist_points_to_world(points, cartesian_position_t, T_ee_cam):
+    """
+    Transform points from Wrist Camera frame to World frame.
+    
+    Args:
+        points: Nx3 numpy array of points in camera frame
+        cartesian_position_t: 6-element array of EE pose
+        T_ee_cam: 4x4 offset matrix
+        
+    Returns:
+        Nx3 numpy array of points in world frame
+    """
+    T_world_cam = wrist_cam_to_world(cartesian_position_t, T_ee_cam)
+    return transform_points(points, T_world_cam)
+
+
+def external_cam_to_world(transform_list):
+    """
+    Calculate External Camera pose in World frame.
+    
+    Args:
+        transform_list: 6-element array [tx,ty,tz,rx,ry,rz]
+        
+    Returns:
+        4x4 numpy array representing T_world_cam
+    """
+    return rvec_tvec_to_matrix(transform_list)
+
+
+def external_points_to_world(points, transform_list):
+    """
+    Transform points from External Camera frame to World frame.
+    
+    Args:
+        points: Nx3 numpy array of points in camera frame
+        transform_list: 6-element array defining camera pose
+        
+    Returns:
+        Nx3 numpy array of points in world frame
+    """
+    T_world_cam = external_cam_to_world(transform_list)
+    return transform_points(points, T_world_cam)
+
+
+def precompute_wrist_trajectory(cartesian_positions, T_ee_cam):
+    """
+    Precompute wrist camera poses for the entire trajectory.
+    
+    Args:
+        cartesian_positions: Nx6 array of EE poses
+        T_ee_cam: 4x4 offset matrix
+        
+    Returns:
+        List of 4x4 numpy arrays representing T_world_cam for each frame
+    """
+    transforms = []
+    for pos in cartesian_positions:
+        transforms.append(wrist_cam_to_world(pos, T_ee_cam))
+    return transforms
