@@ -120,3 +120,5 @@ point_clouds/
 point_clouds/*
 
 conversions/droid/debug/CalibrationExample.ipynb
+
+.env
