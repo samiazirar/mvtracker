@@ -7,7 +7,7 @@ recordings_dir: "/data/droid/data/droid_raw/1.0.1/ILIAD/success/2023-06-11/Sun_J
 metadata_path: null  # Auto-discover if null
 
 # Output paths
-rrd_output_path: "point_clouds/droid_full_fusion_gripper_new_tf.rrd"
+rrd_output_path: "point_clouds/droid_full_fusion_gripper.rrd"
 rrd_output_path_with_mask: "point_clouds/droid_full_fusion_gripper_with_mask.rrd"
 
 # Depth filtering parameters

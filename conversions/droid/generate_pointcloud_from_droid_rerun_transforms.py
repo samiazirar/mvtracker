@@ -25,7 +25,9 @@ def main():
     
     print("=== DROID Full Fusion (Wrist + External) ===")
     rr.init("droid_full_fusion", spawn=True)
-    rr.save(CONFIG['rrd_output_path'])
+    save_path = CONFIG['rrd_output_path']
+    save_path_with_suffix = os.path.splitext(save_path)[0] + "_rerun_transform.rrd"
+    rr.save(save_path_with_suffix)
     
     # Define Up-Axis for the World (Z-up is standard for Robotics)
     rr.log("world", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
