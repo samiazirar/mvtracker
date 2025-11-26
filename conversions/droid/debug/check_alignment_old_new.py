@@ -23,14 +23,14 @@ def get_points_from_rrd(rrd_path, entity_path, timeline="frame_index"):
         )
         
         # Read all data into a pandas dataframe
-        # The columns will typically be named like '{entity_path}:Position3D'
+        # The columns will typically be named like '{entity_path}:Points3D:positions'
         df = view.select().read_pandas()
         
         # Find the column containing the 3D positions
-        # Column names vary slightly by version, usually ends in ':Position3D'
-        pos_col = [c for c in df.columns if "Position3D" in c]
+        # Look for either ':Position3D' or ':Points3D:positions'
+        pos_col = [c for c in df.columns if "Position3D" in c or ":positions" in c]
         if not pos_col:
-            print(f"[WARN] No Position3D data found for {entity_path} in {rrd_path}")
+            print(f"[WARN] No position data found for {entity_path} in {rrd_path}")
             print(f"       Available columns: {df.columns.tolist()}")
             return {}
         pos_col = pos_col[0]

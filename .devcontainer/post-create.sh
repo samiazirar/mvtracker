@@ -196,7 +196,7 @@ HOIST_DIR="/workspace/third_party/HOISTFormer"
 if [ ! -d "$HOIST_DIR" ]; then
     mkdir -p /workspace/third_party
     echo "Cloning HOISTFormer repository..."
-    git clone https://github.com/SupreethN/HOISTFormer.git "$HOIST_DIR"
+    git clone https://github.com/samiazirar/hoist_former "$HOIST_DIR"
 fi 
 
 
@@ -212,6 +212,15 @@ apt-get install -y --no-install-recommends \
   libgl1 libglib2.0-0
 
 pip install scipy opencv-python tqdm pyzed
+
+#TODO: Check if we should keep it lul
+echo "Patching CUDA extension for PyTorch 2.7 compatibility..."
+# Fix deprecated .type() calls in CUDA extension
+CUDA_FILE="Mask2Former/mask2former/modeling/pixel_decoder/ops/src/cuda/ms_deform_attn_cuda.cu"
+if [ -f "$CUDA_FILE" ]; then
+    sed -i 's/AT_DISPATCH_FLOATING_TYPES(value\.type()/AT_DISPATCH_FLOATING_TYPES(value.scalar_type()/g' "$CUDA_FILE"
+    echo "Patched $CUDA_FILE"
+fi
 
 echo "Running Installation script for HOISTFormer..."
 # ===== Create & activate venv (use `source` to activate) =====
@@ -365,4 +374,8 @@ if [ ! -d "/workspace/third_party/droid_policy_learning" ]; then
     git clone https://github.com/droid-dataset/droid_policy_learning.git
 fi
 
+echo "installing ffmpeg and libx264-dev for video encoding"
+
+apt update
+apt install ffmpeg libx264-dev -y
 echo "Setup complete!"

@@ -34,3 +34,8 @@ pybullet
 gdown
 h5py
 pytransform3d
+transformers
+supervision
+yapf
+pycocotools
+timm
