@@ -284,6 +284,10 @@ def main():
     # ====================================================
 
     # --- 4. Render Loop ---
+    # Reset cameras for Rerun logging
+    for cam in active_cams.values():
+        cam['zed'].set_svo_position(0)
+
     max_frames = CONFIG["max_frames"]
     print(f"[INFO] Processing {min(max_frames, num_frames)} frames...")
     
