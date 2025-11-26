@@ -7,8 +7,15 @@ class VideoRecorder:
     def __init__(self, output_dir, cam_serial, suffix, width, height, fps=15):
         self.filepath = os.path.join(output_dir, f"{cam_serial}_{suffix}.mp4")
         os.makedirs(output_dir, exist_ok=True)
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        self.writer = cv2.VideoWriter(self.filepath, fourcc, fps, (width, height))
+        # Try multiple codecs for better compatibility
+        for codec in ['mp4v', 'XVID', 'MJPG', 'avc1']:
+            fourcc = cv2.VideoWriter_fourcc(*codec)
+            self.writer = cv2.VideoWriter(self.filepath, fourcc, fps, (width, height))
+            if self.writer.isOpened():
+                print(f"[VIDEO] Using codec '{codec}' for {cam_serial}_{suffix}")
+                break
+        else:
+            raise RuntimeError(f"Failed to initialize VideoWriter for {self.filepath}. No compatible codec found.")
         
     def write_frame(self, image):
         self.writer.write(image)
