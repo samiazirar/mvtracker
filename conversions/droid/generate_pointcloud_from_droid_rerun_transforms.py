@@ -214,7 +214,7 @@ def main():
     # Cleanup
     for c in active_cams.values(): c['zed'].close()
     print("[SUCCESS] Done.")
-    print(f"[INFO] RRD saved to: {CONFIG['rrd_output_path']}")
+    print(f"[INFO] RRD saved to: {save_path_with_suffix}")
 
 
 if __name__ == "__main__":

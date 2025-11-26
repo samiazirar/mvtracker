@@ -180,6 +180,7 @@ def main():
     print("=== DROID Full Fusion (Wrist + External) ===")
     rr.init("droid_full_fusion", spawn=True)
     rrd_save_path = CONFIG['rrd_output_path']
+    rrd_save_path = rrd_save_path.replace(".rrd", "")
     rrd_save_path = f"{rrd_save_path}_full_fusion.rrd" 
     rr.save(rrd_save_path)
     
@@ -396,7 +397,7 @@ def main():
     # Cleanup
     for c in active_cams.values(): c['zed'].close()
     print("[SUCCESS] Done.")
-    print(f"[INFO] RRD saved to: {CONFIG['rrd_output_path']}")
+    print(f"[INFO] RRD saved to: {rrd_save_path}")
 
 
 if __name__ == "__main__":
