@@ -33,3 +33,4 @@ Pillow
 pybullet
 gdown
 h5py
+pytransform3d
