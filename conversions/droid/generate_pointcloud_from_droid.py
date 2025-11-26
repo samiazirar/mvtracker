@@ -3,6 +3,7 @@ import os
 import glob
 import h5py
 import yaml
+import cv2
 from scipy.spatial.transform import Rotation as R
 import rerun as rr
 import pyzed.sl as sl
@@ -18,9 +19,151 @@ from utils import (
     find_episode_data_by_date,
     get_zed_intrinsics,
     get_filtered_cloud,
-    GripperVisualizer
+    GripperVisualizer,
+    VideoRecorder,
+    project_points_to_image,
+    draw_points_on_image
 )
+from utils.optimization import optimize_external_cameras_multi_frame, optimize_wrist_multi_frame
 
+
+def capture_transforms(active_cams):
+    """Capture the current state of camera transforms."""
+    state = {}
+    for serial, data in active_cams.items():
+        entry = {"type": data["type"]}
+        if data["type"] == "external":
+            entry["world_T_cam"] = data["world_T_cam"].copy()
+        elif data["type"] == "wrist":
+            entry["transforms"] = [t.copy() for t in data["transforms"]]
+        state[serial] = entry
+    return state
+
+def generate_comparison_videos(active_cams, transforms_before, transforms_after, num_frames, config):
+    """
+    Generate MP4 videos for each camera showing reprojected point clouds
+    before and after ICP optimization.
+    """
+    print("\n[VIDEO] Generating comparison videos (Before vs After ICP)...")
+    video_dir = config.get('video_output_path', 'point_clouds/videos')
+    
+    # 1. Initialize Video Recorders
+    recorders = {}
+    for serial, cam in active_cams.items():
+        w, h = cam['w'], cam['h']
+        recorders[serial] = {
+            'before': VideoRecorder(video_dir, serial, "before_icp", w, h),
+            'after': VideoRecorder(video_dir, serial, "after_icp", w, h)
+        }
+
+    # 2. Processing Loop
+    # We need to iterate through frames, grab data, build world clouds, and project.
+    
+    # Reset all cameras to frame 0
+    for cam in active_cams.values():
+        cam['zed'].set_svo_position(0)
+
+    max_frames = min(num_frames, config.get('max_frames', 50))
+    
+    for i in range(max_frames):
+        if i % 10 == 0: print(f"  -> Processing Video Frame {i}/{max_frames}")
+        
+        # A. Grab Data for this frame
+        frame_data = {} # serial -> {image, points_local}
+        
+        for serial, cam in active_cams.items():
+            zed = cam['zed']
+            # Ensure synchronization (simple approach: set pos)
+            zed.set_svo_position(i)
+            if zed.grab(cam['runtime']) != sl.ERROR_CODE.SUCCESS:
+                continue
+                
+            # Get Image
+            mat_img = sl.Mat()
+            zed.retrieve_image(mat_img, sl.VIEW.LEFT)
+            img_bgra = mat_img.get_data()
+            img_bgr = cv2.cvtColor(img_bgra, cv2.COLOR_BGRA2BGR)
+            
+            # Get Points
+            xyz, _ = get_filtered_cloud(zed, cam['runtime'], 
+                                      config.get('ext_max_depth', 2.0) if cam['type'] == 'external' else config.get('wrist_max_depth', 0.75),
+                                      config.get('min_depth', 0.1))
+            
+            frame_data[serial] = {
+                'image': img_bgr,
+                'points': xyz
+            }
+
+        # B. Build World Clouds (Before & After)
+        cloud_before = []
+        cloud_after = []
+        
+        for serial, data in frame_data.items():
+            if data['points'] is None: continue
+            
+            # Get Transform Before
+            T_before = None
+            if transforms_before[serial]['type'] == 'external':
+                T_before = transforms_before[serial]['world_T_cam']
+            else: # wrist
+                if i < len(transforms_before[serial]['transforms']):
+                    T_before = transforms_before[serial]['transforms'][i]
+            
+            if T_before is not None:
+                cloud_before.append(transform_points(data['points'], T_before))
+                
+            # Get Transform After
+            T_after = None
+            if transforms_after[serial]['type'] == 'external':
+                T_after = transforms_after[serial]['world_T_cam']
+            else: # wrist
+                if i < len(transforms_after[serial]['transforms']):
+                    T_after = transforms_after[serial]['transforms'][i]
+            
+            if T_after is not None:
+                cloud_after.append(transform_points(data['points'], T_after))
+
+        # Stack clouds
+        pts_world_before = np.vstack(cloud_before) if cloud_before else np.empty((0, 3))
+        pts_world_after = np.vstack(cloud_after) if cloud_after else np.empty((0, 3))
+        
+        # C. Project and Write
+        for serial, cam in active_cams.items():
+            if serial not in frame_data: continue
+            
+            img = frame_data[serial]['image']
+            K = cam['K']
+            w, h = cam['w'], cam['h']
+            
+            # -- BEFORE --
+            T_cam_before = None
+            if transforms_before[serial]['type'] == 'external':
+                T_cam_before = transforms_before[serial]['world_T_cam']
+            elif i < len(transforms_before[serial]['transforms']):
+                T_cam_before = transforms_before[serial]['transforms'][i]
+                
+            if T_cam_before is not None:
+                uv = project_points_to_image(pts_world_before, K, T_cam_before, w, h)
+                img_out = draw_points_on_image(img, uv, color=(0, 0, 255)) # Red for before?
+                recorders[serial]['before'].write_frame(img_out)
+            
+            # -- AFTER --
+            T_cam_after = None
+            if transforms_after[serial]['type'] == 'external':
+                T_cam_after = transforms_after[serial]['world_T_cam']
+            elif i < len(transforms_after[serial]['transforms']):
+                T_cam_after = transforms_after[serial]['transforms'][i]
+                
+            if T_cam_after is not None:
+                uv = project_points_to_image(pts_world_after, K, T_cam_after, w, h)
+                img_out = draw_points_on_image(img, uv, color=(0, 255, 0)) # Green for after
+                recorders[serial]['after'].write_frame(img_out)
+
+    # 3. Cleanup
+    for recs in recorders.values():
+        recs['before'].close()
+        recs['after'].close()
+    print("[VIDEO] Done.")
 
 def main():
     # Load configuration
@@ -94,7 +237,8 @@ def main():
             cameras[wrist_serial] = {
                 "type": "wrist",
                 "svo": svo,
-                "transforms": wrist_cam_transforms # List of 4x4 matrices
+                "transforms": wrist_cam_transforms, # List of 4x4 matrices
+                "T_ee_cam": T_ee_cam
             }
         else:
             print(f"[WARN] Wrist SVO not found for serial {wrist_serial}")
@@ -116,6 +260,28 @@ def main():
             active_cams[serial] = data
         else:
             print(f"[ERROR] Failed to open {serial}")
+
+    # ====================================================
+    # [NEW] MULTI-FRAME OPTIMIZATION PIPELINE
+    # ====================================================
+    
+    # Capture BEFORE state
+    transforms_before = capture_transforms(active_cams)
+
+    # 1. Optimize External Cameras (using 20-frame accumulation)
+    optimize_external_cameras_multi_frame(active_cams, CONFIG)
+
+    # 2. Optimize Wrist Camera (using 5 different test angles)
+    if wrist_serial and wrist_serial in active_cams:
+        optimize_wrist_multi_frame(active_cams, cartesian_positions, CONFIG)
+    
+    # Capture AFTER state
+    transforms_after = capture_transforms(active_cams)
+
+    # Generate Comparison Videos
+    generate_comparison_videos(active_cams, transforms_before, transforms_after, num_frames, CONFIG)
+
+    # ====================================================
 
     # --- 4. Render Loop ---
     max_frames = CONFIG["max_frames"]
