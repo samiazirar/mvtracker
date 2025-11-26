@@ -1,6 +1,10 @@
 """Compares two Rerun .rrd files by extracting point clouds from a specified entity path,
 re-logging them for visual comparison, and computing Chamfer distance for quantitative analysis.
-Lower Chamfer distance indicates better alignment between the two point clouds."""
+Lower Chamfer distance indicates better alignment between the two point clouds.
+example usage:
+    python check_alignment_old_new.py path/to/old.rrd path/to/new.rrd --entity world/wrist_cam/points
+
+"""
 
 import rerun as rr
 import numpy as np
