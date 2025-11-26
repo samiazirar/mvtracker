@@ -1,14 +1,8 @@
-"""Compares two Rerun .rrd files by extracting point clouds from a specified entity path,
-re-logging them for visual comparison, and computing Chamfer distance for quantitative analysis.
-Lower Chamfer distance indicates better alignment between the two point clouds.
-example usage:
-    python check_alignment_old_new.py path/to/old.rrd path/to/new.rrd --entity world/wrist_cam/points
-
-"""
-
 import rerun as rr
 import numpy as np
 import argparse
+import sys
+import pandas as pd
 from scipy.spatial import cKDTree
 
 def get_points_from_rrd(rrd_path, entity_path, timeline="frame_index"):
@@ -16,45 +10,50 @@ def get_points_from_rrd(rrd_path, entity_path, timeline="frame_index"):
     Extracts point clouds from an .rrd file using the Dataframe API.
     Returns a dictionary: { frame_index: (N, 3) numpy array }
     """
-    print(f"Loading {rrd_path}...")
-    # Load the recording
-    recording = rr.dataframe.load_recording(rrd_path)
-    
-    # Create a view for the specific entity
-    # We filter for the specific entity path provided
-    view = recording.view(
-        index=timeline,
-        contents=entity_path
-    )
-    
-    # Read all data into a pandas dataframe
-    # The columns will typically be named like '{entity_path}:Position3D'
-    df = view.select().read_pandas()
-    
-    # Find the column containing the 3D positions
-    # Column names vary slightly by version, usually ends in ':Position3D'
-    pos_col = [c for c in df.columns if "Position3D" in c]
-    if not pos_col:
-        print(f"Warning: No Position3D data found for {entity_path} in {rrd_path}")
-        return {}
-    pos_col = pos_col[0]
+    print(f"[INFO] Loading {rrd_path}...")
+    try:
+        # Load the recording
+        recording = rr.dataframe.load_recording(rrd_path)
+        
+        # Create a view for the specific entity
+        # 'contents' is strictly required as a keyword argument in newer Rerun versions
+        view = recording.view(
+            index=timeline,
+            contents=entity_path
+        )
+        
+        # Read all data into a pandas dataframe
+        # The columns will typically be named like '{entity_path}:Position3D'
+        df = view.select().read_pandas()
+        
+        # Find the column containing the 3D positions
+        # Column names vary slightly by version, usually ends in ':Position3D'
+        pos_col = [c for c in df.columns if "Position3D" in c]
+        if not pos_col:
+            print(f"[WARN] No Position3D data found for {entity_path} in {rrd_path}")
+            print(f"       Available columns: {df.columns.tolist()}")
+            return {}
+        pos_col = pos_col[0]
 
-    # Extract data
-    points_by_frame = {}
-    for index, row in df.iterrows():
-        # The dataframe index is the timeline (frame_index)
-        frame = int(index)
-        
-        # Positions are stored as arrays/lists in the cell
-        # Some versions return None for empty frames, check validity
-        raw_points = row[pos_col]
-        
-        if isinstance(raw_points, (np.ndarray, list)) and len(raw_points) > 0:
-            # Flatten/reshape if necessary depending on how pyarrow returns it
-            points = np.vstack(raw_points)
-            points_by_frame[frame] = points
+        # Extract data
+        points_by_frame = {}
+        for index, row in df.iterrows():
+            # The dataframe index is the timeline (frame_index)
+            frame = int(index)
             
-    return points_by_frame
+            # Positions are stored as arrays/lists in the cell
+            raw_points = row[pos_col]
+            
+            if isinstance(raw_points, (np.ndarray, list)) and len(raw_points) > 0:
+                # Flatten/reshape if necessary depending on how pyarrow returns it
+                points = np.vstack(raw_points)
+                points_by_frame[frame] = points
+                
+        return points_by_frame
+        
+    except Exception as e:
+        print(f"[ERROR] Failed to read {rrd_path}: {e}")
+        return {}
 
 def compute_chamfer_distance(pts_a, pts_b):
     """
@@ -80,17 +79,22 @@ def main():
     parser.add_argument("old_rrd", help="Path to the original (old) .rrd file")
     parser.add_argument("new_rrd", help="Path to the new .rrd file")
     parser.add_argument("--entity", default="world/wrist_cam/points", help="Entity path to compare")
+    parser.add_argument("--output", default="comparison_result.rrd", help="Output RRD file")
     args = parser.parse_args()
 
-    # 1. Initialize a NEW comparison viewer
-    rr.init("rrd_comparison", spawn=True)
+    # FIX 1: Disable spawn to prevent crash in Docker/Headless environment
+    rr.init("rrd_comparison", spawn=False)
     
     # 2. Extract Data
     data_old = get_points_from_rrd(args.old_rrd, args.entity)
     data_new = get_points_from_rrd(args.new_rrd, args.entity)
     
+    if not data_old or not data_new:
+        print("[ERROR] Failed to load point cloud data from one or both files.")
+        return
+
     common_frames = sorted(list(set(data_old.keys()) & set(data_new.keys())))
-    print(f"Found {len(common_frames)} common frames.")
+    print(f"[INFO] Found {len(common_frames)} common frames.")
 
     distances = []
 
@@ -125,6 +129,10 @@ def main():
         print(f"=== Alignment Results ===")
         print(f"Mean Chamfer Distance: {np.mean(distances):.4f} m")
         print(f"(Lower is closer. If ~0.0, they are identical. If large, the fix worked/changed things.)")
+        
+    # FIX 2: Save to file explicitly
+    rr.save(args.output)
+    print(f"[SUCCESS] Result saved to: {args.output}")
 
 if __name__ == "__main__":
     main()
