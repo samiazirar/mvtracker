@@ -6,6 +6,14 @@ import yaml
 from scipy.spatial.transform import Rotation as R
 import rerun as rr
 import pyzed.sl as sl
+import sys
+import cv2
+import torch
+from PIL import Image
+import base64
+from io import BytesIO
+from openai import OpenAI
+from dotenv import load_dotenv
 
 from utils import (
     pose6_to_T,
@@ -21,6 +29,82 @@ from utils import (
     GripperVisualizer
 )
 
+# Add GroundingDINO to path
+sys.path.append('/workspace/third_party/groundingdino-cu128')
+from groundingdino.util.inference import load_model, predict
+import groundingdino.datasets.transforms as T
+
+load_dotenv()
+
+
+def get_vlm_description(image_array, prompt, api_key, model_name="gpt-4o"):
+    client = OpenAI(api_key=api_key)
+    
+    # Convert numpy image to base64
+    pil_img = Image.fromarray(image_array)
+    buff = BytesIO()
+    pil_img.save(buff, format="JPEG")
+    base64_image = base64.b64encode(buff.getvalue()).decode('utf-8')
+
+    response = client.chat.completions.create(
+        model=model_name,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{base64_image}"
+                        },
+                    },
+                ],
+            }
+        ],
+    )
+    return response.choices[0].message.content
+
+def get_dino_boxes(image_source, text_prompt, config_path, weights_path, box_threshold=0.35, text_threshold=0.25):
+    model = load_model(config_path, weights_path)
+    
+    transform = T.Compose(
+        [
+            T.RandomResize([800], max_size=1333),
+            T.ToTensor(),
+            T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+        ]
+    )
+    
+    image_pil = Image.fromarray(image_source).convert("RGB")
+    image_tensor, _ = transform(image_pil, None)
+    
+    boxes, logits, phrases = predict(
+        model=model,
+        image=image_tensor,
+        caption=text_prompt,
+        box_threshold=box_threshold,
+        text_threshold=text_threshold
+    )
+    return boxes
+
+def boxes_to_mask(boxes, h, w):
+    mask = np.zeros((h, w), dtype=np.uint8)
+    for box in boxes:
+        # box is [cx, cy, w, h] normalized
+        cx, cy, bw, bh = box.cpu().numpy()
+        x1 = int((cx - bw/2) * w)
+        y1 = int((cy - bh/2) * h)
+        x2 = int((cx + bw/2) * w)
+        y2 = int((cy + bh/2) * h)
+        
+        x1 = max(0, x1)
+        y1 = max(0, y1)
+        x2 = min(w, x2)
+        y2 = min(h, y2)
+        
+        mask[y1:y2, x1:x2] = 1
+    return mask
 
 def main():
     # Load configuration
@@ -31,7 +115,7 @@ def main():
     rr.init("droid_full_fusion", spawn=True)
     save_path = CONFIG['rrd_output_path']
     save_path = save_path.replace(".rrd", "")
-    save_path = f"{save_path}_no_optimization.rrd"
+    save_path = f"{save_path}_tracking_no_optimization.rrd"
     rr.save(save_path)
     
     # Define Up-Axis for the World (Z-up is standard for Robotics)
@@ -131,9 +215,44 @@ def main():
         else:
             print(f"[ERROR] Failed to open {serial}")
 
+    # Log static intrinsics/extrinsics once so Rerun doesn't interpolate "moving" statics
+    for serial, cam in active_cams.items():
+        if cam['type'] == "external":
+            T = cam['world_T_cam']
+            rr.log(
+                f"world/external_cams/{serial}",
+                rr.Transform3D(
+                    translation=T[:3, 3],
+                    mat3x3=T[:3, :3],
+                    axis_length=0.1
+                ),
+                static=True
+            )
+            rr.log(
+                f"world/external_cams/{serial}/pinhole",
+                rr.Pinhole(
+                    image_from_camera=cam['K'],
+                    width=cam['w'],
+                    height=cam['h']
+                ),
+                static=True
+            )
+        elif cam['type'] == "wrist":
+            rr.log(
+                "world/wrist_cam/pinhole",
+                rr.Pinhole(
+                    image_from_camera=cam['K'],
+                    width=cam['w'],
+                    height=cam['h']
+                ),
+                static=True
+            )
+
     # --- 4. Render Loop ---
     max_frames = CONFIG["max_frames"]
     print(f"[INFO] Processing {min(max_frames, num_frames)} frames...")
+    
+    vlm_prompt_text = None
     
     for i in range(min(max_frames, num_frames)):
         if i % 10 == 0: print(f"Frame {i}")
@@ -150,6 +269,23 @@ def main():
             zed = cam['zed']
             if zed.grab(cam['runtime']) != sl.ERROR_CODE.SUCCESS: continue
 
+            highlight_mask = None
+            if i == 0:
+                # Retrieve image for VLM/DINO
+                mat_image = sl.Mat()
+                zed.retrieve_image(mat_image, sl.VIEW.LEFT)
+                image_np = mat_image.get_data()
+                image_rgb = cv2.cvtColor(image_np, cv2.COLOR_BGRA2RGB)
+                
+                if vlm_prompt_text is None:
+                    print(f"[INFO] Querying VLM ({CONFIG.get('vlm_model', 'gpt-4o')})...")
+                    vlm_prompt_text = get_vlm_description(image_rgb, CONFIG['vlm_query_prompt'], os.getenv("OPENAI_API_KEY"), CONFIG.get('vlm_model', 'gpt-4o'))
+                    print(f"[INFO] VLM Prompt: {vlm_prompt_text}")
+                
+                print(f"[INFO] Running Grounding DINO for {serial}...")
+                boxes = get_dino_boxes(image_rgb, vlm_prompt_text, CONFIG['gdino_config'], CONFIG['gdino_weights'], CONFIG['box_threshold'])
+                highlight_mask = boxes_to_mask(boxes, cam['h'], cam['w'])
+
             # -- WRIST CAMERA LOGIC --
             if cam['type'] == "wrist":
                 if i >= len(cam['transforms']): continue
@@ -165,20 +301,10 @@ def main():
                         axis_length=0.1
                     )
                 )
-
-                # Log Pinhole
-                rr.log(
-                    "world/wrist_cam/pinhole",
-                    rr.Pinhole(
-                        image_from_camera=cam['K'],
-                        width=cam['w'],
-                        height=cam['h']
-                    )
-                )
                 #TODO: are the tranformations only in rerun?..
                 
                 # 2. Get Local Points
-                xyz, rgb = get_filtered_cloud(zed, cam['runtime'], CONFIG['wrist_max_depth'], CONFIG['min_depth_wrist'])
+                xyz, rgb = get_filtered_cloud(zed, cam['runtime'], CONFIG['wrist_max_depth'], CONFIG['min_depth_wrist'], highlight_mask=highlight_mask)
                 if xyz is None: continue
 
                 # 3. Transform Points to World
@@ -193,31 +319,11 @@ def main():
             # -- EXTERNAL CAMERA LOGIC --
             else:
                 # 1. Get Local Points
-                xyz, rgb = get_filtered_cloud(zed, cam['runtime'], CONFIG['ext_max_depth'], CONFIG['min_depth'])
+                xyz, rgb = get_filtered_cloud(zed, cam['runtime'], CONFIG['ext_max_depth'], CONFIG['min_depth'], highlight_mask=highlight_mask)
                 if xyz is None: continue
 
                 # 2. Transform to World (External cams are static, so we just do the math once per frame)
                 T = cam['world_T_cam']
-                
-                # Log Transform
-                rr.log(
-                    f"world/external_cams/{serial}",
-                    rr.Transform3D(
-                        translation=T[:3, 3],
-                        mat3x3=T[:3, :3],
-                        axis_length=0.1
-                    )
-                )
-
-                # Log Pinhole
-                rr.log(
-                    f"world/external_cams/{serial}/pinhole",
-                    rr.Pinhole(
-                        image_from_camera=cam['K'],
-                        width=cam['w'],
-                        height=cam['h']
-                    )
-                )
 
                 # 3. Transform Points to World
                 xyz_world = transform_points(xyz, T)

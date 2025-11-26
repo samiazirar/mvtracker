@@ -78,7 +78,7 @@ def get_zed_intrinsics(zed):
     return K, w, h
 
 
-def get_filtered_cloud(zed, runtime, max_depth=2.0, min_depth=0.1):
+def get_filtered_cloud(zed, runtime, max_depth=2.0, min_depth=0.1, highlight_mask=None):
     """
     Get filtered point cloud and RGB data from ZED camera.
     
@@ -89,6 +89,7 @@ def get_filtered_cloud(zed, runtime, max_depth=2.0, min_depth=0.1):
         runtime: RuntimeParameters for ZED camera
         max_depth: Maximum depth threshold in meters (default: 2.0)
         min_depth: Minimum depth threshold in meters (default: 0.1)
+        highlight_mask: Optional (H, W) boolean mask. Points in mask will be colored red.
         
     Returns:
         Tuple of (xyz, rgb) where:
@@ -109,6 +110,13 @@ def get_filtered_cloud(zed, runtime, max_depth=2.0, min_depth=0.1):
     zed.retrieve_image(mat_image, sl.VIEW.LEFT)
     image_data = mat_image.get_data()
     rgb = image_data[:, :, :3].reshape(-1, 3)
+
+    if highlight_mask is not None:
+        mask_flat = highlight_mask.reshape(-1) > 0
+        # Ensure mask matches size
+        if mask_flat.shape[0] == rgb.shape[0]:
+            # Set to Red (255, 0, 0) - assuming uint8
+            rgb[mask_flat] = [255, 0, 0]
 
     # 3. Filter Depth (Z-axis in Camera Frame)
     # ZED Camera Frame: Z is forward. 
