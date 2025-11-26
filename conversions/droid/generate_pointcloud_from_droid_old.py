@@ -8,17 +8,12 @@ import rerun as rr
 import pyzed.sl as sl
 
 from utils import (
-    # Transform pipelines
-    precompute_wrist_trajectory,
-    wrist_points_to_world,
-    external_points_to_world,
-    decompose_transform,
-    # Camera utilities
+    pose6_to_T,
+    rvec_tvec_to_matrix,
     find_svo_for_camera,
     find_episode_data_by_date,
     get_zed_intrinsics,
     get_filtered_cloud,
-    # Visualization
     GripperVisualizer
 )
 
@@ -65,12 +60,14 @@ def main():
         wrist_pose_t0 = meta.get("wrist_cam_extrinsics")
 
         if wrist_pose_t0:
-            # Use functional pipeline to precompute all transforms
-            wrist_cam_transforms = precompute_wrist_trajectory(
-                cartesian_positions, 
-                wrist_pose_t0, 
-                gripper_alignment_fix=True
-            )
+            T_base_cam0 = pose6_to_T(wrist_pose_t0)
+            T_base_ee0 = pose6_to_T(cartesian_positions[0])
+            # Constant offset: EE -> Camera
+            T_ee_cam = np.linalg.inv(T_base_ee0) @ T_base_cam0
+
+            for t in range(num_frames):
+                T_base_ee_t = pose6_to_T(cartesian_positions[t])
+                wrist_cam_transforms.append(T_base_ee_t @ T_ee_cam)
     
     # --- 3. Init Cameras ---
     cameras = {} # Holds all cameras (Ext + Wrist)
@@ -85,23 +82,18 @@ def main():
                 cameras[cam_id] = {
                     "type": "external",
                     "svo": svo,
-                    "extrinsic_params": transform_list  # Store params for transform pipeline
+                    "world_T_cam": rvec_tvec_to_matrix(transform_list)
                 }
 
     # B. Wrist Camera
     if wrist_serial:
         svo = find_svo_for_camera(CONFIG['recordings_dir'], wrist_serial)
-        if svo and wrist_cam_transforms:
+        if svo:
             print(f"[INFO] Found Wrist Camera SVO: {wrist_serial}")
-            # Also compute T_ee_cam for use in the transform pipeline
-            from utils import compute_wrist_cam_offset
-            T_ee_cam = compute_wrist_cam_offset(wrist_pose_t0, cartesian_positions[0])
-            
             cameras[wrist_serial] = {
                 "type": "wrist",
                 "svo": svo,
-                "transforms": wrist_cam_transforms,  # List of 4x4 matrices
-                "T_ee_cam": T_ee_cam  # Constant offset for transform pipeline
+                "transforms": wrist_cam_transforms # List of 4x4 matrices
             }
         else:
             print(f"[WARN] Wrist SVO not found for serial {wrist_serial}")
@@ -132,11 +124,12 @@ def main():
         if i % 10 == 0: print(f"Frame {i}")
         rr.set_time(timeline="frame_index", sequence=i)
 
-        # Update Gripper (rotation fix is applied in the wrist transform pipeline)
-        # Use the precomputed wrist transform which includes the gripper alignment
-        if wrist_cam_transforms and i < len(wrist_cam_transforms):
-            T_gripper = wrist_cam_transforms[i]
-            gripper_viz.update(T_gripper, gripper_positions[i])
+        # Update Gripper (use end-effector pose directly)
+        T_base_ee = pose6_to_T(cartesian_positions[i])
+        #rotate by 90 degrees to align
+        R_fix = R.from_euler('z', 90, degrees=True).as_matrix()
+        T_base_ee[:3, :3] = T_base_ee[:3, :3] @ R_fix
+        gripper_viz.update(T_base_ee, gripper_positions[i])
 
         for serial, cam in active_cams.items():
             zed = cam['zed']
@@ -146,101 +139,74 @@ def main():
             if cam['type'] == "wrist":
                 if i >= len(cam['transforms']): continue
                 
-                # 1. Get the transform of the wrist camera in the World
+                # 1. Update the transform of the wrist camera in the World
                 T_wrist = cam['transforms'][i]
-                translation, rotation = decompose_transform(T_wrist)
 
-                # Log camera frame for visualization (as axes, not as transform parent)
                 rr.log(
-                    "world/wrist_cam_frame",
-                    rr.Arrows3D(
-                        origins=[translation] * 3,
-                        vectors=[rotation[:, 0] * 0.1, rotation[:, 1] * 0.1, rotation[:, 2] * 0.1],
-                        colors=[[255, 0, 0], [0, 255, 0], [0, 0, 255]]
+                    "world/wrist_cam",
+                    rr.Transform3D(
+                        translation=T_wrist[:3, 3],
+                        mat3x3=T_wrist[:3, :3],
+                        axis_length=0.1
                     )
                 )
 
-                # Log Pinhole at camera position (for reference)
+                # Log Pinhole
                 rr.log(
-                    "world/wrist_cam_pinhole",
+                    "world/wrist_cam/pinhole",
                     rr.Pinhole(
                         image_from_camera=cam['K'],
                         width=cam['w'],
                         height=cam['h']
                     )
                 )
-                rr.log(
-                    "world/wrist_cam_pinhole",
-                    rr.Transform3D(
-                        translation=translation,
-                        mat3x3=rotation
-                    )
-                )
+                #TODO: are the tranformations only in rerun?..
                 
-                # 2. Get Local Points (in camera frame)
-                xyz_cam, rgb = get_filtered_cloud(zed, cam['runtime'], CONFIG['wrist_max_depth'], CONFIG['min_depth_wrist'])
-                if xyz_cam is None: continue
+                # 2. Get Local Points
+                xyz, rgb = get_filtered_cloud(zed, cam['runtime'], CONFIG['wrist_max_depth'], CONFIG['min_depth_wrist'])
+                if xyz is None: continue
 
-                # 3. Transform points to world frame using the stored transform
-                # (Already computed with all the proper transformations)
-                xyz_world = wrist_points_to_world(
-                    xyz_cam, 
-                    cartesian_positions[i],  # Current EE pose
-                    cam['T_ee_cam'],         # Constant offset
-                    gripper_alignment_fix=True
-                )
-
-                # 4. Log transformed points directly in world frame
+                # 3. Log Points as CHILD of wrist_cam
                 rr.log(
-                    "world/wrist_cam_points",
-                    rr.Points3D(xyz_world, colors=rgb, radii=CONFIG['radii_size'])
+                    "world/wrist_cam/points",
+                    rr.Points3D(xyz, colors=rgb, radii=CONFIG['radii_size']
+                )
                 )
 
             # -- EXTERNAL CAMERA LOGIC --
             else:
-                # 1. Get Local Points (in camera frame)
-                xyz_cam, rgb = get_filtered_cloud(zed, cam['runtime'], CONFIG['ext_max_depth'], CONFIG['min_depth'])
-                if xyz_cam is None: continue
+                # 1. Get Local Points
+                xyz, rgb = get_filtered_cloud(zed, cam['runtime'], CONFIG['ext_max_depth'], CONFIG['min_depth'])
+                if xyz is None: continue
 
-                # 2. Transform points to world using functional pipeline
-                xyz_world = external_points_to_world(xyz_cam, cam['extrinsic_params'])
+                # 2. Transform to World (External cams are static, so we just do the math once per frame)
+                T = cam['world_T_cam']
                 
-                # 3. Get transform for visualization
-                from utils import external_cam_to_world
-                T = external_cam_to_world(cam['extrinsic_params'])
-                translation, rotation = decompose_transform(T)
-                
-                # Log camera frame for visualization (as axes, not as transform parent)
+                # Log Transform
                 rr.log(
-                    f"world/external_cam_{serial}_frame",
-                    rr.Arrows3D(
-                        origins=[translation] * 3,
-                        vectors=[rotation[:, 0] * 0.1, rotation[:, 1] * 0.1, rotation[:, 2] * 0.1],
-                        colors=[[255, 0, 0], [0, 255, 0], [0, 0, 255]]
+                    f"world/external_cams/{serial}",
+                    rr.Transform3D(
+                        translation=T[:3, 3],
+                        mat3x3=T[:3, :3],
+                        axis_length=0.1
                     )
                 )
 
-                # Log Pinhole at camera position (for reference)
+                # Log Pinhole
                 rr.log(
-                    f"world/external_cam_{serial}_pinhole",
+                    f"world/external_cams/{serial}/pinhole",
                     rr.Pinhole(
                         image_from_camera=cam['K'],
                         width=cam['w'],
                         height=cam['h']
                     )
                 )
-                rr.log(
-                    f"world/external_cam_{serial}_pinhole",
-                    rr.Transform3D(
-                        translation=translation,
-                        mat3x3=rotation
-                    )
-                )
 
-                # 4. Log transformed points directly in world frame
+                # 3. Log to World (as child of transform now)
                 rr.log(
-                    f"world/external_cam_{serial}_points",
-                    rr.Points3D(xyz_world, colors=rgb, radii=CONFIG['radii_size'])
+                    f"world/external_cams/{serial}/points",
+                    rr.Points3D(xyz, colors=rgb, radii=CONFIG['radii_size']
+                )
                 )
 
     # Cleanup
