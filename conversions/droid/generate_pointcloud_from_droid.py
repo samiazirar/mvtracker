@@ -27,13 +27,12 @@ CONFIG = {
     # Depth Filtering
     "wrist_max_depth": 0.75, # Meters (Close range for manipulation)
     "ext_max_depth": 1.5,   # Meters (Wider context)
-    "stride": 1,            # Point cloud subsampling
     "min_depth": 0.1,      # Meters (Minimum valid depth)
     "min_depth_wrist": 0.001, # Meters (Wrist cam can see closer)
     "max_frames": 250,      # Max frames to process
     "radii_size": 0.001,    # Point size in meters
-    "gripper_rot": [0, 0, np.pi/2], # Fixed rotation offset for gripper visualization
-    "gripper_wrist_offset": [0, 0, 0.014], # Meters (in the frame of the end effector)
+    # "gripper_rot": [0, 0, 0], # Fixed rotation offset for gripper visualization
+    # "gripper_wrist_offset": [0, 0, 0.014], # Meters (in the frame of the end effector)
 }
 
 # =============================================================================
@@ -92,7 +91,7 @@ def get_zed_intrinsics(zed):
     K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]])
     return K, w, h
 
-def get_filtered_cloud(zed, runtime, stride=4, max_depth=2.0, min_depth=0.1):   
+def get_filtered_cloud(zed, runtime, max_depth=2.0, min_depth=0.1):   
     """
     Returns points and colors. 
     Filters out anything > max_depth or <= 0 (behind camera).
@@ -102,13 +101,13 @@ def get_filtered_cloud(zed, runtime, stride=4, max_depth=2.0, min_depth=0.1):
     if err != sl.ERROR_CODE.SUCCESS: return None, None
 
     # 1. Get Data
-    cloud_data = mat_cloud.get_data()[::stride, ::stride]
+    cloud_data = mat_cloud.get_data()
     xyz = cloud_data[:, :, :3].reshape(-1, 3)
     
     # 2. Get RGB
     mat_image = sl.Mat()
     zed.retrieve_image(mat_image, sl.VIEW.LEFT)
-    image_data = mat_image.get_data()[::stride, ::stride]
+    image_data = mat_image.get_data()
     rgb = image_data[:, :, :3].reshape(-1, 3)
 
     # 3. Filter Depth (Z-axis in Camera Frame)
@@ -256,7 +255,6 @@ class GripperVisualizer:
 def main():
     print("=== DROID Full Fusion (Wrist + External) ===")
     rr.init("droid_full_fusion", spawn=True)
-    rr.log("/", rr.Clear(recursive=True)) # Clear previous data to prevent "shaking" ghosting
     rr.save(CONFIG['rrd_output_path'])
     
     # Define Up-Axis for the World (Z-up is standard for Robotics)
@@ -354,19 +352,14 @@ def main():
     
     for i in range(min(max_frames, num_frames)):
         if i % 10 == 0: print(f"Frame {i}")
-        rr.set_time_sequence("frame_index", i)
+        rr.set_time(timeline="frame_index", sequence=i)
 
-        # Update Gripper
+        # Update Gripper (use end-effector pose directly)
         T_base_ee = pose6_to_T(cartesian_positions[i])
-        
-        # Apply Manual Offsets (T_base_gripper = T_base_ee @ T_ee_gripper)
-        T_ee_gripper = np.eye(4)
-        T_ee_gripper[:3, :3] = R.from_euler("xyz", CONFIG['gripper_rot']).as_matrix()
-        T_ee_gripper[:3, 3] = CONFIG['gripper_wrist_offset']
-        
-        T_base_gripper = T_base_ee @ T_ee_gripper
-        
-        gripper_viz.update(T_base_gripper, gripper_positions[i])
+        #rotate by 90 degrees to align
+        R_fix = R.from_euler('z', 90, degrees=True).as_matrix()
+        T_base_ee[:3, :3] = T_base_ee[:3, :3] @ R_fix
+        gripper_viz.update(T_base_ee, gripper_positions[i])
 
         for serial, cam in active_cams.items():
             zed = cam['zed']
@@ -403,7 +396,7 @@ def main():
                 )
                 
                 # 2. Get Local Points
-                xyz, rgb = get_filtered_cloud(zed, cam['runtime'], CONFIG['stride'], CONFIG['wrist_max_depth'], CONFIG['min_depth_wrist'])
+                xyz, rgb = get_filtered_cloud(zed, cam['runtime'], CONFIG['wrist_max_depth'], CONFIG['min_depth_wrist'])
                 if xyz is None: continue
 
                 # 3. Log Points as CHILD of wrist_cam
@@ -417,7 +410,7 @@ def main():
             # -- EXTERNAL CAMERA LOGIC --
             else:
                 # 1. Get Local Points
-                xyz, rgb = get_filtered_cloud(zed, cam['runtime'], CONFIG['stride'], CONFIG['ext_max_depth'], CONFIG['min_depth'])
+                xyz, rgb = get_filtered_cloud(zed, cam['runtime'], CONFIG['ext_max_depth'], CONFIG['min_depth'])
                 if xyz is None: continue
 
                 # 2. Transform to World (External cams are static, so we just do the math once per frame)
