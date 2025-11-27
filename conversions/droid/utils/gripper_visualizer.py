@@ -7,7 +7,7 @@ import open3d as o3d
 import cv2
 from scipy.spatial.transform import Rotation as R
 import rerun as rr
-
+#TODO: make griper and wrist camera a little bit more in z direction 
 
 class GripperVisualizer:
     """
