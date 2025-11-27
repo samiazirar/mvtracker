@@ -1,5 +1,6 @@
 - [x] Fit the urd end effector model on the robot
 - [ ] 2D Video -> 3D lifting code 
+- [ ] Make sure everything within a radios of xy is absolutley static
 - [ ] Wrist cam relies on gripper -> fir the grippr in the external cameras and with the robot urdf and then fit the wrist cam based on the gripper and test if the other depths aligm mooe or less afterward (which is better the locaiton of the ee or the wrist cam) -> but wrist cam relies on gripper so gripper should be more accurate
 - [ ] make transformations with pytransform3d not rerun
 - [ ] Align gripper and wrist camera and CtRNet-X callibration for optimal alignment

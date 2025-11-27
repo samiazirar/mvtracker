@@ -151,7 +151,7 @@ class SpaTrackerV2Wrapper(nn.Module):
     ):
         super(SpaTrackerV2Wrapper, self).__init__()
 
-        sys.path.append("spatialtrackerv2/")
+        sys.path.append("third_party/spatialtrackerv2/")
         from models.SpaTrackV2.models.predictor import Predictor
         if model_type == "offline":
             self.model = Predictor.from_pretrained("Yuxihenry/SpatialTrackerV2-Offline")

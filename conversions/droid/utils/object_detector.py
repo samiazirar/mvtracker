@@ -50,8 +50,12 @@ def get_vlm_description(image_array, prompt, api_key, model_name="gpt-4o"):
     return response.choices[0].message.content
 
 class Sam2Wrapper:
-    def __init__(self, device="cuda"):
-        self.device = device
+    def __init__(self, device=None):
+        if device is None:
+            self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        else:
+            self.device = device
+        print(f"[INFO] SAM2 using device: {self.device}")
         self._init_model()
 
     def _resolve_file(self, env_value: str | None, candidates):
@@ -196,23 +200,29 @@ class ObjectDetector:
     Wraps Grounding DINO model for detecting objects based on text prompts.
     """
     
-    def __init__(self, config_path, checkpoint_path, device="cuda"):
+    def __init__(self, config_path, checkpoint_path, device=None):
         """
         Initialize object detector.
         
         Args:
             config_path: Path to Grounding DINO config file
             checkpoint_path: Path to model checkpoint (will download if not exists)
-            device: Device to run inference on (default: "cuda")
+            device: Device to run inference on (default: auto-detect)
         """
-        self.device = device
+        if device is None:
+            self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        else:
+            self.device = device
+            
+        print(f"[INFO] GroundingDINO using device: {self.device}")
+        
         if not os.path.exists(checkpoint_path):
             print(f"[INFO] Downloading GroundingDINO weights to {checkpoint_path}...")
             os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
             url = "https://github.com/IDEA-Research/GroundingDINO/releases/download/v0.1.0-alpha/groundingdino_swint_ogc.pth"
             os.system(f"wget {url} -O {checkpoint_path}")
         
-        self.model = load_model(config_path, checkpoint_path, device=device)
+        self.model = load_model(config_path, checkpoint_path, device=self.device)
 
     def detect(self, image_numpy, prompt, box_threshold=0.35, text_threshold=0.25):
         """

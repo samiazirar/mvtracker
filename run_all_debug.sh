@@ -55,3 +55,16 @@ echo "✔ generate_pointcloud_from_droid_with_video finished"
 
 echo ""
 echo "[DONE] All scripts completed. Output in ${OUT_DIR}/"
+
+#run the npz generation script
+python conversions/droid/debug/generate_npz_from_external_cams.py
+
+python demo.py \
+  --temporal_stride 1 \
+  --spatial_downsample 1 \
+  --depth_estimator gt \
+  --depth_cache_dir ./depth_cache \
+  --rerun save \
+  --sample-path "./point_clouds/npz_files/droid_external_cams.npz" \
+  --tracker spatialtrackerv2 \
+  --rrd ./point_clouds/droid_external_cams_spatrackerv2.rrd
