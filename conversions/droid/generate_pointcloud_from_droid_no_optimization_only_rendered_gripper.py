@@ -6,14 +6,6 @@ import yaml
 from scipy.spatial.transform import Rotation as R
 import rerun as rr
 import pyzed.sl as sl
-import sys
-import cv2
-import torch
-from PIL import Image
-import base64
-from io import BytesIO
-from openai import OpenAI
-from dotenv import load_dotenv
 
 from utils import (
     pose6_to_T,
@@ -28,9 +20,6 @@ from utils import (
     get_filtered_cloud,
     GripperVisualizer
 )
-from utils.object_detector import ObjectDetector, Sam2Wrapper, get_vlm_description
-
-load_dotenv()
 
 
 def main():
@@ -38,16 +27,11 @@ def main():
     with open('conversions/droid/config.yaml', 'r') as f:
         CONFIG = yaml.safe_load(f)
     
-    # Init Detectors
-    print("[INFO] Initializing Object Detectors...")
-    object_detector = ObjectDetector(CONFIG['gdino_config'], CONFIG['gdino_weights'])
-    sam2_wrapper = Sam2Wrapper()
-    
     print("=== DROID Full Fusion (Wrist + External) ===")
     rr.init("droid_full_fusion", spawn=True)
     save_path = CONFIG['rrd_output_path']
     save_path = save_path.replace(".rrd", "")
-    save_path = f"{save_path}_tracking_no_optimization.rrd"
+    save_path = f"{save_path}_no_optimization.rrd"
     rr.save(save_path)
     
     # Define Up-Axis for the World (Z-up is standard for Robotics)
@@ -147,44 +131,9 @@ def main():
         else:
             print(f"[ERROR] Failed to open {serial}")
 
-    # Log static intrinsics/extrinsics once so Rerun doesn't interpolate "moving" statics
-    for serial, cam in active_cams.items():
-        if cam['type'] == "external":
-            T = cam['world_T_cam']
-            rr.log(
-                f"world/external_cams/{serial}",
-                rr.Transform3D(
-                    translation=T[:3, 3],
-                    mat3x3=T[:3, :3],
-                    axis_length=0.1
-                ),
-                static=True
-            )
-            rr.log(
-                f"world/external_cams/{serial}/pinhole",
-                rr.Pinhole(
-                    image_from_camera=cam['K'],
-                    width=cam['w'],
-                    height=cam['h']
-                ),
-                static=True
-            )
-        elif cam['type'] == "wrist":
-            rr.log(
-                "world/wrist_cam/pinhole",
-                rr.Pinhole(
-                    image_from_camera=cam['K'],
-                    width=cam['w'],
-                    height=cam['h']
-                ),
-                static=True
-            )
-
     # --- 4. Render Loop ---
     max_frames = CONFIG["max_frames"]
     print(f"[INFO] Processing {min(max_frames, num_frames)} frames...")
-    
-    vlm_prompt_text = None
     
     for i in range(min(max_frames, num_frames)):
         if i % 10 == 0: print(f"Frame {i}")
@@ -201,36 +150,6 @@ def main():
             zed = cam['zed']
             if zed.grab(cam['runtime']) != sl.ERROR_CODE.SUCCESS: continue
 
-            highlight_mask = None
-            if i == 0:
-                # Retrieve image for VLM/DINO
-                mat_image = sl.Mat()
-                zed.retrieve_image(mat_image, sl.VIEW.LEFT)
-                image_np = mat_image.get_data()
-                image_rgb = cv2.cvtColor(image_np, cv2.COLOR_BGRA2RGB)
-                
-                if vlm_prompt_text is None:
-                    if CONFIG.get('debug_object_text'):
-                        vlm_prompt_text = CONFIG['debug_object_text']
-                        print(f"[INFO] Using debug object text (skipping VLM): {vlm_prompt_text}")
-                    else:
-                        print(f"[INFO] Querying VLM ({CONFIG.get('vlm_model', 'gpt-4o')})...")
-                        vlm_prompt_text = get_vlm_description(image_rgb, CONFIG['vlm_query_prompt'], os.getenv("OPENAI_API_KEY"), CONFIG.get('vlm_model', 'gpt-4o'))
-                        print(f"[INFO] VLM Prompt: {vlm_prompt_text}")
-                
-                print(f"[INFO] Running Grounding DINO for {serial}...")
-                boxes, logits = object_detector.detect(image_rgb, vlm_prompt_text, CONFIG['box_threshold'])
-                
-                debug_dir = "point_clouds/debug"
-                dino_path = os.path.join(debug_dir, f"cam_{serial}_dino.jpg")
-                object_detector.draw_boxes(image_rgb, boxes, logits, save_path=dino_path)
-                
-                print(f"[INFO] Running SAM2 for {serial}...")
-                highlight_mask = sam2_wrapper.predict_mask(image_rgb, boxes)
-                
-                sam_path = os.path.join(debug_dir, f"cam_{serial}_sam.jpg")
-                sam2_wrapper.draw_masks(image_rgb, highlight_mask, save_path=sam_path)
-
             # -- WRIST CAMERA LOGIC --
             if cam['type'] == "wrist":
                 if i >= len(cam['transforms']): continue
@@ -246,10 +165,20 @@ def main():
                         axis_length=0.1
                     )
                 )
+
+                # Log Pinhole
+                rr.log(
+                    "world/wrist_cam/pinhole",
+                    rr.Pinhole(
+                        image_from_camera=cam['K'],
+                        width=cam['w'],
+                        height=cam['h']
+                    )
+                )
                 #TODO: are the tranformations only in rerun?..
                 
                 # 2. Get Local Points
-                xyz, rgb = get_filtered_cloud(zed, cam['runtime'], CONFIG['wrist_max_depth'], CONFIG['min_depth_wrist'], highlight_mask=highlight_mask)
+                xyz, rgb = get_filtered_cloud(zed, cam['runtime'], CONFIG['wrist_max_depth'], CONFIG['min_depth_wrist'])
                 if xyz is None: continue
 
                 # 3. Transform Points to World
@@ -264,11 +193,31 @@ def main():
             # -- EXTERNAL CAMERA LOGIC --
             else:
                 # 1. Get Local Points
-                xyz, rgb = get_filtered_cloud(zed, cam['runtime'], CONFIG['ext_max_depth'], CONFIG['min_depth'], highlight_mask=highlight_mask)
+                xyz, rgb = get_filtered_cloud(zed, cam['runtime'], CONFIG['ext_max_depth'], CONFIG['min_depth'])
                 if xyz is None: continue
 
                 # 2. Transform to World (External cams are static, so we just do the math once per frame)
                 T = cam['world_T_cam']
+                
+                # Log Transform
+                rr.log(
+                    f"world/external_cams/{serial}",
+                    rr.Transform3D(
+                        translation=T[:3, 3],
+                        mat3x3=T[:3, :3],
+                        axis_length=0.1
+                    )
+                )
+
+                # Log Pinhole
+                rr.log(
+                    f"world/external_cams/{serial}/pinhole",
+                    rr.Pinhole(
+                        image_from_camera=cam['K'],
+                        width=cam['w'],
+                        height=cam['h']
+                    )
+                )
 
                 # 3. Transform Points to World
                 xyz_world = transform_points(xyz, T)

@@ -995,7 +995,8 @@ def main():
         print("Processing all data at once...")
         torch.set_float32_matmul_precision("high")
         amp_dtype = torch.bfloat16 if (device == "cuda" and torch.cuda.get_device_capability()[0] >= 8) else torch.float16
-        
+        #fill the nan values in query points with 0
+        # query_points = torch.nan_to_num(query_points, nan=0.0)
         if args.tracker == "mvtracker":
             # MVTracker expects query_points_3d and supports mixed precision
             with torch.no_grad(), torch.cuda.amp.autocast(enabled=device == "cuda", dtype=amp_dtype):
@@ -1053,6 +1054,7 @@ def main():
         raise NotImplementedError("Robot visualization from urdf not anymore supported.")
 
     #TODO: check if query points are correct!
+    breakpoint()
     log_tracks_to_rerun(
         dataset_name="demo",
         datapoint_idx=0,

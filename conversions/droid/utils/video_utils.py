@@ -7,21 +7,27 @@ class VideoRecorder:
     def __init__(self, output_dir, cam_serial, suffix, width, height, fps=15):
         self.filepath = os.path.join(output_dir, f"{cam_serial}_{suffix}.mp4")
         os.makedirs(output_dir, exist_ok=True)
-        # Try multiple codecs for better compatibility
-        for codec in ['avc1', 'vp09', 'mp4v', 'XVID', 'MJPG']:
+        self.writer = None
+
+        # Prefer mp4-friendly codecs to avoid MJPG/mp4 warnings; fall back if needed.
+        for codec in ['mp4v', 'avc1', 'XVID', 'vp09']:
             fourcc = cv2.VideoWriter_fourcc(*codec)
-            self.writer = cv2.VideoWriter(self.filepath, fourcc, fps, (width, height))
-            if self.writer.isOpened():
+            writer = cv2.VideoWriter(self.filepath, fourcc, fps, (width, height))
+            if writer.isOpened():
+                self.writer = writer
                 print(f"[VIDEO] Using codec '{codec}' for {cam_serial}_{suffix}")
                 break
-        else:
-            raise RuntimeError(f"Failed to initialize VideoWriter for {self.filepath}. No compatible codec found.")
+
+        if self.writer is None:
+            print(f"[WARN] Failed to initialize VideoWriter for {self.filepath}. No compatible codec found; skipping video.")
         
     def write_frame(self, image):
-        self.writer.write(image)
+        if self.writer:
+            self.writer.write(image)
         
     def close(self):
-        self.writer.release()
+        if self.writer:
+            self.writer.release()
 
 def project_points_to_image(points_3d, K, T_world_cam, width, height, colors=None):
     """
