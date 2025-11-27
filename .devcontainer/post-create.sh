@@ -48,6 +48,9 @@ if [ ! -d "$SAM2_DIR" ]; then
     mkdir -p /workspace/third_party
     echo "Cloning SAM2 repository..."
     git clone https://github.com/facebookresearch/sam2.git "$SAM2_DIR"
+    cd checkpoints && \
+    ./download_ckpts.sh && \
+    cd ..
 else
     echo "SAM2 repository already exists, skipping clone."
 fi
