@@ -636,7 +636,7 @@ def main():
             )
     else:
         raise ValueError("Sample path is None, please provide a valid path or leave it to download the demo sample.")
-
+    
     print("HUMANS NOT SUPPORTED YET") #TODO: find out why _human not work
     print("Loading large RH20T dataset - this may take a while...")
     print("Memory before loading:", torch.cuda.memory_allocated() / 1024**3 if torch.cuda.is_available() else "N/A", "GB GPU")
@@ -648,6 +648,7 @@ def main():
     
     # Load with memory mapping to avoid loading entire file into RAM at once
     sample = np.load(sample_path, mmap_mode='r',allow_pickle=True)  
+    breakpoint()
     #only for now, remove all camera data from id "045322071843" for this copy the data
     if "camera_ids"  in sample:
         camera_ids = sample["camera_ids"]

@@ -1,14 +1,14 @@
-# Configuration for DROID Point Cloud Generation
+# Configuration for DROID Point Cloud Generation - AUTOLab Low Quality
 
 # Input paths
-h5_path: "/data/droid/data/droid_raw/1.0.1/ILIAD/success/2023-06-11/Sun_Jun_11_15:52:37_2023/trajectory.h5"
+h5_path: "/data/droid/data/droid_raw/1.0.1/AUTOLab/success/2023-10-15/Sun_Oct_15_19:03:32_2023/trajectory.h5"
 extrinsics_json_path: "/data/droid/calib_and_annot/droid/cam2base_extrinsic_superset.json"
-recordings_dir: "/data/droid/data/droid_raw/1.0.1/ILIAD/success/2023-06-11/Sun_Jun_11_15:52:37_2023/recordings/SVO"
+recordings_dir: "/data/droid/data/droid_raw/1.0.1/AUTOLab/success/2023-10-15/Sun_Oct_15_19:03:32_2023/recordings/SVO"
 metadata_path: null  # Auto-discover if null
 
 # Output paths
-rrd_output_path: "point_clouds/droid_full_fusion_gripper.rrd"
-rrd_output_path_with_mask: "point_clouds/droid_full_fusion_gripper_with_mask.rrd"
+rrd_output_path: "point_clouds/autolab_low_fusion.rrd"
+rrd_output_path_with_mask: "point_clouds/autolab_low_fusion_with_mask.rrd"
 video_output_path: "point_clouds/videos"
 
 # Depth filtering parameters
@@ -22,8 +22,8 @@ max_frames: 250        # Max frames to process
 radii_size: 0.001      # Point size in meters
 
 # Object detection parameters (for mask version)
-debug_object_text: "Black Lid" # If set, skips VLM and uses this text for Grounding DINO
-vlm_model: "gpt-5"
+debug_object_text: null # If set, skips VLM and uses this text for Grounding DINO
+vlm_model: "gpt-4"
 vlm_query_prompt: "What is the main object being manipulated? Answer in 2-3 words."
 box_threshold: 0.35
 text_threshold: 0.25

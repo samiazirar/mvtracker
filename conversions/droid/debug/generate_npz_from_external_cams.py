@@ -244,8 +244,7 @@ def main():
     
     # Check again after inversion
     if np.isnan(extrs_np).any() or np.isinf(extrs_np).any():
-        print("[ERROR] Inverted extrinsics contain NaN or Inf values!")
-        return
+        raise ValueError("Inverted extrinsics contain NaN or Inf values!")
     
     #TODO: check..
     extrs_np = extrs_np[:, :, :3, :] # (V, T, 3, 4)
