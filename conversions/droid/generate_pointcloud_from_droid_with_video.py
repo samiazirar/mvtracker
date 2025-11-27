@@ -85,18 +85,21 @@ def generate_comparison_videos(active_cams, transforms_before, transforms_after,
             img_bgr = cv2.cvtColor(img_bgra, cv2.COLOR_BGRA2BGR)
             
             # Get Points
-            xyz, _ = get_filtered_cloud(zed, cam['runtime'], 
+            xyz, rgb = get_filtered_cloud(zed, cam['runtime'], 
                                       config.get('ext_max_depth', 2.0) if cam['type'] == 'external' else config.get('wrist_max_depth', 0.75),
                                       config.get('min_depth', 0.1))
             
             frame_data[serial] = {
                 'image': img_bgr,
-                'points': xyz
+                'points': xyz,
+                'colors': rgb
             }
 
         # B. Build World Clouds (Before & After)
         cloud_before = []
+        colors_before = []
         cloud_after = []
+        colors_after = []
         
         for serial, data in frame_data.items():
             if data['points'] is None: continue
@@ -111,6 +114,7 @@ def generate_comparison_videos(active_cams, transforms_before, transforms_after,
             
             if T_before is not None:
                 cloud_before.append(transform_points(data['points'], T_before))
+                colors_before.append(data['colors'])
                 
             # Get Transform After
             T_after = None
@@ -122,10 +126,14 @@ def generate_comparison_videos(active_cams, transforms_before, transforms_after,
             
             if T_after is not None:
                 cloud_after.append(transform_points(data['points'], T_after))
+                colors_after.append(data['colors'])
 
         # Stack clouds
         pts_world_before = np.vstack(cloud_before) if cloud_before else np.empty((0, 3))
+        cols_world_before = np.vstack(colors_before) if colors_before else np.empty((0, 3))
+        
         pts_world_after = np.vstack(cloud_after) if cloud_after else np.empty((0, 3))
+        cols_world_after = np.vstack(colors_after) if colors_after else np.empty((0, 3))
         
         # C. Project and Write
         for serial, cam in active_cams.items():
@@ -146,10 +154,9 @@ def generate_comparison_videos(active_cams, transforms_before, transforms_after,
                 T_cam_before = transforms_before[serial]['transforms'][i]
                 
             if T_cam_before is not None:
-                # Transform this camera's local points to world, then project back
-                pts_world = transform_points(local_pts, T_cam_before)
-                uv = project_points_to_image(pts_world, K, T_cam_before, w, h)
-                img_out = draw_points_on_image(img, uv, color=(0, 0, 255))
+                # Project GLOBAL world points back to this camera
+                uv, cols = project_points_to_image(pts_world_before, K, T_cam_before, w, h, colors=cols_world_before)
+                img_out = draw_points_on_image(img, uv, colors=cols)
                 recorders[serial]['before'].write_frame(img_out)
             
             # -- AFTER --
@@ -160,10 +167,9 @@ def generate_comparison_videos(active_cams, transforms_before, transforms_after,
                 T_cam_after = transforms_after[serial]['transforms'][i]
                 
             if T_cam_after is not None:
-                # Transform this camera's local points to world, then project back
-                pts_world = transform_points(local_pts, T_cam_after)
-                uv = project_points_to_image(pts_world, K, T_cam_after, w, h)
-                img_out = draw_points_on_image(img, uv, color=(0, 255, 0))
+                # Project GLOBAL world points back to this camera
+                uv, cols = project_points_to_image(pts_world_after, K, T_cam_after, w, h, colors=cols_world_after)
+                img_out = draw_points_on_image(img, uv, colors=cols)
                 recorders[serial]['after'].write_frame(img_out)
 
     # 3. Cleanup

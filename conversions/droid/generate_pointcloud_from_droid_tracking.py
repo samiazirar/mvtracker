@@ -28,89 +28,20 @@ from utils import (
     get_filtered_cloud,
     GripperVisualizer
 )
-
-# Add GroundingDINO to path
-sys.path.append('/workspace/third_party/groundingdino-cu128')
-from groundingdino.util.inference import load_model, predict
-import groundingdino.datasets.transforms as T
+from utils.object_detector import ObjectDetector, Sam2Wrapper, get_vlm_description
 
 load_dotenv()
 
-
-def get_vlm_description(image_array, prompt, api_key, model_name="gpt-4o"):
-    client = OpenAI(api_key=api_key)
-    
-    # Convert numpy image to base64
-    pil_img = Image.fromarray(image_array)
-    buff = BytesIO()
-    pil_img.save(buff, format="JPEG")
-    base64_image = base64.b64encode(buff.getvalue()).decode('utf-8')
-
-    response = client.chat.completions.create(
-        model=model_name,
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/jpeg;base64,{base64_image}"
-                        },
-                    },
-                ],
-            }
-        ],
-        max_tokens=300,
-    )
-    return response.choices[0].message.content
-
-def get_dino_boxes(image_source, text_prompt, config_path, weights_path, box_threshold=0.35, text_threshold=0.25):
-    model = load_model(config_path, weights_path)
-    
-    transform = T.Compose(
-        [
-            T.RandomResize([800], max_size=1333),
-            T.ToTensor(),
-            T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-        ]
-    )
-    
-    image_pil = Image.fromarray(image_source).convert("RGB")
-    image_tensor, _ = transform(image_pil, None)
-    
-    boxes, logits, phrases = predict(
-        model=model,
-        image=image_tensor,
-        caption=text_prompt,
-        box_threshold=box_threshold,
-        text_threshold=text_threshold
-    )
-    return boxes
-
-def boxes_to_mask(boxes, h, w):
-    mask = np.zeros((h, w), dtype=np.uint8)
-    for box in boxes:
-        # box is [cx, cy, w, h] normalized
-        cx, cy, bw, bh = box.cpu().numpy()
-        x1 = int((cx - bw/2) * w)
-        y1 = int((cy - bh/2) * h)
-        x2 = int((cx + bw/2) * w)
-        y2 = int((cy + bh/2) * h)
-        
-        x1 = max(0, x1)
-        y1 = max(0, y1)
-        x2 = min(w, x2)
-        y2 = min(h, y2)
-        
-        mask[y1:y2, x1:x2] = 1
-    return mask
 
 def main():
     # Load configuration
     with open('conversions/droid/config.yaml', 'r') as f:
         CONFIG = yaml.safe_load(f)
+    
+    # Init Detectors
+    print("[INFO] Initializing Object Detectors...")
+    object_detector = ObjectDetector(CONFIG['gdino_config'], CONFIG['gdino_weights'])
+    sam2_wrapper = Sam2Wrapper()
     
     print("=== DROID Full Fusion (Wrist + External) ===")
     rr.init("droid_full_fusion", spawn=True)
@@ -216,6 +147,39 @@ def main():
         else:
             print(f"[ERROR] Failed to open {serial}")
 
+    # Log static intrinsics/extrinsics once so Rerun doesn't interpolate "moving" statics
+    for serial, cam in active_cams.items():
+        if cam['type'] == "external":
+            T = cam['world_T_cam']
+            rr.log(
+                f"world/external_cams/{serial}",
+                rr.Transform3D(
+                    translation=T[:3, 3],
+                    mat3x3=T[:3, :3],
+                    axis_length=0.1
+                ),
+                static=True
+            )
+            rr.log(
+                f"world/external_cams/{serial}/pinhole",
+                rr.Pinhole(
+                    image_from_camera=cam['K'],
+                    width=cam['w'],
+                    height=cam['h']
+                ),
+                static=True
+            )
+        elif cam['type'] == "wrist":
+            rr.log(
+                "world/wrist_cam/pinhole",
+                rr.Pinhole(
+                    image_from_camera=cam['K'],
+                    width=cam['w'],
+                    height=cam['h']
+                ),
+                static=True
+            )
+
     # --- 4. Render Loop ---
     max_frames = CONFIG["max_frames"]
     print(f"[INFO] Processing {min(max_frames, num_frames)} frames...")
@@ -246,13 +210,21 @@ def main():
                 image_rgb = cv2.cvtColor(image_np, cv2.COLOR_BGRA2RGB)
                 
                 if vlm_prompt_text is None:
-                    print(f"[INFO] Querying VLM ({CONFIG.get('vlm_model', 'gpt-4o')})...")
-                    vlm_prompt_text = get_vlm_description(image_rgb, CONFIG['vlm_query_prompt'], os.getenv("OPENAI_API_KEY"), CONFIG.get('vlm_model', 'gpt-4o'))
-                    print(f"[INFO] VLM Prompt: {vlm_prompt_text}")
+                    if CONFIG.get('debug_object_text'):
+                        vlm_prompt_text = CONFIG['debug_object_text']
+                        print(f"[INFO] Using debug object text (skipping VLM): {vlm_prompt_text}")
+                    else:
+                        print(f"[INFO] Querying VLM ({CONFIG.get('vlm_model', 'gpt-4o')})...")
+                        vlm_prompt_text = get_vlm_description(image_rgb, CONFIG['vlm_query_prompt'], os.getenv("OPENAI_API_KEY"), CONFIG.get('vlm_model', 'gpt-4o'))
+                        print(f"[INFO] VLM Prompt: {vlm_prompt_text}")
                 
                 print(f"[INFO] Running Grounding DINO for {serial}...")
-                boxes = get_dino_boxes(image_rgb, vlm_prompt_text, CONFIG['gdino_config'], CONFIG['gdino_weights'], CONFIG['box_threshold'])
-                highlight_mask = boxes_to_mask(boxes, cam['h'], cam['w'])
+                boxes, logits = object_detector.detect(image_rgb, vlm_prompt_text, CONFIG['box_threshold'])
+                object_detector.draw_boxes(image_rgb, boxes, logits)
+                
+                print(f"[INFO] Running SAM2 for {serial}...")
+                highlight_mask = sam2_wrapper.predict_mask(image_rgb, boxes)
+                sam2_wrapper.draw_masks(image_rgb, highlight_mask)
 
             # -- WRIST CAMERA LOGIC --
             if cam['type'] == "wrist":
@@ -267,16 +239,6 @@ def main():
                         translation=T_wrist[:3, 3],
                         mat3x3=T_wrist[:3, :3],
                         axis_length=0.1
-                    )
-                )
-
-                # Log Pinhole
-                rr.log(
-                    "world/wrist_cam/pinhole",
-                    rr.Pinhole(
-                        image_from_camera=cam['K'],
-                        width=cam['w'],
-                        height=cam['h']
                     )
                 )
                 #TODO: are the tranformations only in rerun?..
@@ -302,26 +264,6 @@ def main():
 
                 # 2. Transform to World (External cams are static, so we just do the math once per frame)
                 T = cam['world_T_cam']
-                
-                # Log Transform
-                rr.log(
-                    f"world/external_cams/{serial}",
-                    rr.Transform3D(
-                        translation=T[:3, 3],
-                        mat3x3=T[:3, :3],
-                        axis_length=0.1
-                    )
-                )
-
-                # Log Pinhole
-                rr.log(
-                    f"world/external_cams/{serial}/pinhole",
-                    rr.Pinhole(
-                        image_from_camera=cam['K'],
-                        width=cam['w'],
-                        height=cam['h']
-                    )
-                )
 
                 # 3. Transform Points to World
                 xyz_world = transform_points(xyz, T)
