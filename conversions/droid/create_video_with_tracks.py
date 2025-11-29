@@ -1,3 +1,19 @@
+"""Create video with point cloud tracks.
+
+This script generates videos showing reprojected point clouds from multiple
+cameras. It does NOT use ICP optimization - use icp_improved_video_and_pointcloud.py
+instead if you need ICP alignment.
+
+Key features:
+1. Uses original camera calibrations without ICP refinement
+2. Excludes gripper region (< 15cm) from wrist camera rendering
+3. Generates videos for each camera view
+4. Supports Rerun visualization for 3D inspection
+
+Usage:
+    python conversions/droid/create_video_with_tracks.py
+"""
+
 import numpy as np
 import os
 import glob
@@ -24,7 +40,6 @@ from utils import (
     project_points_to_image,
     draw_points_on_image
 )
-from utils.optimization import optimize_external_cameras_multi_frame, optimize_wrist_multi_frame
 
 
 def capture_transforms(active_cams):
@@ -39,204 +54,225 @@ def capture_transforms(active_cams):
         state[serial] = entry
     return state
 
-def generate_comparison_videos(active_cams, transforms_before, transforms_after, num_frames, config):
+
+def generate_videos_no_icp(active_cams, num_frames, config):
     """
-    Generate MP4 videos for each camera showing reprojected point clouds
-    before and after ICP optimization.
+    Generate MP4 videos for each camera showing reprojected point clouds.
+    
+    This version does NOT use ICP optimization - it uses the original
+    camera calibrations directly.
+    
+    Args:
+        active_cams: Dictionary of active cameras
+        num_frames: Total number of frames
+        config: Configuration dictionary
     """
-    print("\n[VIDEO] Generating comparison videos (Before vs After ICP)...")
+    print("\n[VIDEO] Generating videos (No ICP optimization)...")
     video_dir = config.get('video_output_path', 'point_clouds/videos')
     
-    # 1. Initialize Video Recorders
+    # Create output directory for no-ICP videos
+    no_icp_dir = os.path.join(video_dir, 'videos_no_icp')
+    os.makedirs(no_icp_dir, exist_ok=True)
+    
+    # Initialize Video Recorders
     recorders = {}
     for serial, cam in active_cams.items():
         w, h = cam['w'], cam['h']
-        recorders[serial] = {
-            'before': VideoRecorder(video_dir, serial, "before_icp", w, h),
-            'after': VideoRecorder(video_dir, serial, "after_icp", w, h)
-        }
-
-    # 2. Processing Loop
-    # We need to iterate through frames, grab data, build world clouds, and project.
+        recorders[serial] = VideoRecorder(no_icp_dir, serial, "reprojected", w, h)
     
     # Reset all cameras to frame 0
     for cam in active_cams.values():
         cam['zed'].set_svo_position(0)
-
+    
     max_frames = min(num_frames, config.get('max_frames', 50))
     
+    # Parameters for filtering
+    min_depth_wrist = config.get('min_depth_wrist_icp', 0.15)  # Exclude gripper
+    max_depth_wrist = config.get('wrist_max_depth', 0.75)
+    min_depth_ext = config.get('min_depth', 0.1)
+    max_depth_ext = config.get('ext_max_depth', 1.5)
+    
     for i in range(max_frames):
-        if i % 10 == 0: print(f"  -> Processing Video Frame {i}/{max_frames}")
+        if i % 10 == 0:
+            print(f"  -> Processing Video Frame {i}/{max_frames}")
         
-        # A. Grab Data for this frame
-        frame_data = {} # serial -> {image, points_local}
+        # Grab Data for this frame
+        frame_data = {}
         
         for serial, cam in active_cams.items():
             zed = cam['zed']
-            # Ensure synchronization (simple approach: set pos)
             zed.set_svo_position(i)
             if zed.grab(cam['runtime']) != sl.ERROR_CODE.SUCCESS:
                 continue
-                
+            
             # Get Image
             mat_img = sl.Mat()
             zed.retrieve_image(mat_img, sl.VIEW.LEFT)
             img_bgra = mat_img.get_data()
             img_bgr = cv2.cvtColor(img_bgra, cv2.COLOR_BGRA2BGR)
             
-            # Get Points
-            xyz, rgb = get_filtered_cloud(zed, cam['runtime'], 
-                                      config.get('ext_max_depth', 2.0) if cam['type'] == 'external' else config.get('wrist_max_depth', 0.75),
-                                      config.get('min_depth', 0.1))
+            # Get Points - exclude gripper for wrist camera
+            if cam['type'] == 'wrist':
+                # Exclude gripper region (< 15cm)
+                xyz, rgb = get_filtered_cloud(
+                    zed, cam['runtime'],
+                    max_depth_wrist,
+                    min_depth_wrist  # 15cm to exclude gripper
+                )
+            else:
+                xyz, rgb = get_filtered_cloud(
+                    zed, cam['runtime'],
+                    max_depth_ext,
+                    min_depth_ext
+                )
             
             frame_data[serial] = {
                 'image': img_bgr,
                 'points': xyz,
                 'colors': rgb
             }
-
-        # B. Build World Clouds (Before & After)
-        cloud_before = []
-        colors_before = []
-        cloud_after = []
-        colors_after = []
+        
+        # Build World Cloud
+        cloud_points = []
+        cloud_colors = []
         
         for serial, data in frame_data.items():
-            if data['points'] is None: continue
+            if data['points'] is None:
+                continue
             
-            # Get Transform Before
-            T_before = None
-            if transforms_before[serial]['type'] == 'external':
-                T_before = transforms_before[serial]['world_T_cam']
-            else: # wrist
-                if i < len(transforms_before[serial]['transforms']):
-                    T_before = transforms_before[serial]['transforms'][i]
+            cam = active_cams[serial]
             
-            if T_before is not None:
-                cloud_before.append(transform_points(data['points'], T_before))
-                colors_before.append(data['colors'])
-                
-            # Get Transform After
-            T_after = None
-            if transforms_after[serial]['type'] == 'external':
-                T_after = transforms_after[serial]['world_T_cam']
-            else: # wrist
-                if i < len(transforms_after[serial]['transforms']):
-                    T_after = transforms_after[serial]['transforms'][i]
+            if cam['type'] == 'external':
+                T = cam['world_T_cam']
+            else:  # wrist
+                if i < len(cam['transforms']):
+                    T = cam['transforms'][i]
+                else:
+                    continue
             
-            if T_after is not None:
-                cloud_after.append(transform_points(data['points'], T_after))
-                colors_after.append(data['colors'])
-
+            pts_world = transform_points(data['points'], T)
+            cloud_points.append(pts_world)
+            cloud_colors.append(data['colors'])
+        
         # Stack clouds
-        pts_world_before = np.vstack(cloud_before) if cloud_before else np.empty((0, 3))
-        cols_world_before = np.vstack(colors_before) if colors_before else np.empty((0, 3))
+        if cloud_points:
+            pts_world = np.vstack(cloud_points)
+            cols_world = np.vstack(cloud_colors)
+        else:
+            pts_world = np.empty((0, 3))
+            cols_world = np.empty((0, 3))
         
-        pts_world_after = np.vstack(cloud_after) if cloud_after else np.empty((0, 3))
-        cols_world_after = np.vstack(colors_after) if colors_after else np.empty((0, 3))
-        
-        # C. Project and Write
+        # Project and Write to each camera
         for serial, cam in active_cams.items():
-            if serial not in frame_data: continue
+            if serial not in frame_data:
+                continue
             
             img = frame_data[serial]['image']
-            local_pts = frame_data[serial]['points']
-            if local_pts is None: continue
+            if img is None:
+                continue
             
             K = cam['K']
             w, h = cam['w'], cam['h']
             
-            # -- BEFORE --
-            T_cam_before = None
-            if transforms_before[serial]['type'] == 'external':
-                T_cam_before = transforms_before[serial]['world_T_cam']
-            elif i < len(transforms_before[serial]['transforms']):
-                T_cam_before = transforms_before[serial]['transforms'][i]
-                
-            if T_cam_before is not None:
-                # Project GLOBAL world points back to this camera
-                uv, cols = project_points_to_image(pts_world_before, K, T_cam_before, w, h, colors=cols_world_before)
-                img_out = draw_points_on_image(img, uv, colors=cols)
-                recorders[serial]['before'].write_frame(img_out)
+            # Get camera transform
+            if cam['type'] == 'external':
+                T_cam = cam['world_T_cam']
+            elif i < len(cam['transforms']):
+                T_cam = cam['transforms'][i]
+            else:
+                continue
             
-            # -- AFTER --
-            T_cam_after = None
-            if transforms_after[serial]['type'] == 'external':
-                T_cam_after = transforms_after[serial]['world_T_cam']
-            elif i < len(transforms_after[serial]['transforms']):
-                T_cam_after = transforms_after[serial]['transforms'][i]
-                
-            if T_cam_after is not None:
-                # Project GLOBAL world points back to this camera
-                uv, cols = project_points_to_image(pts_world_after, K, T_cam_after, w, h, colors=cols_world_after)
-                img_out = draw_points_on_image(img, uv, colors=cols)
-                recorders[serial]['after'].write_frame(img_out)
+            if len(pts_world) > 0:
+                uv, cols = project_points_to_image(
+                    pts_world, K, T_cam, w, h, colors=cols_world
+                )
+                img_out = draw_points_on_image(img.copy(), uv, colors=cols)
+            else:
+                img_out = img.copy()
+            
+            recorders[serial].write_frame(img_out)
+    
+    # Cleanup
+    for rec in recorders.values():
+        rec.close()
+    
+    print(f"[VIDEO] Videos saved to: {no_icp_dir}")
 
-    # 3. Cleanup
-    for recs in recorders.values():
-        recs['before'].close()
-        recs['after'].close()
-    print("[VIDEO] Done.")
 
 def main():
+    """Main function - creates videos without ICP optimization."""
+    
     # Load configuration
     with open('conversions/droid/config.yaml', 'r') as f:
         CONFIG = yaml.safe_load(f)
     
-    print("=== DROID Full Fusion (Wrist + External) ===")
-    rr.init("droid_full_fusion", spawn=True)
+    print("=" * 60)
+    print("Create Video With Tracks (No ICP)")
+    print("=" * 60)
+    print("[INFO] This script does NOT use ICP optimization")
+    print("[INFO] For ICP-optimized videos, use icp_improved_video_and_pointcloud.py")
+    print("[INFO] Excluding gripper region (< 15cm from wrist camera)")
+    print("=" * 60)
+    
+    # Initialize Rerun
+    rr.init("droid_video_tracks", spawn=True)
     rrd_save_path = CONFIG['rrd_output_path']
     rrd_save_path = rrd_save_path.replace(".rrd", "")
-    rrd_save_path = f"{rrd_save_path}_full_fusion.rrd" 
+    rrd_save_path = f"{rrd_save_path}_video_tracks.rrd"
     rr.save(rrd_save_path)
     
     # Define Up-Axis for the World (Z-up is standard for Robotics)
     rr.log("world", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
-
+    
     # --- 1. Load Robot Data ---
-    print("[INFO] Loading H5 Trajectory...")
+    print("\n[INFO] Loading H5 Trajectory...")
     
     h5_file = h5py.File(CONFIG['h5_path'], 'r')
     cartesian_positions = h5_file['observation/robot_state/cartesian_position'][:]
     gripper_positions = h5_file['observation/robot_state/gripper_position'][:]
     h5_file.close()
     num_frames = len(cartesian_positions)
-
+    print(f"[INFO] Loaded {num_frames} frames")
+    
     # Init Gripper Viz
     gripper_viz = GripperVisualizer()
     gripper_viz.init_rerun()
-
+    
     # --- 2. Calculate Wrist Transforms ---
     wrist_cam_transforms = []
     wrist_serial = None
+    T_ee_cam = None
     
-    metadata_path = CONFIG['metadata_path']
+    metadata_path = CONFIG.get('metadata_path')
     if metadata_path is None:
         episode_dir = os.path.dirname(CONFIG['h5_path'])
         metadata_files = glob.glob(os.path.join(episode_dir, "metadata_*.json"))
-        if metadata_files: metadata_path = metadata_files[0]
-
+        if metadata_files:
+            metadata_path = metadata_files[0]
+    
     if metadata_path and os.path.exists(metadata_path):
         import json
-        with open(metadata_path, 'r') as f: meta = json.load(f)
+        with open(metadata_path, 'r') as f:
+            meta = json.load(f)
         wrist_serial = str(meta.get("wrist_cam_serial", ""))
         wrist_pose_t0 = meta.get("wrist_cam_extrinsics")
-
+        
         if wrist_pose_t0:
             # Calculate constant offset
             T_ee_cam = compute_wrist_cam_offset(wrist_pose_t0, cartesian_positions[0])
-            
             # Precompute all wrist camera poses
             wrist_cam_transforms = precompute_wrist_trajectory(cartesian_positions, T_ee_cam)
+            print(f"[INFO] Wrist camera serial: {wrist_serial}")
     
     # --- 3. Init Cameras ---
-    cameras = {} # Holds all cameras (Ext + Wrist)
+    cameras = {}
     
     # A. External Cameras
     ext_data = find_episode_data_by_date(CONFIG['h5_path'], CONFIG['extrinsics_json_path'])
     if ext_data:
         for cam_id, transform_list in ext_data.items():
-            if not cam_id.isdigit(): continue
+            if not cam_id.isdigit():
+                continue
             svo = find_svo_for_camera(CONFIG['recordings_dir'], cam_id)
             if svo:
                 cameras[cam_id] = {
@@ -244,21 +280,21 @@ def main():
                     "svo": svo,
                     "world_T_cam": external_cam_to_world(transform_list)
                 }
-
+    
     # B. Wrist Camera
-    if wrist_serial:
+    if wrist_serial and len(wrist_cam_transforms) > 0:
         svo = find_svo_for_camera(CONFIG['recordings_dir'], wrist_serial)
         if svo:
             print(f"[INFO] Found Wrist Camera SVO: {wrist_serial}")
             cameras[wrist_serial] = {
                 "type": "wrist",
                 "svo": svo,
-                "transforms": wrist_cam_transforms, # List of 4x4 matrices
+                "transforms": wrist_cam_transforms,
                 "T_ee_cam": T_ee_cam
             }
         else:
             print(f"[WARN] Wrist SVO not found for serial {wrist_serial}")
-
+    
     # Open ZEDs
     active_cams = {}
     for serial, data in cameras.items():
@@ -272,63 +308,57 @@ def main():
         if zed.open(init) == sl.ERROR_CODE.SUCCESS:
             data['zed'] = zed
             data['runtime'] = sl.RuntimeParameters()
-            data['K'], data['w'], data['h'] = get_zed_intrinsics(zed) 
+            data['K'], data['w'], data['h'] = get_zed_intrinsics(zed)
             active_cams[serial] = data
+            print(f"[INFO] Opened camera {serial} ({data['type']})")
         else:
             print(f"[ERROR] Failed to open {serial}")
-
-    # ====================================================
-    # [NEW] MULTI-FRAME OPTIMIZATION PIPELINE
-    # ====================================================
     
-    # Capture BEFORE state
-    transforms_before = capture_transforms(active_cams)
-
-    # 1. Optimize External Cameras (using 20-frame accumulation)
-    optimize_external_cameras_multi_frame(active_cams, CONFIG)
-
-    # 2. Optimize Wrist Camera (using 5 different test angles)
-    if wrist_serial and wrist_serial in active_cams:
-        optimize_wrist_multi_frame(active_cams, cartesian_positions, CONFIG)
+    print(f"[INFO] Active cameras: {len(active_cams)}")
     
-    # Capture AFTER state
-    transforms_after = capture_transforms(active_cams)
-
-    # Generate Comparison Videos
-    generate_comparison_videos(active_cams, transforms_before, transforms_after, num_frames, CONFIG)
-
-    # ====================================================
-
-    # --- 4. Render Loop ---
+    # --- Generate Videos (No ICP) ---
+    generate_videos_no_icp(active_cams, num_frames, CONFIG)
+    
+    # --- 4. Render Loop for Rerun ---
+    print("\n[INFO] Generating Rerun visualization...")
+    
     # Reset cameras for Rerun logging
     for cam in active_cams.values():
         cam['zed'].set_svo_position(0)
-
-    max_frames = CONFIG["max_frames"]
+    
+    max_frames = CONFIG.get("max_frames", 50)
     print(f"[INFO] Processing {min(max_frames, num_frames)} frames...")
     
+    # Parameters for filtering
+    min_depth_wrist = CONFIG.get('min_depth_wrist_icp', 0.15)  # Exclude gripper
+    max_depth_wrist = CONFIG.get('wrist_max_depth', 0.75)
+    min_depth_ext = CONFIG.get('min_depth', 0.1)
+    max_depth_ext = CONFIG.get('ext_max_depth', 1.5)
+    
     for i in range(min(max_frames, num_frames)):
-        if i % 10 == 0: print(f"Frame {i}")
+        if i % 10 == 0:
+            print(f"Frame {i}")
         rr.set_time(timeline="frame_index", sequence=i)
-
+        
         # Update Gripper (use end-effector pose directly)
         T_base_ee = pose6_to_T(cartesian_positions[i])
-        #rotate by 90 degrees to align
+        # Rotate by 90 degrees to align
         R_fix = R.from_euler('z', 90, degrees=True).as_matrix()
         T_base_ee[:3, :3] = T_base_ee[:3, :3] @ R_fix
         gripper_viz.update(T_base_ee, gripper_positions[i])
-
+        
         for serial, cam in active_cams.items():
             zed = cam['zed']
-            if zed.grab(cam['runtime']) != sl.ERROR_CODE.SUCCESS: continue
-
+            if zed.grab(cam['runtime']) != sl.ERROR_CODE.SUCCESS:
+                continue
+            
             # -- WRIST CAMERA LOGIC --
             if cam['type'] == "wrist":
-                if i >= len(cam['transforms']): continue
+                if i >= len(cam['transforms']):
+                    continue
                 
-                # 1. Update the transform of the wrist camera in the World
                 T_wrist = cam['transforms'][i]
-
+                
                 rr.log(
                     "world/wrist_cam",
                     rr.Transform3D(
@@ -337,8 +367,7 @@ def main():
                         axis_length=0.1
                     )
                 )
-
-                # Log Pinhole
+                
                 rr.log(
                     "world/wrist_cam/pinhole",
                     rr.Pinhole(
@@ -347,31 +376,37 @@ def main():
                         height=cam['h']
                     )
                 )
-                #TODO: are the tranformations only in rerun?..
                 
-                # 2. Get Local Points
-                xyz, rgb = get_filtered_cloud(zed, cam['runtime'], CONFIG['wrist_max_depth'], CONFIG['min_depth_wrist'])
-                if xyz is None: continue
-
-                # 3. Transform Points to World
+                # Get Local Points - EXCLUDE GRIPPER
+                xyz, rgb = get_filtered_cloud(
+                    zed, cam['runtime'],
+                    max_depth_wrist,
+                    min_depth_wrist  # 15cm to exclude gripper
+                )
+                if xyz is None:
+                    continue
+                
+                # Transform Points to World
                 xyz_world = transform_points(xyz, T_wrist)
-
-                # 4. Log Points (in World Frame)
+                
+                # Log Points (in World Frame)
                 rr.log(
                     "world/points/wrist_cam",
-                    rr.Points3D(xyz_world, colors=rgb, radii=CONFIG['radii_size'])
+                    rr.Points3D(xyz_world, colors=rgb, radii=CONFIG.get('radii_size', 0.001))
                 )
-
+            
             # -- EXTERNAL CAMERA LOGIC --
             else:
-                # 1. Get Local Points
-                xyz, rgb = get_filtered_cloud(zed, cam['runtime'], CONFIG['ext_max_depth'], CONFIG['min_depth'])
-                if xyz is None: continue
-
-                # 2. Transform to World (External cams are static, so we just do the math once per frame)
+                xyz, rgb = get_filtered_cloud(
+                    zed, cam['runtime'],
+                    max_depth_ext,
+                    min_depth_ext
+                )
+                if xyz is None:
+                    continue
+                
                 T = cam['world_T_cam']
                 
-                # Log Transform
                 rr.log(
                     f"world/external_cams/{serial}",
                     rr.Transform3D(
@@ -380,8 +415,7 @@ def main():
                         axis_length=0.1
                     )
                 )
-
-                # Log Pinhole
+                
                 rr.log(
                     f"world/external_cams/{serial}/pinhole",
                     rr.Pinhole(
@@ -390,20 +424,23 @@ def main():
                         height=cam['h']
                     )
                 )
-
-                # 3. Transform Points to World
+                
                 xyz_world = transform_points(xyz, T)
-
-                # 4. Log Points (in World Frame)
+                
                 rr.log(
                     f"world/points/external_cams/{serial}",
-                    rr.Points3D(xyz_world, colors=rgb, radii=CONFIG['radii_size'])
+                    rr.Points3D(xyz_world, colors=rgb, radii=CONFIG.get('radii_size', 0.001))
                 )
-
+    
     # Cleanup
-    for c in active_cams.values(): c['zed'].close()
+    for c in active_cams.values():
+        c['zed'].close()
+    
+    print("\n" + "=" * 60)
     print("[SUCCESS] Done.")
+    print(f"[INFO] Videos saved to: {os.path.join(CONFIG.get('video_output_path', 'point_clouds/videos'), 'videos_no_icp')}")
     print(f"[INFO] RRD saved to: {rrd_save_path}")
+    print("=" * 60)
 
 
 if __name__ == "__main__":
