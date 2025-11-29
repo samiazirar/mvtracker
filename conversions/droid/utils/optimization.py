@@ -20,6 +20,17 @@ import open3d as o3d
 from typing import Optional, Tuple, List, Dict
 from scipy.spatial.transform import Rotation as R
 
+# Local imports
+from .transforms import transform_points
+from .camera_utils import get_filtered_cloud
+
+# Optional import for ZED SDK (only needed when running with actual cameras)
+try:
+    import pyzed.sl as sl
+    HAS_PYZED = True
+except ImportError:
+    HAS_PYZED = False
+
 
 # =============================================================================
 # Open3D Point Cloud Utilities
@@ -509,10 +520,6 @@ def collect_multi_frame_pointclouds(
     Returns:
         Tuple of (wrist_accumulated_cloud, external_accumulated_cloud, valid_frame_indices)
     """
-    import pyzed.sl as sl
-    from .camera_utils import get_filtered_cloud
-    from .transforms import transform_points
-    
     # Find cameras
     wrist_cam = None
     external_cams = {}
@@ -794,8 +801,6 @@ def optimize_wrist_z_offset(
     Note: This is kept for backwards compatibility but the new
     optimize_wrist_camera_full_icp function is recommended.
     """
-    from .transforms import transform_points
-    
     # Transform wrist points to world
     wrist_world = transform_points(wrist_points_local, wrist_transform)
     
@@ -823,8 +828,6 @@ def optimize_wrist_z_offset_multi_frame(
     
     Note: This is kept for backwards compatibility.
     """
-    from .transforms import transform_points
-    
     # Accumulate all points
     all_wrist_world = []
     all_ext_world = []
