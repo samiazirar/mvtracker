@@ -1,14 +1,22 @@
 """
-Compare reprojected videos (ICP vs No-ICP) against ground truth using photometric error metrics.
+Compare reprojected videos across different ICP methods using photometric error metrics.
+
+This script automatically discovers all video folders and compares them against
+a baseline (videos_no_icp). It supports comparing multiple ICP variants:
+- videos_no_icp (baseline)
+- videos_icp_z (Z-only ICP)
+- videos_icp_xyz (full 3D ICP)
+- videos_external_icp (external camera alignment)
+- etc.
 
 Metrics computed:
-1. MSE (Mean Squared Error) - pixel-wise squared difference
-2. PSNR (Peak Signal-to-Noise Ratio) - log scale quality metric
-3. SSIM (Structural Similarity Index) - perceptual similarity
-4. MAE (Mean Absolute Error) - average pixel difference
+1. MSE (Mean Squared Error) - pixel-wise squared difference  
+2. PSNR (Peak Signal-to-Noise Ratio) - log scale quality metric (higher = better)
+3. SSIM (Structural Similarity Index) - perceptual similarity (higher = better)
+4. MAE (Mean Absolute Error) - average pixel difference (lower = better)
 
 Usage:
-    python compare_photometric_error.py [--videos_dir PATH] [--output_dir PATH]
+    python compare_photometric_error.py [--videos_dir PATH] [--baseline FOLDER]
 """
 
 import cv2
@@ -18,7 +26,7 @@ import glob
 import argparse
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 import json
 
 
@@ -175,109 +183,199 @@ def compare_videos(video_path: str, gt_path: str) -> Tuple[VideoMetrics, List[Fr
     return video_metrics, frame_metrics_list
 
 
-def find_matching_videos(videos_dir: str) -> Dict[str, Dict[str, str]]:
+def discover_video_folders(videos_dir: str) -> List[str]:
     """
-    Find matching video files across ICP, no-ICP, and ground truth folders.
+    Discover all video folders in the videos directory.
     
     Returns:
-        Dict mapping camera_serial to {'icp': path, 'no_icp': path, 'gt': path}
+        List of folder names (e.g., ['videos_no_icp', 'videos_icp_z', 'videos_icp_xyz'])
     """
-    icp_dir = os.path.join(videos_dir, "videos_icp")
-    no_icp_dir = os.path.join(videos_dir, "videos_no_icp")
-    gt_dir = os.path.join(videos_dir, "ground_truth")
+    folders = []
+    for item in os.listdir(videos_dir):
+        item_path = os.path.join(videos_dir, item)
+        if os.path.isdir(item_path) and item.startswith('videos'):
+            # Check if it contains video files
+            mp4_files = glob.glob(os.path.join(item_path, "*.mp4"))
+            if mp4_files:
+                folders.append(item)
+    return sorted(folders)
+
+
+def find_videos_in_folder(folder_path: str) -> Dict[str, str]:
+    """
+    Find all videos in a folder, keyed by camera serial.
     
+    Returns:
+        Dict mapping camera_serial to video path
+    """
+    videos = {}
+    mp4_files = glob.glob(os.path.join(folder_path, "*.mp4"))
+    
+    for mp4_path in mp4_files:
+        filename = os.path.basename(mp4_path)
+        # Extract camera serial (e.g., "17368348_reprojection.mp4" -> "17368348")
+        serial = filename.split('_')[0]
+        if serial.isdigit():
+            videos[serial] = mp4_path
+    
+    return videos
+
+
+def find_matching_videos_across_folders(videos_dir: str, baseline_folder: str = "videos_no_icp") -> Dict[str, Dict[str, str]]:
+    """
+    Find matching video files across all video folders.
+    
+    Args:
+        videos_dir: Root directory containing video folders
+        baseline_folder: Folder to use as baseline for comparison
+        
+    Returns:
+        Dict mapping camera_serial to {folder_name: video_path, ...}
+    """
+    folders = discover_video_folders(videos_dir)
+    
+    if not folders:
+        print(f"[ERROR] No video folders found in {videos_dir}")
+        return {}
+    
+    print(f"[INFO] Discovered {len(folders)} video folder(s): {folders}")
+    
+    # Collect all videos from all folders
+    all_videos = {}  # folder -> {serial -> path}
+    all_serials = set()
+    
+    for folder in folders:
+        folder_path = os.path.join(videos_dir, folder)
+        videos = find_videos_in_folder(folder_path)
+        all_videos[folder] = videos
+        all_serials.update(videos.keys())
+    
+    # Build matches - for each serial, collect paths from all folders
     matches = {}
-    
-    # Find all ground truth videos
-    gt_videos = glob.glob(os.path.join(gt_dir, "*_ground_truth.mp4"))
-    
-    for gt_path in gt_videos:
-        filename = os.path.basename(gt_path)
-        # Extract camera serial (e.g., "17368348_ground_truth.mp4" -> "17368348")
-        serial = filename.replace("_ground_truth.mp4", "")
-        
-        icp_path = os.path.join(icp_dir, f"{serial}_reprojection.mp4")
-        no_icp_path = os.path.join(no_icp_dir, f"{serial}_reprojection.mp4")
-        
-        if os.path.exists(icp_path) and os.path.exists(no_icp_path):
-            matches[serial] = {
-                'icp': icp_path,
-                'no_icp': no_icp_path,
-                'gt': gt_path
-            }
+    for serial in all_serials:
+        matches[serial] = {}
+        for folder in folders:
+            if serial in all_videos[folder]:
+                matches[serial][folder] = all_videos[folder][serial]
     
     return matches
 
 
-def generate_comparison_report(results: Dict, output_dir: str):
+def generate_comparison_report(results: Dict, videos_dir: str, baseline: str):
     """Generate a comparison report with visualizations."""
+    output_dir = os.path.join(videos_dir, "comparison_report")
     os.makedirs(output_dir, exist_ok=True)
     
+    # Get all methods
+    all_methods = set()
+    for serial_data in results.values():
+        all_methods.update(serial_data.keys())
+    methods = sorted(all_methods)
+    
     # Summary table
-    print("\n" + "=" * 80)
+    print("\n" + "=" * 100)
     print("PHOTOMETRIC COMPARISON REPORT")
-    print("=" * 80)
-    print(f"\n{'Camera':<15} {'Type':<10} {'MSE':>12} {'PSNR':>12} {'SSIM':>12} {'MAE':>12}")
-    print("-" * 80)
+    print("=" * 100)
     
-    summary = {}
+    # Header
+    header = f"{'Camera':<12} {'Method':<20} {'MSE':>10} {'PSNR':>10} {'SSIM':>10} {'MAE':>10}"
+    print(f"\n{header}")
+    print("-" * 100)
     
-    for serial, data in results.items():
-        for method in ['no_icp', 'icp']:
-            metrics = data[method]
-            print(f"{serial:<15} {method:<10} {metrics.mean_mse:>12.2f} "
-                  f"{metrics.mean_psnr:>12.2f} {metrics.mean_ssim:>12.4f} "
-                  f"{metrics.mean_mae:>12.2f}")
+    # Per-camera results
+    for serial in sorted(results.keys()):
+        data = results[serial]
+        for method in methods:
+            if method in data:
+                metrics = data[method]
+                print(f"{serial:<12} {method:<20} {metrics.mean_mse:>10.2f} "
+                      f"{metrics.mean_psnr:>10.2f} {metrics.mean_ssim:>10.4f} "
+                      f"{metrics.mean_mae:>10.2f}")
         print()
-        
-        # Track improvements
-        improvement = {
-            'mse': data['no_icp'].mean_mse - data['icp'].mean_mse,
-            'psnr': data['icp'].mean_psnr - data['no_icp'].mean_psnr,
-            'ssim': data['icp'].mean_ssim - data['no_icp'].mean_ssim,
-            'mae': data['no_icp'].mean_mae - data['icp'].mean_mae,
-        }
-        summary[serial] = improvement
     
-    # Print improvement summary
-    print("\n" + "=" * 80)
-    print("ICP IMPROVEMENT SUMMARY (positive = ICP is better)")
-    print("=" * 80)
-    print(f"\n{'Camera':<15} {'ΔMSE':>12} {'ΔPSNR':>12} {'ΔSSIM':>12} {'ΔMAE':>12}")
-    print("-" * 80)
-    
-    for serial, imp in summary.items():
-        mse_better = "↓" if imp['mse'] > 0 else "↑"
-        psnr_better = "↑" if imp['psnr'] > 0 else "↓"
-        ssim_better = "↑" if imp['ssim'] > 0 else "↓"
-        mae_better = "↓" if imp['mae'] > 0 else "↑"
+    # Compute improvements relative to baseline
+    if baseline in methods:
+        print("\n" + "=" * 100)
+        print(f"IMPROVEMENT vs BASELINE ({baseline})")
+        print("  MSE/MAE: negative = better (lower error)")
+        print("  PSNR/SSIM: positive = better (higher quality)")
+        print("=" * 100)
         
-        print(f"{serial:<15} {imp['mse']:>10.2f}{mse_better} "
-              f"{imp['psnr']:>10.2f}{psnr_better} "
-              f"{imp['ssim']:>10.4f}{ssim_better} "
-              f"{imp['mae']:>10.2f}{mae_better}")
+        comparison_methods = [m for m in methods if m != baseline]
+        
+        for method in comparison_methods:
+            print(f"\n--- {method} vs {baseline} ---")
+            print(f"{'Camera':<12} {'ΔMSE':>12} {'ΔPSNR':>12} {'ΔSSIM':>12} {'ΔMAE':>12} {'Verdict':>12}")
+            print("-" * 80)
+            
+            total_better = 0
+            total_worse = 0
+            total_same = 0
+            
+            for serial in sorted(results.keys()):
+                data = results[serial]
+                if baseline in data and method in data:
+                    base_m = data[baseline]
+                    comp_m = data[method]
+                    
+                    delta_mse = comp_m.mean_mse - base_m.mean_mse
+                    delta_psnr = comp_m.mean_psnr - base_m.mean_psnr
+                    delta_ssim = comp_m.mean_ssim - base_m.mean_ssim
+                    delta_mae = comp_m.mean_mae - base_m.mean_mae
+                    
+                    # Verdict: count improvements
+                    # Lower MSE/MAE = better, Higher PSNR/SSIM = better
+                    improvements = 0
+                    if delta_mse < -0.1: improvements += 1
+                    if delta_psnr > 0.1: improvements += 1
+                    if delta_ssim > 0.001: improvements += 1
+                    if delta_mae < -0.1: improvements += 1
+                    
+                    if improvements >= 3:
+                        verdict = "✓ BETTER"
+                        total_better += 1
+                    elif improvements <= 1:
+                        verdict = "✗ WORSE"
+                        total_worse += 1
+                    else:
+                        verdict = "~ MIXED"
+                        total_same += 1
+                    
+                    # Arrows for direction
+                    mse_arrow = "↓" if delta_mse < 0 else "↑"
+                    psnr_arrow = "↑" if delta_psnr > 0 else "↓"
+                    ssim_arrow = "↑" if delta_ssim > 0 else "↓"
+                    mae_arrow = "↓" if delta_mae < 0 else "↑"
+                    
+                    print(f"{serial:<12} {delta_mse:>10.2f}{mse_arrow} "
+                          f"{delta_psnr:>10.2f}{psnr_arrow} "
+                          f"{delta_ssim:>10.4f}{ssim_arrow} "
+                          f"{delta_mae:>10.2f}{mae_arrow} "
+                          f"{verdict:>12}")
+            
+            print(f"\nSummary: {total_better} better, {total_worse} worse, {total_same} mixed")
     
     # Save JSON report
     json_report = {
-        'cameras': {},
-        'summary': summary
+        'baseline': baseline,
+        'methods': methods,
+        'cameras': {}
     }
     
     for serial, data in results.items():
-        json_report['cameras'][serial] = {
-            'no_icp': {
-                'mse': data['no_icp'].mean_mse,
-                'psnr': data['no_icp'].mean_psnr,
-                'ssim': data['no_icp'].mean_ssim,
-                'mae': data['no_icp'].mean_mae,
-            },
-            'icp': {
-                'mse': data['icp'].mean_mse,
-                'psnr': data['icp'].mean_psnr,
-                'ssim': data['icp'].mean_ssim,
-                'mae': data['icp'].mean_mae,
+        json_report['cameras'][serial] = {}
+        for method, metrics in data.items():
+            json_report['cameras'][serial][method] = {
+                'mse': metrics.mean_mse,
+                'psnr': metrics.mean_psnr,
+                'ssim': metrics.mean_ssim,
+                'mae': metrics.mean_mae,
+                'std_mse': metrics.std_mse,
+                'std_psnr': metrics.std_psnr,
+                'std_ssim': metrics.std_ssim,
+                'std_mae': metrics.std_mae,
+                'frame_count': metrics.frame_count
             }
-        }
     
     json_path = os.path.join(output_dir, "photometric_comparison.json")
     with open(json_path, 'w') as f:
@@ -286,53 +384,61 @@ def generate_comparison_report(results: Dict, output_dir: str):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Compare reprojected videos against ground truth")
+    parser = argparse.ArgumentParser(description="Compare reprojected videos using photometric metrics")
     parser.add_argument("--videos_dir", type=str, default="point_clouds/videos",
-                       help="Directory containing video folders (videos_icp, videos_no_icp, ground_truth)")
-    parser.add_argument("--output_dir", type=str, default="point_clouds/videos/comparison_report",
-                       help="Directory to save comparison report")
+                       help="Directory containing video folders")
+    parser.add_argument("--baseline", type=str, default="videos_no_icp",
+                       help="Baseline folder for comparison (default: videos_no_icp)")
     args = parser.parse_args()
     
     print("=" * 60)
-    print("PHOTOMETRIC ERROR COMPARISON")
+    print("PHOTOMETRIC ERROR COMPARISON (Auto-Discovery)")
     print("=" * 60)
     
-    # Find matching videos
-    print(f"\n[INFO] Looking for videos in: {args.videos_dir}")
-    matches = find_matching_videos(args.videos_dir)
+    # Find all video folders and match videos
+    print(f"\n[INFO] Scanning: {args.videos_dir}")
+    matches = find_matching_videos_across_folders(args.videos_dir, args.baseline)
     
     if not matches:
-        print("[ERROR] No matching video sets found!")
-        print("  Expected structure:")
-        print("    videos_dir/")
-        print("      videos_icp/<serial>_reprojection.mp4")
-        print("      videos_no_icp/<serial>_reprojection.mp4")
-        print("      ground_truth/<serial>_ground_truth.mp4")
+        print("[ERROR] No videos found!")
         return
     
-    print(f"[INFO] Found {len(matches)} camera(s) with complete video sets")
+    print(f"[INFO] Found {len(matches)} camera(s)")
     
-    # Compare each camera
+    # Get all folders
+    all_folders = set()
+    for serial_videos in matches.values():
+        all_folders.update(serial_videos.keys())
+    folders = sorted(all_folders)
+    
+    print(f"[INFO] Comparing folders: {folders}")
+    
+    # Compare videos from each folder against baseline
     results = {}
     
     for serial, paths in matches.items():
         print(f"\n[INFO] Processing camera: {serial}")
+        results[serial] = {}
         
-        # Compare no-ICP vs ground truth
-        print(f"  -> Comparing no-ICP...")
-        no_icp_metrics, _ = compare_videos(paths['no_icp'], paths['gt'])
+        # Get baseline video path
+        baseline_path = paths.get(args.baseline)
+        if not baseline_path:
+            print(f"  [WARN] No baseline video for {serial}, skipping")
+            continue
         
-        # Compare ICP vs ground truth
-        print(f"  -> Comparing ICP...")
-        icp_metrics, _ = compare_videos(paths['icp'], paths['gt'])
-        
-        results[serial] = {
-            'no_icp': no_icp_metrics,
-            'icp': icp_metrics
-        }
+        for folder, video_path in paths.items():
+            print(f"  -> Comparing {folder} vs {args.baseline}...")
+            try:
+                # Compare this video against baseline
+                metrics, _ = compare_videos(video_path, baseline_path)
+                results[serial][folder] = metrics
+                print(f"    Frames: {metrics.frame_count}, MSE: {metrics.mean_mse:.2f}, SSIM: {metrics.mean_ssim:.4f}")
+                    
+            except Exception as e:
+                print(f"    [ERROR] {e}")
     
     # Generate report
-    generate_comparison_report(results, args.output_dir)
+    generate_comparison_report(results, args.videos_dir, args.baseline)
     
     print("\n[SUCCESS] Comparison complete!")
 

@@ -1,13 +1,15 @@
-"""Utility modules for DROID point cloud generation."""
+"""Utils package for DROID conversions.
 
+This module exposes all utility functions for DROID point cloud generation.
+"""
+
+# Import from transforms
 from .transforms import (
-    # Basic utilities
-    pose6_to_T, 
-    rvec_tvec_to_matrix, 
+    pose6_to_T,
+    rvec_tvec_to_matrix,
     transform_points,
     decompose_transform,
     invert_transform,
-    # DROID-specific pipelines
     compute_wrist_cam_offset,
     wrist_cam_to_world,
     wrist_points_to_world,
@@ -15,63 +17,56 @@ from .transforms import (
     external_points_to_world,
     precompute_wrist_trajectory,
 )
+
+# Import from camera_utils
 from .camera_utils import (
     find_svo_for_camera,
     find_episode_data_by_date,
     get_zed_intrinsics,
-    get_filtered_cloud
-)
-from .gripper_visualizer import GripperVisualizer
-from .object_detector import ObjectDetector, boxes_to_mask
-from .video_utils import (
-    VideoRecorder, 
-    project_points_to_image, 
-    draw_points_on_image
-)
-from .optimization import (
-    optimize_wrist_camera_icp,
-    optimize_wrist_camera_icp_z_only,
-    optimize_wrist_z_offset_icp,
-    apply_z_offset_to_wrist_transforms,
-    numpy_to_o3d_pointcloud,
-    downsample_pointcloud,
-    estimate_normals,
-    run_icp_point_to_plane,
+    get_filtered_cloud,
+    reproject_point_cloud,
+    reproject_all_to_one,
+    backproject_2d_to_3d,
+    combine_masks,
 )
 
+# Import from gripper_visualizer
+from .gripper_visualizer import GripperVisualizer
+
+# Import from object_detector (if available)
+_object_detector_available = False
+try:
+    from .object_detector import ObjectDetector
+    _object_detector_available = True
+except ImportError:
+    pass
+
 __all__ = [
-    # Basic transform utilities
+    # Transforms
     'pose6_to_T',
     'rvec_tvec_to_matrix',
     'transform_points',
     'decompose_transform',
     'invert_transform',
-    # DROID-specific pipelines
     'compute_wrist_cam_offset',
     'wrist_cam_to_world',
     'wrist_points_to_world',
     'external_cam_to_world',
     'external_points_to_world',
     'precompute_wrist_trajectory',
-    # Camera utilities
+    # Camera utils
     'find_svo_for_camera',
     'find_episode_data_by_date',
     'get_zed_intrinsics',
     'get_filtered_cloud',
-    # Visualization & Detection
+    'reproject_point_cloud',
+    'reproject_all_to_one',
+    'backproject_2d_to_3d',
+    'combine_masks',
+    # Gripper
     'GripperVisualizer',
-    'ObjectDetector',
-    'boxes_to_mask',
-    # Video
-    'VideoRecorder',
-    'project_points_to_image',
-    'draw_points_on_image',
-    # ICP Optimization
-    'optimize_wrist_camera_icp',
-    'optimize_wrist_z_offset_icp',
-    'apply_z_offset_to_wrist_transforms',
-    'numpy_to_o3d_pointcloud',
-    'downsample_pointcloud',
-    'estimate_normals',
-    'run_icp_point_to_plane',
 ]
+
+# Add ObjectDetector to __all__ only if it was successfully imported
+if _object_detector_available:
+    __all__.append('ObjectDetector')
