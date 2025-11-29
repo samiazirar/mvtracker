@@ -1,0 +1,123 @@
+# =============================================================================
+# GitLab CI/CD configuration for automatic Docker image builds
+# =============================================================================
+# Builds and pushes to registry.gitlab.uni-bonn.de:5050/rpl/public_registry
+#
+# TWO IMAGE TYPES:
+#   1. STABLE (YYYY-MM-stable):
+#      - Everything pre-installed in Docker image
+#      - All third_party deps baked in at /workspace/third_party_stable/
+#      - All Python packages pre-installed
+#      - No git cloning at runtime
+#
+#   2. LATEST:
+#      - Minimal base image
+#      - Pulls dependencies fresh at container start
+#      - Uses mounted workspace third_party/
+# =============================================================================
+
+stages:
+  - build
+
+variables:
+  DOCKER_REGISTRY: registry.gitlab.uni-bonn.de:5050
+  IMAGE_NAME: rpl/public_registry
+  # Use Docker-in-Docker
+  DOCKER_HOST: tcp://docker:2376
+  DOCKER_TLS_CERTDIR: "/certs"
+  DOCKER_TLS_VERIFY: 1
+  DOCKER_CERT_PATH: "$DOCKER_TLS_CERTDIR/client"
+
+# =============================================================================
+# STABLE BUILD - All dependencies baked into Docker image
+# =============================================================================
+build-stable:
+  stage: build
+  image: docker:24.0.5
+  services:
+    - docker:24.0.5-dind
+  before_script:
+    - docker info
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin $DOCKER_REGISTRY
+  script:
+    # Generate date tag (YYYY-MM format, e.g., 2025-11-stable)
+    - export DATE_TAG=$(date +%Y-%m)-stable
+    - echo "=============================================="
+    - echo "  Building STABLE image"
+    - echo "  - All third_party dependencies PRE-INSTALLED"
+    - echo "  - All Python packages PRE-INSTALLED"
+    - echo "  - Tags: stable, $DATE_TAG"
+    - echo "=============================================="
+    
+    # Build stable image with all dependencies
+    - docker build 
+        -t $DOCKER_REGISTRY/$IMAGE_NAME:stable 
+        -t $DOCKER_REGISTRY/$IMAGE_NAME:$DATE_TAG 
+        -f .devcontainer/stable/Dockerfile .
+    
+    # Push both tags
+    - docker push $DOCKER_REGISTRY/$IMAGE_NAME:stable
+    - docker push $DOCKER_REGISTRY/$IMAGE_NAME:$DATE_TAG
+    
+    - echo ""
+    - echo "Successfully pushed STABLE images:"
+    - echo "  - $DOCKER_REGISTRY/$IMAGE_NAME:stable"
+    - echo "  - $DOCKER_REGISTRY/$IMAGE_NAME:$DATE_TAG"
+  rules:
+    # Run on scheduled pipeline (monthly builds)
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+    # Allow manual trigger from web UI
+    - if: $CI_PIPELINE_SOURCE == "web"
+    # Run when stable Dockerfile changes
+    - if: $CI_COMMIT_BRANCH == "main"
+      changes:
+        - .devcontainer/stable/Dockerfile
+        - .devcontainer/stable/**/*
+        - requirements.txt
+  tags:
+    - docker
+
+# =============================================================================
+# LATEST BUILD - Minimal base, pulls deps at runtime
+# =============================================================================
+build-latest:
+  stage: build
+  image: docker:24.0.5
+  services:
+    - docker:24.0.5-dind
+  before_script:
+    - docker info
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin $DOCKER_REGISTRY
+  script:
+    - echo "=============================================="
+    - echo "  Building LATEST image"
+    - echo "  - Minimal base image"
+    - echo "  - Dependencies pulled at container start"
+    - echo "  - Uses mounted workspace third_party/"
+    - echo "  - Tag: latest"
+    - echo "=============================================="
+    
+    # Build latest image (minimal)
+    - docker build 
+        -t $DOCKER_REGISTRY/$IMAGE_NAME:latest 
+        -f .devcontainer/latest/Dockerfile .
+    
+    # Push
+    - docker push $DOCKER_REGISTRY/$IMAGE_NAME:latest
+    
+    - echo ""
+    - echo "Successfully pushed LATEST image:"
+    - echo "  - $DOCKER_REGISTRY/$IMAGE_NAME:latest"
+  rules:
+    # Run on scheduled pipeline (monthly builds)
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+    # Allow manual trigger from web UI
+    - if: $CI_PIPELINE_SOURCE == "web"
+    # Run when latest Dockerfile changes
+    - if: $CI_COMMIT_BRANCH == "main"
+      changes:
+        - .devcontainer/latest/Dockerfile
+        - .devcontainer/latest/**/*
+        - requirements.txt
+  tags:
+    - docker

@@ -18,7 +18,7 @@ min_depth: 0.1         # Meters (Minimum valid depth)
 min_depth_wrist: 0.001 # Meters (Wrist cam can see closer)
 
 # Visualization parameters
-max_frames: 250        # Max frames to process
+max_frames: 20        # Max frames to process
 radii_size: 0.001      # Point size in meters
 
 # Object detection parameters (for mask version)
