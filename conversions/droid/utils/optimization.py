@@ -276,11 +276,11 @@ def optimize_wrist_offset_icp(active_cams, config, num_frames_to_sample=10):
             print(f"  [ICP] Failed to grab wrist frame {frame_idx}, skipping")
             continue
         
-        # Use 15cm min depth to exclude gripper
+        # Use min_depth_wrist_icp to exclude gripper for ICP optimization
         wrist_xyz_local, wrist_rgb = get_filtered_cloud_exclude_near(
             wrist_zed, wrist_cam['runtime'],
             max_depth=config.get('wrist_max_depth', 0.75),
-            min_depth=0.15  # Exclude gripper at <15cm
+            min_depth=config.get('min_depth_wrist_icp', 0.15)  # Exclude gripper for ICP
         )
         
         if wrist_xyz_local is None or len(wrist_xyz_local) == 0:
@@ -391,7 +391,7 @@ def apply_3d_offset_to_wrist(active_cams, cartesian_positions, xyz_offset):
 
 def optimize_wrist_camera_icp(active_cams, cartesian_positions, config):
     """
-    Main entry point for wrist camera ICP optimization.
+    Main entry point for wrist camera ICP optimization (full 3D: X, Y, Z).
     
     This function optimizes the wrist camera 3D offset (X, Y, Z) and updates all transforms.
     
@@ -416,6 +416,40 @@ def optimize_wrist_camera_icp(active_cams, cartesian_positions, config):
         print("[ICP] Offset too small, not applying")
     
     return xyz_offset
+
+
+def optimize_wrist_camera_icp_z_only(active_cams, cartesian_positions, config):
+    """
+    Optimize wrist camera with Z-only offset (1 degree of freedom).
+    
+    This function optimizes only the Z offset and updates all transforms.
+    
+    Args:
+        active_cams: Dictionary of active cameras
+        cartesian_positions: Nx6 array of end-effector poses
+        config: Configuration dictionary
+        
+    Returns:
+        Z offset that was applied in meters
+    """
+    # Get full 3D offset but only use Z
+    xyz_offset, stats = optimize_wrist_offset_icp(
+        active_cams, config,
+        num_frames_to_sample=config.get('icp_num_frames', 10)
+    )
+    
+    z_offset = xyz_offset[2]
+    
+    print(f"\n[ICP-Z] Using Z-only offset: {z_offset:.4f}m (ignoring X={xyz_offset[0]:.4f}m, Y={xyz_offset[1]:.4f}m)")
+    
+    # Apply Z-only offset
+    if abs(z_offset) > 0.001:
+        z_only_offset = np.array([0.0, 0.0, z_offset])
+        apply_3d_offset_to_wrist(active_cams, cartesian_positions, z_only_offset)
+    else:
+        print("[ICP-Z] Z offset too small, not applying")
+    
+    return z_offset
 
 
 # Legacy function name for backward compatibility

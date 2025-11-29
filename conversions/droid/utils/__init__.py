@@ -30,6 +30,7 @@ from .video_utils import (
 )
 from .optimization import (
     optimize_wrist_camera_icp,
+    optimize_wrist_camera_icp_z_only,
     optimize_wrist_z_offset_icp,
     apply_z_offset_to_wrist_transforms,
     numpy_to_o3d_pointcloud,
