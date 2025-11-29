@@ -59,7 +59,8 @@ def create_output_folders(config):
     return no_icp_folder, icp_folder
 
 
-def optimize_wrist_z_offset(wrist_cloud_world, external_cloud_world, initial_offset=0.0):
+def optimize_wrist_z_offset(wrist_cloud_world, external_cloud_world, initial_offset=0.0,
+                            search_range=0.10, num_steps=21, random_seed=42):
     """
     Simple ICP-like optimization to find the best Z offset for wrist camera.
     
@@ -70,6 +71,9 @@ def optimize_wrist_z_offset(wrist_cloud_world, external_cloud_world, initial_off
         wrist_cloud_world: Nx3 array of wrist camera points in world frame
         external_cloud_world: Mx3 array of external camera points in world frame
         initial_offset: Starting Z offset value
+        search_range: Range to search in meters (default: 0.10 = 10cm)
+        num_steps: Number of steps in the grid search (default: 21)
+        random_seed: Random seed for reproducible sampling (default: 42)
         
     Returns:
         Optimal Z offset value
@@ -80,12 +84,15 @@ def optimize_wrist_z_offset(wrist_cloud_world, external_cloud_world, initial_off
     if len(wrist_cloud_world) == 0 or len(external_cloud_world) == 0:
         return initial_offset
     
+    # Set random seed for reproducibility
+    np.random.seed(random_seed)
+    
     # Simple grid search for best Z offset
     best_offset = initial_offset
     best_score = float('inf')
     
-    # Search range: -10cm to +10cm in 1cm increments
-    for z_offset in np.linspace(-0.10, 0.10, 21):
+    # Search range: -search_range to +search_range
+    for z_offset in np.linspace(-search_range, search_range, num_steps):
         # Apply offset to wrist cloud
         offset_cloud = wrist_cloud_world.copy()
         offset_cloud[:, 2] += z_offset
@@ -278,7 +285,12 @@ def main():
         if wrist_clouds and ext_clouds:
             wrist_combined = np.vstack(wrist_clouds)
             ext_combined = np.vstack(ext_clouds)
-            z_offset = optimize_wrist_z_offset(wrist_combined, ext_combined)
+            z_offset = optimize_wrist_z_offset(
+                wrist_combined, ext_combined,
+                search_range=CONFIG.get('icp_search_range', 0.10),
+                num_steps=CONFIG.get('icp_num_steps', 21),
+                random_seed=CONFIG.get('icp_random_seed', 42)
+            )
             print(f"[ICP] Computed Z offset: {z_offset:.4f}m")
             
             # Apply Z offset to wrist transforms

@@ -34,8 +34,10 @@ from .camera_utils import (
 from .gripper_visualizer import GripperVisualizer
 
 # Import from object_detector (if available)
+_object_detector_available = False
 try:
     from .object_detector import ObjectDetector
+    _object_detector_available = True
 except ImportError:
     pass
 
@@ -64,3 +66,7 @@ __all__ = [
     # Gripper
     'GripperVisualizer',
 ]
+
+# Add ObjectDetector to __all__ only if it was successfully imported
+if _object_detector_available:
+    __all__.append('ObjectDetector')
