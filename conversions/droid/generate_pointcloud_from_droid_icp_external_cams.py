@@ -1,1 +1,0 @@
-""" exclude the part of the wrist cam and only icp plane the two extrnal cams"""
