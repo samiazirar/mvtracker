@@ -1,19 +1,24 @@
-"""Optimization utilities for wrist camera ICP alignment.
+"""Robust ICP Optimization for Wrist Camera Alignment.
 
-This module provides ICP-based optimization for aligning the wrist camera
-point cloud to external camera point clouds. It optimizes only the Z offset
-of the wrist camera relative to the gripper (end-effector).
+This module provides full 6-DOF ICP-based optimization for aligning the wrist camera
+point cloud to external camera point clouds.
 
-Key assumptions:
-- Gripper/end-effector pose is assumed to be correct
-- Only the Z coordinate of the wrist camera (depth direction) needs refinement
-- Gripper points (<15cm from camera) are excluded from ICP to avoid self-alignment
+The implementation uses:
+1. Multi-scale ICP with coarse-to-fine alignment
+2. Robust point-to-plane ICP with outlier rejection
+3. Multi-frame accumulation for stable alignment
+4. Global registration (RANSAC + FPFH features) for initial alignment
+
+Key features:
+- Full 6-DOF transformation refinement (not just Z-offset)
+- Gripper exclusion (points < min_depth are filtered)
+- Robust to noise and partial overlaps
 """
 
 import numpy as np
 import open3d as o3d
-from typing import Optional, Tuple, List
-from scipy.optimize import minimize_scalar
+from typing import Optional, Tuple, List, Dict
+from scipy.spatial.transform import Rotation as R
 
 
 # =============================================================================
@@ -31,11 +36,13 @@ def numpy_to_o3d_pointcloud(points: np.ndarray, colors: Optional[np.ndarray] = N
     Returns:
         Open3D PointCloud object
     """
+    if points is None or len(points) == 0:
+        return o3d.geometry.PointCloud()
+    
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(points.astype(np.float64))
     
-    if colors is not None:
-        # Normalize colors to 0-1 if they're in 0-255 range
+    if colors is not None and len(colors) > 0:
         colors = colors.astype(np.float64)
         if colors.max() > 1.0:
             colors = colors / 255.0
@@ -72,6 +79,8 @@ def downsample_pointcloud(pcd: o3d.geometry.PointCloud, voxel_size: float = 0.01
     Returns:
         Downsampled Open3D point cloud
     """
+    if len(pcd.points) == 0:
+        return pcd
     return pcd.voxel_down_sample(voxel_size=voxel_size)
 
 
@@ -87,10 +96,34 @@ def estimate_normals(pcd: o3d.geometry.PointCloud, radius: float = 0.05, max_nn:
     Returns:
         Point cloud with normals estimated
     """
+    if len(pcd.points) == 0:
+        return pcd
     pcd.estimate_normals(
         search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=radius, max_nn=max_nn)
     )
     return pcd
+
+
+def compute_fpfh_features(pcd: o3d.geometry.PointCloud, voxel_size: float = 0.02) -> o3d.pipelines.registration.Feature:
+    """
+    Compute FPFH features for global registration.
+    
+    Args:
+        pcd: Point cloud with normals
+        voxel_size: Voxel size for feature computation
+        
+    Returns:
+        FPFH feature descriptor
+    """
+    if not pcd.has_normals():
+        estimate_normals(pcd, radius=voxel_size * 2)
+    
+    radius_feature = voxel_size * 5
+    fpfh = o3d.pipelines.registration.compute_fpfh_feature(
+        pcd,
+        o3d.geometry.KDTreeSearchParamHybrid(radius=radius_feature, max_nn=100)
+    )
+    return fpfh
 
 
 # =============================================================================
@@ -105,21 +138,18 @@ def filter_points_by_distance_from_camera(
     """
     Filter out points that are too close to the camera (gripper region).
     
-    This is used to exclude the gripper from ICP alignment since we assume
-    the gripper pose is correct and only the wrist camera Z offset is wrong.
-    
     Args:
         points: Nx3 numpy array of 3D points in camera frame
         colors: Optional Nx3 numpy array of RGB colors
-        min_distance: Minimum distance from camera origin (default: 15cm to exclude gripper)
+        min_distance: Minimum distance from camera origin
         
     Returns:
         Tuple of (filtered_points, filtered_colors)
     """
-    # Calculate distance from camera origin (0, 0, 0)
-    distances = np.linalg.norm(points, axis=1)
+    if points is None or len(points) == 0:
+        return np.empty((0, 3)), None if colors is None else np.empty((0, 3))
     
-    # Keep points beyond min_distance
+    distances = np.linalg.norm(points, axis=1)
     mask = distances > min_distance
     
     filtered_points = points[mask]
@@ -142,13 +172,15 @@ def filter_wrist_cloud_for_icp(
     Args:
         points_local: Nx3 numpy array of 3D points in camera frame
         colors: Optional Nx3 numpy array of RGB colors
-        min_depth: Minimum depth (Z) to exclude gripper (default: 15cm)
+        min_depth: Minimum depth (Z) to exclude gripper
         max_depth: Maximum depth to include
         
     Returns:
         Tuple of (filtered_points, filtered_colors)
     """
-    # Use Z coordinate (depth) for filtering
+    if points_local is None or len(points_local) == 0:
+        return np.empty((0, 3)), None if colors is None else np.empty((0, 3))
+    
     z_vals = points_local[:, 2]
     mask = (z_vals > min_depth) & (z_vals < max_depth) & np.isfinite(points_local).all(axis=1)
     
@@ -158,8 +190,30 @@ def filter_wrist_cloud_for_icp(
     return filtered_points, filtered_colors
 
 
+def remove_statistical_outliers(
+    pcd: o3d.geometry.PointCloud,
+    nb_neighbors: int = 20,
+    std_ratio: float = 2.0
+) -> o3d.geometry.PointCloud:
+    """
+    Remove statistical outliers from point cloud.
+    
+    Args:
+        pcd: Input point cloud
+        nb_neighbors: Number of neighbors for mean distance
+        std_ratio: Standard deviation ratio threshold
+        
+    Returns:
+        Filtered point cloud
+    """
+    if len(pcd.points) < nb_neighbors:
+        return pcd
+    cl, ind = pcd.remove_statistical_outlier(nb_neighbors=nb_neighbors, std_ratio=std_ratio)
+    return cl
+
+
 # =============================================================================
-# ICP Registration
+# ICP Registration Functions
 # =============================================================================
 
 def run_icp_point_to_plane(
@@ -179,17 +233,16 @@ def run_icp_point_to_plane(
         
     Returns:
         Tuple of (transformation_matrix, fitness_score)
-        transformation_matrix: 4x4 numpy array
-        fitness_score: ICP fitness (0-1, higher is better)
     """
     if init_transform is None:
         init_transform = np.eye(4)
     
-    # Ensure normals are estimated on target
+    if len(source.points) == 0 or len(target.points) == 0:
+        return np.eye(4), 0.0
+    
     if not target.has_normals():
         estimate_normals(target)
     
-    # Run ICP
     result = o3d.pipelines.registration.registration_icp(
         source, target,
         max_correspondence_distance,
@@ -197,7 +250,7 @@ def run_icp_point_to_plane(
         o3d.pipelines.registration.TransformationEstimationPointToPlane()
     )
     
-    return result.transformation, result.fitness
+    return np.array(result.transformation), result.fitness
 
 
 def run_icp_point_to_point(
@@ -212,7 +265,7 @@ def run_icp_point_to_point(
     Args:
         source: Source point cloud (to be aligned)
         target: Target point cloud (reference)
-        max_correspondence_distance: Maximum correspondence distance in meters
+        max_correspondence_distance: Maximum correspondence distance
         init_transform: Optional initial transformation (4x4 matrix)
         
     Returns:
@@ -221,6 +274,9 @@ def run_icp_point_to_point(
     if init_transform is None:
         init_transform = np.eye(4)
     
+    if len(source.points) == 0 or len(target.points) == 0:
+        return np.eye(4), 0.0
+    
     result = o3d.pipelines.registration.registration_icp(
         source, target,
         max_correspondence_distance,
@@ -228,74 +284,501 @@ def run_icp_point_to_point(
         o3d.pipelines.registration.TransformationEstimationPointToPoint()
     )
     
-    return result.transformation, result.fitness
+    return np.array(result.transformation), result.fitness
 
 
-# =============================================================================
-# Z-Offset Optimization (Core Functionality)
-# =============================================================================
-
-def compute_alignment_error_for_z_offset(
-    z_offset: float,
-    wrist_points_local: np.ndarray,
-    wrist_transform: np.ndarray,
-    external_points_world: np.ndarray,
-    voxel_size: float = 0.01,
-    max_correspondence_distance: float = 0.05
-) -> float:
+def run_robust_icp(
+    source: o3d.geometry.PointCloud,
+    target: o3d.geometry.PointCloud,
+    max_correspondence_distance: float = 0.05,
+    init_transform: Optional[np.ndarray] = None,
+    robust_kernel_sigma: float = 0.01
+) -> Tuple[np.ndarray, float, float]:
     """
-    Compute alignment error for a given Z offset.
-    
-    This is the objective function for Z-offset optimization.
+    Run robust ICP with Tukey loss function for outlier rejection.
     
     Args:
-        z_offset: Z offset to apply to wrist camera (in camera frame)
-        wrist_points_local: Nx3 points in wrist camera frame
-        wrist_transform: 4x4 transform from wrist camera to world
-        external_points_world: Mx3 points from external cameras in world frame
-        voxel_size: Voxel size for downsampling
-        max_correspondence_distance: Max distance for point matching
+        source: Source point cloud
+        target: Target point cloud  
+        max_correspondence_distance: Maximum correspondence distance
+        init_transform: Initial transformation
+        robust_kernel_sigma: Sigma for robust kernel (smaller = more aggressive outlier rejection)
         
     Returns:
-        Negative fitness score (to minimize)
+        Tuple of (transformation, fitness, inlier_rmse)
     """
-    if len(wrist_points_local) < 100 or len(external_points_world) < 100:
-        return 1.0  # Return high error if not enough points
+    if init_transform is None:
+        init_transform = np.eye(4)
     
-    # Apply Z offset to local points (shift along camera Z axis)
-    wrist_points_shifted = wrist_points_local.copy()
-    wrist_points_shifted[:, 2] += z_offset
+    if len(source.points) == 0 or len(target.points) == 0:
+        return np.eye(4), 0.0, float('inf')
     
-    # Transform to world frame
-    ones = np.ones((wrist_points_shifted.shape[0], 1))
-    wrist_homo = np.hstack([wrist_points_shifted, ones])
-    wrist_world = (wrist_transform @ wrist_homo.T).T[:, :3]
+    if not target.has_normals():
+        estimate_normals(target)
     
-    # Create Open3D point clouds
-    pcd_wrist = numpy_to_o3d_pointcloud(wrist_world)
-    pcd_external = numpy_to_o3d_pointcloud(external_points_world)
+    # Use robust point-to-plane with Tukey loss
+    loss = o3d.pipelines.registration.TukeyLoss(k=robust_kernel_sigma)
+    estimation = o3d.pipelines.registration.TransformationEstimationPointToPlane(loss)
     
-    # Downsample
-    pcd_wrist = downsample_pointcloud(pcd_wrist, voxel_size)
-    pcd_external = downsample_pointcloud(pcd_external, voxel_size)
-    
-    if len(pcd_wrist.points) < 50 or len(pcd_external.points) < 50:
-        return 1.0
-    
-    # Estimate normals for point-to-plane
-    estimate_normals(pcd_external)
-    
-    # Run ICP (just to get fitness, not to get transform)
     result = o3d.pipelines.registration.registration_icp(
-        pcd_wrist, pcd_external,
+        source, target,
         max_correspondence_distance,
-        np.eye(4),
-        o3d.pipelines.registration.TransformationEstimationPointToPlane()
+        init_transform,
+        estimation
     )
     
-    # Return negative fitness (we want to maximize fitness)
-    return -result.fitness
+    return np.array(result.transformation), result.fitness, result.inlier_rmse
 
+
+def run_colored_icp(
+    source: o3d.geometry.PointCloud,
+    target: o3d.geometry.PointCloud,
+    max_correspondence_distance: float = 0.05,
+    init_transform: Optional[np.ndarray] = None
+) -> Tuple[np.ndarray, float]:
+    """
+    Run colored ICP which uses both geometry and color for alignment.
+    
+    Args:
+        source: Source point cloud with colors
+        target: Target point cloud with colors
+        max_correspondence_distance: Maximum correspondence distance
+        init_transform: Initial transformation
+        
+    Returns:
+        Tuple of (transformation, fitness)
+    """
+    if init_transform is None:
+        init_transform = np.eye(4)
+    
+    if len(source.points) == 0 or len(target.points) == 0:
+        return np.eye(4), 0.0
+    
+    if not target.has_normals():
+        estimate_normals(target)
+    if not source.has_normals():
+        estimate_normals(source)
+    
+    result = o3d.pipelines.registration.registration_colored_icp(
+        source, target,
+        max_correspondence_distance,
+        init_transform,
+        o3d.pipelines.registration.TransformationEstimationForColoredICP(),
+        o3d.pipelines.registration.ICPConvergenceCriteria(
+            relative_fitness=1e-6,
+            relative_rmse=1e-6,
+            max_iteration=50
+        )
+    )
+    
+    return np.array(result.transformation), result.fitness
+
+
+def run_global_registration_ransac(
+    source: o3d.geometry.PointCloud,
+    target: o3d.geometry.PointCloud,
+    voxel_size: float = 0.02
+) -> Tuple[np.ndarray, float]:
+    """
+    Run global registration using RANSAC with FPFH features.
+    
+    This provides a rough initial alignment without requiring a good initial guess.
+    
+    Args:
+        source: Source point cloud
+        target: Target point cloud
+        voxel_size: Voxel size for downsampling and feature extraction
+        
+    Returns:
+        Tuple of (transformation, fitness)
+    """
+    if len(source.points) == 0 or len(target.points) == 0:
+        return np.eye(4), 0.0
+    
+    # Downsample
+    source_down = downsample_pointcloud(source, voxel_size)
+    target_down = downsample_pointcloud(target, voxel_size)
+    
+    if len(source_down.points) < 10 or len(target_down.points) < 10:
+        return np.eye(4), 0.0
+    
+    # Estimate normals
+    estimate_normals(source_down, radius=voxel_size * 2)
+    estimate_normals(target_down, radius=voxel_size * 2)
+    
+    # Compute FPFH features
+    source_fpfh = compute_fpfh_features(source_down, voxel_size)
+    target_fpfh = compute_fpfh_features(target_down, voxel_size)
+    
+    # RANSAC registration
+    distance_threshold = voxel_size * 1.5
+    result = o3d.pipelines.registration.registration_ransac_based_on_feature_matching(
+        source_down, target_down,
+        source_fpfh, target_fpfh,
+        mutual_filter=True,
+        max_correspondence_distance=distance_threshold,
+        estimation_method=o3d.pipelines.registration.TransformationEstimationPointToPoint(False),
+        ransac_n=4,
+        checkers=[
+            o3d.pipelines.registration.CorrespondenceCheckerBasedOnEdgeLength(0.9),
+            o3d.pipelines.registration.CorrespondenceCheckerBasedOnDistance(distance_threshold)
+        ],
+        criteria=o3d.pipelines.registration.RANSACConvergenceCriteria(4000000, 500)
+    )
+    
+    return np.array(result.transformation), result.fitness
+
+
+# =============================================================================
+# Multi-Scale ICP Registration
+# =============================================================================
+
+def run_multiscale_icp(
+    source: o3d.geometry.PointCloud,
+    target: o3d.geometry.PointCloud,
+    voxel_sizes: List[float] = [0.05, 0.02, 0.01],
+    max_correspondence_multipliers: List[float] = [2.0, 1.5, 1.0],
+    init_transform: Optional[np.ndarray] = None
+) -> Tuple[np.ndarray, float]:
+    """
+    Run multi-scale ICP for robust registration.
+    
+    Starts with coarse alignment and progressively refines.
+    
+    Args:
+        source: Source point cloud
+        target: Target point cloud
+        voxel_sizes: List of voxel sizes from coarse to fine
+        max_correspondence_multipliers: Multipliers for max correspondence distance
+        init_transform: Initial transformation
+        
+    Returns:
+        Tuple of (final_transformation, final_fitness)
+    """
+    if init_transform is None:
+        init_transform = np.eye(4)
+    
+    if len(source.points) == 0 or len(target.points) == 0:
+        return np.eye(4), 0.0
+    
+    current_transform = init_transform.copy()
+    final_fitness = 0.0
+    
+    for i, voxel_size in enumerate(voxel_sizes):
+        # Downsample at current scale
+        source_down = downsample_pointcloud(source, voxel_size)
+        target_down = downsample_pointcloud(target, voxel_size)
+        
+        if len(source_down.points) < 50 or len(target_down.points) < 50:
+            continue
+        
+        # Estimate normals
+        estimate_normals(target_down, radius=voxel_size * 2)
+        
+        # Run ICP
+        max_corr_dist = voxel_size * max_correspondence_multipliers[i]
+        transform, fitness = run_icp_point_to_plane(
+            source_down, target_down,
+            max_correspondence_distance=max_corr_dist,
+            init_transform=current_transform
+        )
+        
+        current_transform = transform
+        final_fitness = fitness
+    
+    return current_transform, final_fitness
+
+
+# =============================================================================
+# Full 6-DOF Wrist Camera Optimization (NEW APPROACH)
+# =============================================================================
+
+def collect_multi_frame_pointclouds(
+    active_cams: dict,
+    config: dict,
+    num_frames: int = 10
+) -> Tuple[o3d.geometry.PointCloud, o3d.geometry.PointCloud, List[int]]:
+    """
+    Collect and accumulate point clouds from multiple frames for robust ICP.
+    
+    Args:
+        active_cams: Dictionary of camera data
+        config: Configuration dictionary
+        num_frames: Number of frames to sample
+        
+    Returns:
+        Tuple of (wrist_accumulated_cloud, external_accumulated_cloud, valid_frame_indices)
+    """
+    import pyzed.sl as sl
+    from .camera_utils import get_filtered_cloud
+    from .transforms import transform_points
+    
+    # Find cameras
+    wrist_cam = None
+    external_cams = {}
+    for serial, cam in active_cams.items():
+        if cam['type'] == 'wrist':
+            wrist_cam = cam
+        else:
+            external_cams[serial] = cam
+    
+    if wrist_cam is None or len(external_cams) == 0:
+        return o3d.geometry.PointCloud(), o3d.geometry.PointCloud(), []
+    
+    # Parameters
+    min_depth_icp = config.get('min_depth_wrist_icp', 0.15)
+    max_depth_wrist = config.get('wrist_max_depth', 0.75)
+    min_depth_ext = config.get('min_depth', 0.1)
+    max_depth_ext = config.get('ext_max_depth', 1.5)
+    
+    total_frames = len(wrist_cam['transforms'])
+    frame_indices = np.linspace(0, total_frames - 1, num_frames, dtype=int)
+    
+    wrist_points_all = []
+    wrist_colors_all = []
+    ext_points_all = []
+    ext_colors_all = []
+    valid_indices = []
+    
+    # Reset cameras
+    wrist_cam['zed'].set_svo_position(0)
+    for cam in external_cams.values():
+        cam['zed'].set_svo_position(0)
+    
+    for frame_idx in frame_indices:
+        # Get wrist data
+        wrist_cam['zed'].set_svo_position(frame_idx)
+        if wrist_cam['zed'].grab(wrist_cam['runtime']) != sl.ERROR_CODE.SUCCESS:
+            continue
+        
+        wrist_xyz, wrist_rgb = get_filtered_cloud(
+            wrist_cam['zed'], wrist_cam['runtime'],
+            max_depth=max_depth_wrist,
+            min_depth=min_depth_icp
+        )
+        
+        if wrist_xyz is None or len(wrist_xyz) < 100:
+            continue
+        
+        # Transform wrist points to world
+        T_wrist = wrist_cam['transforms'][frame_idx]
+        wrist_world = transform_points(wrist_xyz, T_wrist)
+        
+        wrist_points_all.append(wrist_world)
+        wrist_colors_all.append(wrist_rgb)
+        
+        # Get external camera points
+        for ext_serial, ext_cam in external_cams.items():
+            ext_cam['zed'].set_svo_position(frame_idx)
+            if ext_cam['zed'].grab(ext_cam['runtime']) != sl.ERROR_CODE.SUCCESS:
+                continue
+            
+            ext_xyz, ext_rgb = get_filtered_cloud(
+                ext_cam['zed'], ext_cam['runtime'],
+                max_depth=max_depth_ext,
+                min_depth=min_depth_ext
+            )
+            
+            if ext_xyz is None or len(ext_xyz) < 100:
+                continue
+            
+            ext_world = transform_points(ext_xyz, ext_cam['world_T_cam'])
+            ext_points_all.append(ext_world)
+            ext_colors_all.append(ext_rgb)
+        
+        valid_indices.append(frame_idx)
+    
+    # Create accumulated point clouds
+    wrist_pcd = o3d.geometry.PointCloud()
+    if wrist_points_all:
+        all_wrist_pts = np.vstack(wrist_points_all)
+        all_wrist_cols = np.vstack(wrist_colors_all)
+        wrist_pcd = numpy_to_o3d_pointcloud(all_wrist_pts, all_wrist_cols)
+    
+    ext_pcd = o3d.geometry.PointCloud()
+    if ext_points_all:
+        all_ext_pts = np.vstack(ext_points_all)
+        all_ext_cols = np.vstack(ext_colors_all)
+        ext_pcd = numpy_to_o3d_pointcloud(all_ext_pts, all_ext_cols)
+    
+    return wrist_pcd, ext_pcd, valid_indices
+
+
+def compute_wrist_icp_correction(
+    wrist_pcd: o3d.geometry.PointCloud,
+    target_pcd: o3d.geometry.PointCloud,
+    config: dict
+) -> Tuple[np.ndarray, float, float]:
+    """
+    Compute ICP correction transform for wrist camera alignment.
+    
+    Uses a robust multi-stage approach:
+    1. Statistical outlier removal
+    2. Multi-scale ICP refinement
+    3. Robust ICP with outlier rejection
+    
+    Args:
+        wrist_pcd: Wrist camera point cloud in world frame
+        target_pcd: External camera point cloud (target/reference)
+        config: Configuration dictionary
+        
+    Returns:
+        Tuple of (correction_transform, fitness, rmse)
+    """
+    if len(wrist_pcd.points) == 0 or len(target_pcd.points) == 0:
+        print("[ICP] Warning: Empty point clouds")
+        return np.eye(4), 0.0, float('inf')
+    
+    voxel_size = config.get('icp_voxel_size', 0.01)
+    max_corr_dist = config.get('icp_max_correspondence_distance', 0.05)
+    
+    print(f"[ICP] Wrist cloud: {len(wrist_pcd.points)} points")
+    print(f"[ICP] External cloud: {len(target_pcd.points)} points")
+    
+    # Step 1: Downsample both clouds
+    wrist_down = downsample_pointcloud(wrist_pcd, voxel_size)
+    target_down = downsample_pointcloud(target_pcd, voxel_size)
+    
+    print(f"[ICP] After downsampling: wrist={len(wrist_down.points)}, target={len(target_down.points)}")
+    
+    # Step 2: Remove statistical outliers
+    wrist_down = remove_statistical_outliers(wrist_down, nb_neighbors=20, std_ratio=2.0)
+    target_down = remove_statistical_outliers(target_down, nb_neighbors=20, std_ratio=2.0)
+    
+    print(f"[ICP] After outlier removal: wrist={len(wrist_down.points)}, target={len(target_down.points)}")
+    
+    if len(wrist_down.points) < 100 or len(target_down.points) < 100:
+        print("[ICP] Warning: Not enough points after filtering")
+        return np.eye(4), 0.0, float('inf')
+    
+    # Step 3: Multi-scale ICP
+    print("[ICP] Running multi-scale ICP...")
+    transform, fitness = run_multiscale_icp(
+        wrist_down, target_down,
+        voxel_sizes=[voxel_size * 3, voxel_size * 2, voxel_size],
+        max_correspondence_multipliers=[3.0, 2.0, 1.5],
+        init_transform=np.eye(4)
+    )
+    
+    print(f"[ICP] Multi-scale ICP: fitness={fitness:.4f}")
+    
+    # Step 4: Refine with robust ICP
+    if fitness > 0.1:  # Only refine if initial alignment is reasonable
+        print("[ICP] Refining with robust ICP...")
+        transform_refined, fitness_refined, rmse = run_robust_icp(
+            wrist_down, target_down,
+            max_correspondence_distance=max_corr_dist,
+            init_transform=transform,
+            robust_kernel_sigma=voxel_size
+        )
+        
+        if fitness_refined > fitness:
+            transform = transform_refined
+            fitness = fitness_refined
+            print(f"[ICP] Robust ICP improved: fitness={fitness:.4f}, RMSE={rmse:.6f}")
+    else:
+        rmse = float('inf')
+    
+    return transform, fitness, rmse
+
+
+def apply_transform_to_trajectory(
+    transforms: List[np.ndarray],
+    correction: np.ndarray
+) -> List[np.ndarray]:
+    """
+    Apply a correction transform to all trajectory poses.
+    
+    The correction is applied as: T_new = correction @ T_original
+    
+    Args:
+        transforms: List of 4x4 transformation matrices
+        correction: 4x4 correction transform
+        
+    Returns:
+        List of corrected 4x4 transformation matrices
+    """
+    corrected = []
+    for T in transforms:
+        T_new = correction @ T
+        corrected.append(T_new)
+    return corrected
+
+
+def optimize_wrist_camera_full_icp(active_cams: dict, config: dict) -> Tuple[np.ndarray, float]:
+    """
+    Perform full 6-DOF ICP optimization for wrist camera alignment.
+    
+    This is the main entry point for the new robust ICP implementation.
+    
+    Args:
+        active_cams: Dictionary of camera data
+        config: Configuration dictionary
+        
+    Returns:
+        Tuple of (correction_transform, fitness)
+    """
+    print("\n" + "=" * 60)
+    print("Full 6-DOF ICP Wrist Camera Alignment")
+    print("=" * 60)
+    
+    num_icp_frames = config.get('icp_num_frames', 10)
+    
+    # Find wrist camera
+    wrist_cam = None
+    wrist_serial = None
+    for serial, cam in active_cams.items():
+        if cam['type'] == 'wrist':
+            wrist_cam = cam
+            wrist_serial = serial
+            break
+    
+    if wrist_cam is None:
+        print("[ICP] Error: No wrist camera found")
+        return np.eye(4), 0.0
+    
+    # Step 1: Collect multi-frame point clouds
+    print(f"\n[ICP] Collecting {num_icp_frames} frames...")
+    wrist_pcd, ext_pcd, valid_indices = collect_multi_frame_pointclouds(
+        active_cams, config, num_icp_frames
+    )
+    
+    if len(valid_indices) == 0:
+        print("[ICP] Error: No valid frames collected")
+        return np.eye(4), 0.0
+    
+    print(f"[ICP] Collected {len(valid_indices)} valid frames")
+    
+    # Step 2: Compute ICP correction
+    print("\n[ICP] Computing ICP correction...")
+    correction, fitness, rmse = compute_wrist_icp_correction(wrist_pcd, ext_pcd, config)
+    
+    # Analyze the correction
+    translation = correction[:3, 3]
+    rotation = R.from_matrix(correction[:3, :3])
+    euler_deg = rotation.as_euler('xyz', degrees=True)
+    
+    print(f"\n[ICP] Correction transform:")
+    print(f"  Translation: [{translation[0]*100:.2f}, {translation[1]*100:.2f}, {translation[2]*100:.2f}] cm")
+    print(f"  Rotation: [{euler_deg[0]:.2f}, {euler_deg[1]:.2f}, {euler_deg[2]:.2f}] degrees")
+    print(f"  Fitness: {fitness:.4f}")
+    
+    # Step 3: Apply correction to wrist camera trajectory
+    if fitness > 0.05:  # Only apply if alignment is reasonable
+        print("\n[ICP] Applying correction to wrist trajectory...")
+        wrist_cam['transforms'] = apply_transform_to_trajectory(
+            wrist_cam['transforms'], correction
+        )
+        print("[ICP] Trajectory updated")
+    else:
+        print("\n[ICP] Warning: Low fitness score, skipping trajectory update")
+    
+    return correction, fitness
+
+
+# =============================================================================
+# Legacy Functions (for backwards compatibility)
+# =============================================================================
 
 def optimize_wrist_z_offset(
     wrist_points_local: np.ndarray,
@@ -306,32 +789,27 @@ def optimize_wrist_z_offset(
     max_correspondence_distance: float = 0.05
 ) -> Tuple[float, float]:
     """
-    Optimize Z offset for wrist camera alignment.
+    Legacy: Optimize Z offset for wrist camera alignment.
     
-    Args:
-        wrist_points_local: Nx3 points in wrist camera frame (gripper excluded)
-        wrist_transform: 4x4 transform from wrist camera to world
-        external_points_world: Mx3 points from external cameras in world frame
-        z_range: Tuple of (min_z, max_z) to search
-        voxel_size: Voxel size for downsampling
-        max_correspondence_distance: Max distance for point matching
-        
-    Returns:
-        Tuple of (optimal_z_offset, best_fitness)
+    Note: This is kept for backwards compatibility but the new
+    optimize_wrist_camera_full_icp function is recommended.
     """
-    # Use scipy's bounded optimization
-    result = minimize_scalar(
-        compute_alignment_error_for_z_offset,
-        bounds=z_range,
-        method='bounded',
-        args=(wrist_points_local, wrist_transform, external_points_world, 
-              voxel_size, max_correspondence_distance)
-    )
+    from .transforms import transform_points
     
-    optimal_z = result.x
-    best_fitness = -result.fun  # Convert back from negative
+    # Transform wrist points to world
+    wrist_world = transform_points(wrist_points_local, wrist_transform)
     
-    return optimal_z, best_fitness
+    # Create point clouds
+    wrist_pcd = numpy_to_o3d_pointcloud(wrist_world)
+    ext_pcd = numpy_to_o3d_pointcloud(external_points_world)
+    
+    # Run ICP
+    transform, fitness = run_multiscale_icp(wrist_pcd, ext_pcd)
+    
+    # Extract Z offset from transform
+    z_offset = transform[2, 3]
+    
+    return z_offset, fitness
 
 
 def optimize_wrist_z_offset_multi_frame(
@@ -341,52 +819,37 @@ def optimize_wrist_z_offset_multi_frame(
     max_correspondence_distance: float = 0.05
 ) -> Tuple[float, float]:
     """
-    Optimize Z offset using multiple frames for robustness.
+    Legacy: Optimize Z offset using multiple frames.
     
-    Args:
-        frames_data: List of dicts with keys:
-            - 'wrist_points_local': Nx3 points in wrist camera frame
-            - 'wrist_transform': 4x4 transform
-            - 'external_points_world': Mx3 points from external cameras
-        z_range: Tuple of (min_z, max_z) to search
-        voxel_size: Voxel size for downsampling
-        max_correspondence_distance: Max distance for point matching
-        
-    Returns:
-        Tuple of (optimal_z_offset, average_fitness)
+    Note: This is kept for backwards compatibility.
     """
-    def multi_frame_error(z_offset):
-        total_error = 0.0
-        valid_frames = 0
-        
-        for frame in frames_data:
-            error = compute_alignment_error_for_z_offset(
-                z_offset,
-                frame['wrist_points_local'],
-                frame['wrist_transform'],
-                frame['external_points_world'],
-                voxel_size,
-                max_correspondence_distance
-            )
-            if error < 0.99:  # Valid frame
-                total_error += error
-                valid_frames += 1
-        
-        if valid_frames == 0:
-            return 1.0
-        
-        return total_error / valid_frames
+    from .transforms import transform_points
     
-    result = minimize_scalar(
-        multi_frame_error,
-        bounds=z_range,
-        method='bounded'
-    )
+    # Accumulate all points
+    all_wrist_world = []
+    all_ext_world = []
     
-    optimal_z = result.x
-    best_fitness = -result.fun
+    for frame in frames_data:
+        wrist_world = transform_points(
+            frame['wrist_points_local'],
+            frame['wrist_transform']
+        )
+        all_wrist_world.append(wrist_world)
+        all_ext_world.append(frame['external_points_world'])
     
-    return optimal_z, best_fitness
+    if not all_wrist_world:
+        return 0.0, 0.0
+    
+    wrist_pts = np.vstack(all_wrist_world)
+    ext_pts = np.vstack(all_ext_world)
+    
+    wrist_pcd = numpy_to_o3d_pointcloud(wrist_pts)
+    ext_pcd = numpy_to_o3d_pointcloud(ext_pts)
+    
+    transform, fitness = run_multiscale_icp(wrist_pcd, ext_pcd)
+    z_offset = transform[2, 3]
+    
+    return z_offset, fitness
 
 
 def apply_z_offset_to_wrist_transforms(
@@ -396,181 +859,42 @@ def apply_z_offset_to_wrist_transforms(
     """
     Apply Z offset to all wrist camera transforms.
     
-    The Z offset is applied in the camera frame, which means we need to
-    translate along the camera's Z axis (viewing direction).
-    
     Args:
-        transforms: List of 4x4 transformation matrices (camera to world)
-        z_offset: Z offset to apply (in camera frame, i.e., depth direction)
+        transforms: List of 4x4 transformation matrices
+        z_offset: Z offset to apply (in camera frame)
         
     Returns:
         List of modified 4x4 transformation matrices
     """
-    modified_transforms = []
-    
+    modified = []
     for T in transforms:
         T_new = T.copy()
-        
-        # The Z axis of the camera in world frame is the third column of rotation
-        # T[:3, :3] is the rotation matrix, T[:3, 2] is the Z axis direction
         z_axis_world = T[:3, 2]
-        
-        # Apply offset along this direction
         T_new[:3, 3] += z_offset * z_axis_world
-        
-        modified_transforms.append(T_new)
+        modified.append(T_new)
+    return modified
+
+
+# =============================================================================
+# Wrapper Functions (for compatibility with existing scripts)
+# =============================================================================
+
+def optimize_wrist_camera_icp(active_cams: dict, config: dict) -> np.ndarray:
+    """
+    Main ICP optimization entry point.
     
-    return modified_transforms
-
-
-# =============================================================================
-# High-Level Optimization Functions (used by main scripts)
-# =============================================================================
-
-def optimize_wrist_camera_icp(active_cams, config):
+    Uses the new full 6-DOF ICP implementation.
     """
-    Legacy function - calls optimize_wrist_camera_icp_z_only.
-    """
-    return optimize_wrist_camera_icp_z_only(active_cams, config)
+    correction, fitness = optimize_wrist_camera_full_icp(active_cams, config)
+    return correction
 
 
 def optimize_wrist_camera_icp_z_only(active_cams: dict, config: dict) -> float:
     """
-    Optimize wrist camera Z offset using ICP against external cameras.
-    
-    This function assumes the gripper pose is correct and only optimizes
-    the Z offset (depth) of the wrist camera.
-    
-    Args:
-        active_cams: Dictionary of camera data with keys like:
-            - 'type': 'wrist' or 'external'
-            - 'zed': ZED camera object
-            - 'runtime': RuntimeParameters
-            - 'transforms': List of 4x4 matrices (for wrist)
-            - 'world_T_cam': 4x4 matrix (for external)
-        config: Configuration dictionary with ICP parameters
-        
-    Returns:
-        Optimal Z offset value
+    Legacy wrapper that returns Z offset from full ICP.
     """
-    import pyzed.sl as sl
-    from .camera_utils import get_filtered_cloud
-    
-    # Find wrist and external cameras
-    wrist_serial = None
-    wrist_cam = None
-    external_cams = {}
-    
-    for serial, cam in active_cams.items():
-        if cam['type'] == 'wrist':
-            wrist_serial = serial
-            wrist_cam = cam
-        else:
-            external_cams[serial] = cam
-    
-    if wrist_cam is None or len(external_cams) == 0:
-        print("[ICP] Warning: Need both wrist and external cameras for ICP optimization")
-        return 0.0
-    
-    # Collect frames for multi-frame optimization
-    num_icp_frames = config.get('icp_num_frames', 10)
-    min_depth_icp = config.get('min_depth_wrist_icp', 0.15)  # Exclude gripper
-    max_depth_wrist = config.get('wrist_max_depth', 0.75)
-    ext_max_depth = config.get('ext_max_depth', 1.5)
-    min_depth_ext = config.get('min_depth', 0.1)
-    
-    voxel_size = config.get('icp_voxel_size', 0.01)
-    max_corr_dist = config.get('icp_max_correspondence_distance', 0.05)
-    
-    # Reset cameras
-    wrist_cam['zed'].set_svo_position(0)
-    for cam in external_cams.values():
-        cam['zed'].set_svo_position(0)
-    
-    total_frames = len(wrist_cam['transforms'])
-    frame_indices = np.linspace(0, total_frames - 1, num_icp_frames, dtype=int)
-    
-    frames_data = []
-    
-    print(f"[ICP] Collecting {num_icp_frames} frames for Z-offset optimization...")
-    
-    for frame_idx in frame_indices:
-        # Get wrist data
-        wrist_cam['zed'].set_svo_position(frame_idx)
-        if wrist_cam['zed'].grab(wrist_cam['runtime']) != sl.ERROR_CODE.SUCCESS:
-            continue
-        
-        # Get wrist points (excluding gripper)
-        wrist_xyz, wrist_rgb = get_filtered_cloud(
-            wrist_cam['zed'], wrist_cam['runtime'],
-            max_depth=max_depth_wrist,
-            min_depth=min_depth_icp  # 15cm to exclude gripper
-        )
-        
-        if wrist_xyz is None or len(wrist_xyz) < 100:
-            continue
-        
-        wrist_transform = wrist_cam['transforms'][frame_idx]
-        
-        # Collect external camera points
-        external_world_points = []
-        
-        for ext_serial, ext_cam in external_cams.items():
-            ext_cam['zed'].set_svo_position(frame_idx)
-            if ext_cam['zed'].grab(ext_cam['runtime']) != sl.ERROR_CODE.SUCCESS:
-                continue
-            
-            ext_xyz, ext_rgb = get_filtered_cloud(
-                ext_cam['zed'], ext_cam['runtime'],
-                max_depth=ext_max_depth,
-                min_depth=min_depth_ext
-            )
-            
-            if ext_xyz is None or len(ext_xyz) < 100:
-                continue
-            
-            # Transform to world frame
-            T_ext = ext_cam['world_T_cam']
-            ones = np.ones((ext_xyz.shape[0], 1))
-            ext_homo = np.hstack([ext_xyz, ones])
-            ext_world = (T_ext @ ext_homo.T).T[:, :3]
-            
-            external_world_points.append(ext_world)
-        
-        if len(external_world_points) == 0:
-            continue
-        
-        external_points_world = np.vstack(external_world_points)
-        
-        frames_data.append({
-            'wrist_points_local': wrist_xyz,
-            'wrist_transform': wrist_transform,
-            'external_points_world': external_points_world
-        })
-    
-    print(f"[ICP] Collected {len(frames_data)} valid frames")
-    
-    if len(frames_data) == 0:
-        print("[ICP] Warning: No valid frames for ICP optimization")
-        return 0.0
-    
-    # Optimize Z offset
-    print("[ICP] Optimizing Z offset...")
-    z_offset, fitness = optimize_wrist_z_offset_multi_frame(
-        frames_data,
-        z_range=(-0.05, 0.05),  # Search +/- 5cm
-        voxel_size=voxel_size,
-        max_correspondence_distance=max_corr_dist
-    )
-    
-    print(f"[ICP] Optimal Z offset: {z_offset:.4f}m, Fitness: {fitness:.4f}")
-    
-    # Apply offset to wrist transforms
-    wrist_cam['transforms'] = apply_z_offset_to_wrist_transforms(
-        wrist_cam['transforms'], z_offset
-    )
-    
-    return z_offset
+    correction, fitness = optimize_wrist_camera_full_icp(active_cams, config)
+    return correction[2, 3]
 
 
 def optimize_wrist_z_offset_icp(active_cams: dict, config: dict) -> float:
@@ -583,15 +907,13 @@ def optimize_wrist_z_offset_icp(active_cams: dict, config: dict) -> float:
 def optimize_external_cameras_multi_frame(active_cams: dict, config: dict):
     """
     Placeholder for external camera optimization.
-    
-    Currently not implemented as we assume external cameras are correctly calibrated.
     """
-    print("[ICP] External camera optimization not needed (assuming correct calibration)")
+    print("[ICP] External camera optimization not needed")
     pass
 
 
 def optimize_wrist_multi_frame(active_cams: dict, cartesian_positions: np.ndarray, config: dict):
     """
-    Alias for optimize_wrist_camera_icp_z_only.
+    Alias for full ICP optimization.
     """
-    return optimize_wrist_camera_icp_z_only(active_cams, config)
+    return optimize_wrist_camera_full_icp(active_cams, config)
