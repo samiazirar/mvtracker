@@ -53,7 +53,7 @@ def numpy_to_o3d_pointcloud(
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(points.astype(np.float64))
     
-    if colors is not None and len(colors) == len(points):
+    if colors is not None and len(colors) > 0 and len(colors) == len(points):
         colors = colors.astype(np.float64)
         if colors.max() > 1.0:
             colors = colors / 255.0
@@ -539,8 +539,11 @@ def run_multiscale_icp(
         final_fitness = result.fitness
         final_rmse = result.inlier_rmse
         
+        # Validate fitness and rmse before printing
+        fitness_str = f"{result.fitness:.4f}" if np.isfinite(result.fitness) else "N/A"
+        rmse_str = f"{result.inlier_rmse:.4f}" if np.isfinite(result.inlier_rmse) else "N/A"
         print(f"  Scale {i+1}/{len(voxel_sizes)} (voxel={voxel_size:.3f}m): "
-              f"fitness={result.fitness:.4f}, rmse={result.inlier_rmse:.4f}")
+              f"fitness={fitness_str}, rmse={rmse_str}")
     
     return current_transform, final_fitness, final_rmse
 
@@ -986,12 +989,26 @@ def optimize_wrist_camera_full_icp(
         print("[ICP] Error: No valid point clouds collected")
         return np.eye(4), 0.0
     
-    # Stack all points
-    wrist_points = np.vstack(all_wrist_points_world)
-    external_points = np.vstack(all_external_points_world)
+    # Stack all points (all arrays should be Nx3)
+    try:
+        wrist_points = np.vstack(all_wrist_points_world)
+        external_points = np.vstack(all_external_points_world)
+    except ValueError as e:
+        print(f"[ICP] Error stacking point clouds: {e}")
+        return np.eye(4), 0.0
     
-    wrist_colors = np.vstack(all_wrist_colors) if all_wrist_colors else None
-    external_colors = np.vstack(all_external_colors) if all_external_colors else None
+    # Stack colors if available (handle potential shape mismatches gracefully)
+    wrist_colors = None
+    external_colors = None
+    try:
+        if all_wrist_colors and all(c is not None for c in all_wrist_colors):
+            wrist_colors = np.vstack(all_wrist_colors)
+        if all_external_colors and all(c is not None for c in all_external_colors):
+            external_colors = np.vstack(all_external_colors)
+    except ValueError:
+        # Colors have inconsistent shapes, skip color-based ICP
+        wrist_colors = None
+        external_colors = None
     
     print(f"[ICP] Accumulated {len(wrist_points)} wrist points, {len(external_points)} external points")
     

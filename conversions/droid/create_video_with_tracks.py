@@ -92,7 +92,11 @@ def draw_trajectory_on_image(
             prev_pt = None
             continue
         
-        # Check if point is in bounds
+        # Check if point values are finite and in bounds
+        if not (np.isfinite(u[i]) and np.isfinite(v[i])):
+            prev_pt = None
+            continue
+        
         if 0 <= u[i] < width and 0 <= v[i] < height:
             curr_pt = (int(u[i]), int(v[i]))
             
