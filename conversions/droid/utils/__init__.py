@@ -32,7 +32,16 @@ from .video_utils import (
     create_reprojection_video,
 )
 from .optimization import (
-    # ICP optimization functions
+    # High-quality ICP pipeline (NEW)
+    run_full_icp_pipeline,
+    optimize_wrist_camera_full_icp,
+    apply_6dof_correction_to_wrist_transforms,
+    preprocess_pointcloud,
+    compute_fpfh_features,
+    execute_global_registration,
+    run_multiscale_icp,
+    run_colored_icp,
+    # Legacy ICP optimization functions
     optimize_wrist_camera_icp,
     optimize_wrist_camera_icp_z_only,
     optimize_wrist_z_offset_icp,
@@ -85,7 +94,16 @@ __all__ = [
     'draw_points_on_image',
     'draw_points_on_image_fast',
     'create_reprojection_video',
-    # ICP Optimization
+    # High-quality ICP Pipeline (NEW)
+    'run_full_icp_pipeline',
+    'optimize_wrist_camera_full_icp',
+    'apply_6dof_correction_to_wrist_transforms',
+    'preprocess_pointcloud',
+    'compute_fpfh_features',
+    'execute_global_registration',
+    'run_multiscale_icp',
+    'run_colored_icp',
+    # Legacy ICP Optimization
     'optimize_wrist_camera_icp',
     'optimize_wrist_camera_icp_z_only',
     'optimize_wrist_z_offset_icp',
