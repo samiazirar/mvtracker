@@ -1,0 +1,298 @@
+# Configuration for DROID Point Cloud Generation - All Selected Episodes
+# Includes low, medium, and high quality episodes from all 12 labs
+
+# This file contains references to all individual lab configs
+# Each lab has 3 episodes: low, medium, and high quality based on extrinsics calibration scores
+
+labs:
+  autolab:
+    low: "conversions/droid/configs/autolab_low.yaml"
+    medium: "conversions/droid/configs/autolab_medium.yaml"
+    high: "conversions/droid/configs/autolab_high.yaml"
+  
+  clvr:
+    low: "conversions/droid/configs/clvr_low.yaml"
+    medium: "conversions/droid/configs/clvr_medium.yaml"
+    high: "conversions/droid/configs/clvr_high.yaml"
+  
+  guptalab:
+    low: "conversions/droid/configs/guptalab_low.yaml"
+    medium: "conversions/droid/configs/guptalab_medium.yaml"
+    high: "conversions/droid/configs/guptalab_high.yaml"
+  
+  iliad:
+    low: "conversions/droid/configs/iliad_low.yaml"
+    medium: "conversions/droid/configs/iliad_medium.yaml"
+    high: "conversions/droid/configs/iliad_high.yaml"
+  
+  iprl:
+    low: "conversions/droid/configs/iprl_low.yaml"
+    medium: "conversions/droid/configs/iprl_medium.yaml"
+    high: "conversions/droid/configs/iprl_high.yaml"
+  
+  iris:
+    low: "conversions/droid/configs/iris_low.yaml"
+    medium: "conversions/droid/configs/iris_medium.yaml"
+    high: "conversions/droid/configs/iris_high.yaml"
+  
+  pennpal:
+    low: "conversions/droid/configs/pennpal_low.yaml"
+    medium: "conversions/droid/configs/pennpal_medium.yaml"
+    high: "conversions/droid/configs/pennpal_high.yaml"
+  
+  rail:
+    low: "conversions/droid/configs/rail_low.yaml"
+    medium: "conversions/droid/configs/rail_medium.yaml"
+    high: "conversions/droid/configs/rail_high.yaml"
+  
+  real:
+    low: "conversions/droid/configs/real_low.yaml"
+    medium: "conversions/droid/configs/real_medium.yaml"
+    high: "conversions/droid/configs/real_high.yaml"
+  
+  rpl:
+    low: "conversions/droid/configs/rpl_low.yaml"
+    medium: "conversions/droid/configs/rpl_medium.yaml"
+    high: "conversions/droid/configs/rpl_high.yaml"
+  
+  tri:
+    low: "conversions/droid/configs/tri_low.yaml"
+    medium: "conversions/droid/configs/tri_medium.yaml"
+    high: "conversions/droid/configs/tri_high.yaml"
+  
+  weird:
+    low: "conversions/droid/configs/weird_low.yaml"
+    medium: "conversions/droid/configs/weird_medium.yaml"
+    high: "conversions/droid/configs/weird_high.yaml"
+
+# Episode details summary
+episodes_summary:
+  # AUTOLab episodes (avg scores: 0.6049, 0.8202, 92094.9111)
+  - lab: "AUTOLab"
+    quality: "low"
+    episode_key: "AUTOLab+5d05c5aa+2023-10-15-19h-03m-32s"
+    avg_score: 0.6049
+    path: "AUTOLab/success/2023-10-15/Sun_Oct_15_19:03:32_2023"
+  - lab: "AUTOLab"
+    quality: "medium"
+    episode_key: "AUTOLab+0d4edc83+2023-12-02-15h-01m-08s"
+    avg_score: 0.8202
+    path: "AUTOLab/success/2023-12-02/Sat_Dec__2_15:01:08_2023"
+  - lab: "AUTOLab"
+    quality: "high"
+    episode_key: "AUTOLab+9aed6d7a+2023-11-30-14h-00m-26s"
+    avg_score: 92094.9111
+    path: "AUTOLab/success/2023-11-30/Thu_Nov_30_14:00:26_2023"
+  
+  # CLVR episodes (avg scores: 0.6145, 0.7851, 74538.9310)
+  - lab: "CLVR"
+    quality: "low"
+    episode_key: "CLVR+13759f6e+2023-05-18-15h-36m-43s"
+    avg_score: 0.6145
+    path: "CLVR/success/2023-05-18/Thu_May_18_15:36:43_2023"
+  - lab: "CLVR"
+    quality: "medium"
+    episode_key: "CLVR+236539bc+2023-06-06-01h-53m-17s"
+    avg_score: 0.7851
+    path: "CLVR/success/2023-06-06/Tue_Jun__6_01:53:17_2023"
+  - lab: "CLVR"
+    quality: "high"
+    episode_key: "CLVR+13759f6e+2023-05-16-15h-05m-43s"
+    avg_score: 74538.9310
+    path: "CLVR/failure/2023-05-16/Tue_May_16_15:05:43_2023"
+  
+  # GuptaLab episodes (avg scores: 0.7375, 0.8459, 26299.9364)
+  - lab: "GuptaLab"
+    quality: "low"
+    episode_key: "GuptaLab+553d1bd5+2023-04-30-14h-34m-55s"
+    avg_score: 0.7375
+    path: "GuptaLab/failure/2023-04-30/Sun_Apr_30_14:34:55_2023"
+  - lab: "GuptaLab"
+    quality: "medium"
+    episode_key: "GuptaLab+553d1bd5+2023-04-30-18h-02m-22s"
+    avg_score: 0.8459
+    path: "GuptaLab/success/2023-04-30/Sun_Apr_30_18:02:22_2023"
+  - lab: "GuptaLab"
+    quality: "high"
+    episode_key: "GuptaLab+553d1bd5+2023-07-10-10h-08m-40s"
+    avg_score: 26299.9364
+    path: "GuptaLab/success/2023-07-08/Mon_Jul_10_10:08:40_2023"
+  
+  # ILIAD episodes (avg scores: 0.6070, 0.7951, 51545.9319)
+  - lab: "ILIAD"
+    quality: "low"
+    episode_key: "ILIAD+50aee79f+2023-07-12-21h-19m-52s"
+    avg_score: 0.6070
+    path: "ILIAD/success/2023-07-12/Wed_Jul_12_21:19:52_2023"
+  - lab: "ILIAD"
+    quality: "medium"
+    episode_key: "ILIAD+5e938e3b+2023-07-19-19h-35m-39s"
+    avg_score: 0.7951
+    path: "ILIAD/success/2023-07-19/Wed_Jul_19_19:35:39_2023"
+  - lab: "ILIAD"
+    quality: "high"
+    episode_key: "ILIAD+50aee79f+2023-08-20-11h-15m-17s"
+    avg_score: 51545.9319
+    path: "ILIAD/success/2023-08-20/Sun_Aug_20_11:15:17_2023"
+  
+  # IPRL episodes (avg scores: 0.6217, 0.8813, 65548.3462)
+  - lab: "IPRL"
+    quality: "low"
+    episode_key: "IPRL+2fe9715d+2023-08-21-22h-19m-41s"
+    avg_score: 0.6217
+    path: "IPRL/failure/2023-08-21/Mon_Aug_21_22:19:41_2023"
+  - lab: "IPRL"
+    quality: "medium"
+    episode_key: "IPRL+edf28ef3+2023-12-18-19h-00m-12s"
+    avg_score: 0.8813
+    path: "IPRL/success/2023-12-18/Mon_Dec_18_19:00:12_2023"
+  - lab: "IPRL"
+    quality: "high"
+    episode_key: "IPRL+41a1536a+2023-10-30-16h-57m-05s"
+    avg_score: 65548.3462
+    path: "IPRL/failure/2023-10-30/Mon_Oct_30_16:57:05_2023"
+  
+  # IRIS episodes (avg scores: 0.6197, 0.8797, 54044.6189)
+  - lab: "IRIS"
+    quality: "low"
+    episode_key: "IRIS+7dfa2da3+2023-05-05-11h-47m-43s"
+    avg_score: 0.6197
+    path: "IRIS/success/2023-05-05/Fri_May__5_11:47:43_2023"
+  - lab: "IRIS"
+    quality: "medium"
+    episode_key: "IRIS+ef107c48+2023-04-07-14h-06m-24s"
+    avg_score: 0.8797
+    path: "IRIS/success/2023-04-07/Fri_Apr__7_14:06:24_2023"
+  - lab: "IRIS"
+    quality: "high"
+    episode_key: "IRIS+ef107c48+2023-05-30-11h-36m-01s"
+    avg_score: 54044.6189
+    path: "IRIS/success/2023-05-30/Tue_May_30_11:36:01_2023"
+  
+  # PennPAL episodes (avg scores: 0.6053, 0.8075, 62060.9333)
+  - lab: "PennPAL"
+    quality: "low"
+    episode_key: "PennPAL+c5f808b7+2023-10-30-01h-06m-27s"
+    avg_score: 0.6053
+    path: "PennPAL/success/2023-10-30/Mon_Oct_30_01:06:27_2023"
+  - lab: "PennPAL"
+    quality: "medium"
+    episode_key: "PennPAL+acda9df3+2023-07-10-21h-22m-27s"
+    avg_score: 0.8075
+    path: "PennPAL/success/2023-07-10/Mon_Jul_10_21:22:27_2023"
+  - lab: "PennPAL"
+    quality: "high"
+    episode_key: "PennPAL+06b0ffa5+2023-04-29-19h-02m-32s"
+    avg_score: 62060.9333
+    path: "PennPAL/success/2023-04-29/Sat_Apr_29_19:02:32_2023"
+  
+  # RAIL episodes (avg scores: 0.6175, 0.7831, 58623.9328)
+  - lab: "RAIL"
+    quality: "low"
+    episode_key: "RAIL+80edfcb1+2023-07-14-17h-29m-03s"
+    avg_score: 0.6175
+    path: "RAIL/success/2023-07-14/Fri_Jul_14_17:29:03_2023"
+  - lab: "RAIL"
+    quality: "medium"
+    episode_key: "RAIL+80edfcb1+2023-06-29-14h-23m-12s"
+    avg_score: 0.7831
+    path: "RAIL/success/2023-06-29/Thu_Jun_29_14:23:12_2023"
+  - lab: "RAIL"
+    quality: "high"
+    episode_key: "RAIL+d027f2ae+2023-12-02-17h-21m-37s"
+    avg_score: 58623.9328
+    path: "RAIL/success/2023-12-02/Sat_Dec__2_17:21:37_2023"
+  
+  # REAL episodes (avg scores: 0.6043, 1.8228, 54218.3674)
+  - lab: "REAL"
+    quality: "low"
+    episode_key: "REAL+4f8ca688+2023-08-15-12h-44m-17s"
+    avg_score: 0.6043
+    path: "REAL/failure/2023-08-15/Tue_Aug_15_12:44:17_2023"
+  - lab: "REAL"
+    quality: "medium"
+    episode_key: "REAL+4f8ca688+2023-07-11-13h-51m-00s"
+    avg_score: 1.8228
+    path: "REAL/failure/2023-07-11/Tue_Jul_11_13:51:00_2023"
+  - lab: "REAL"
+    quality: "high"
+    episode_key: "REAL+4f8ca688+2023-07-04-15h-30m-08s"
+    avg_score: 54218.3674
+    path: "REAL/success/2023-07-04/Tue_Jul__4_15:30:08_2023"
+  
+  # RPL episodes (avg scores: 0.6065, 0.8087, 105968.3572)
+  - lab: "RPL"
+    quality: "low"
+    episode_key: "RPL+cb4f6842+2023-05-29-17h-29m-53s"
+    avg_score: 0.6065
+    path: "RPL/success/2023-05-29/Mon_May_29_17:29:53_2023"
+  - lab: "RPL"
+    quality: "medium"
+    episode_key: "RPL+32cba90c+2023-12-05-15h-28m-35s"
+    avg_score: 0.8087
+    path: "RPL/success/2023-12-05/Tue_Dec__5_15:28:35_2023"
+  - lab: "RPL"
+    quality: "high"
+    episode_key: "RPL+32cba90c+2023-12-04-14h-47m-25s"
+    avg_score: 105968.3572
+    path: "RPL/success/2023-12-04/Mon_Dec__4_14:47:25_2023"
+  
+  # TRI episodes (avg scores: 0.6088, 0.8621, 54311.3967)
+  - lab: "TRI"
+    quality: "low"
+    episode_key: "TRI+52ca9b6a+2023-11-20-15h-01m-29s"
+    avg_score: 0.6088
+    path: "TRI/success/2023-11-20/Mon_Nov_20_15:01:29_2023"
+  - lab: "TRI"
+    quality: "medium"
+    episode_key: "TRI+749baf62+2023-09-05-16h-41m-34s"
+    avg_score: 0.8621
+    path: "TRI/success/2023-09-05/Tue_Sep__5_16:41:34_2023"
+  - lab: "TRI"
+    quality: "high"
+    episode_key: "TRI+938130c4+2023-08-22-11h-23m-06s"
+    avg_score: 54311.3967
+    path: "TRI/success/2023-08-22/Tue_Aug_22_11:23:06_2023"
+  
+  # WEIRD episodes (avg scores: 0.6459, 2.4244, 39366.4602)
+  - lab: "WEIRD"
+    quality: "low"
+    episode_key: "WEIRD+417ecf07+2023-11-21-20h-30m-30s"
+    avg_score: 0.6459
+    path: "WEIRD/success/2023-11-21/Tue_Nov_21_20:30:30_2023"
+  - lab: "WEIRD"
+    quality: "medium"
+    episode_key: "WEIRD+f61abce9+2023-12-06-18h-54m-25s"
+    avg_score: 2.4244
+    path: "WEIRD/success/2023-12-06/Wed_Dec__6_18:54:25_2023"
+  - lab: "WEIRD"
+    quality: "high"
+    episode_key: "WEIRD+e604eeed+2023-11-30-20h-13m-53s"
+    avg_score: 39366.4602
+    path: "WEIRD/success/2023-11-30/Thu_Nov_30_20:13:53_2023"
+
+# Shared configuration
+extrinsics_json_path: "/data/droid/calib_and_annot/droid/cam2base_extrinsic_superset.json"
+metadata_path: null  # Auto-discover if null
+
+# Output paths
+video_output_path: "point_clouds/videos"
+
+# Depth filtering parameters
+wrist_max_depth: 0.75  # Meters (Close range for manipulation)
+ext_max_depth: 1.5     # Meters (Wider context)
+min_depth: 0.1         # Meters (Minimum valid depth)
+min_depth_wrist: 0.001 # Meters (Wrist cam can see closer)
+
+# Visualization parameters
+max_frames: 250        # Max frames to process
+radii_size: 0.001      # Point size in meters
+
+# Object detection parameters
+debug_object_text: null
+vlm_model: "gpt-4"
+vlm_query_prompt: "What is the main object being manipulated? Answer in 2-3 words."
+box_threshold: 0.35
+text_threshold: 0.25
+gdino_config: "/workspace/third_party/groundingdino-cu128/groundingdino/config/GroundingDINO_SwinT_OGC.py"
+gdino_weights: "/workspace/third_party/groundingdino-cu128/weights/groundingdino_swint_ogc.pth"
