@@ -44,6 +44,7 @@ from .optimization import (
     o3d_to_numpy,
     downsample_pointcloud,
     estimate_normals,
+    remove_statistical_outliers,
     # ICP registration
     run_icp_point_to_plane,
     run_icp_point_to_point,
@@ -53,6 +54,12 @@ from .optimization import (
     # Multi-frame optimization
     optimize_external_cameras_multi_frame,
     optimize_wrist_multi_frame,
+    # New helper functions
+    collect_frames_for_icp,
+    preprocess_pointcloud_for_icp,
+    transform_points_to_world,
+    compute_alignment_metric,
+    grid_search_z_offset,
 )
 
 __all__ = [
@@ -97,6 +104,7 @@ __all__ = [
     'o3d_to_numpy',
     'downsample_pointcloud',
     'estimate_normals',
+    'remove_statistical_outliers',
     # ICP registration
     'run_icp_point_to_plane',
     'run_icp_point_to_point',
@@ -106,4 +114,10 @@ __all__ = [
     # Multi-frame optimization
     'optimize_external_cameras_multi_frame',
     'optimize_wrist_multi_frame',
+    # New helper functions
+    'collect_frames_for_icp',
+    'preprocess_pointcloud_for_icp',
+    'transform_points_to_world',
+    'compute_alignment_metric',
+    'grid_search_z_offset',
 ]
