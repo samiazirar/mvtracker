@@ -1,15 +1,17 @@
 """
-ICP-based Wrist Camera Z-Offset Optimization and Video Generation.
+Robust ICP-based Wrist Camera Alignment and Video Generation.
 
-This script optimizes the Z-offset of the wrist camera relative to the gripper
-using point-to-plane ICP alignment against external camera point clouds.
+This script performs full 6-DOF ICP alignment of the wrist camera relative to
+external cameras and generates comparison videos before and after alignment.
 
 Key features:
-1. Assumes gripper pose is correct - only optimizes wrist camera Z offset
-2. Excludes gripper points (< 15cm from camera) during ICP alignment
-3. Generates two folders of reprojected videos:
-   - videos_no_icp: Before ICP optimization
-   - videos_icp: After ICP optimization
+1. Full 6-DOF ICP alignment (not just Z-offset)
+2. Multi-scale ICP with coarse-to-fine refinement
+3. Robust outlier rejection using statistical filtering
+4. Gripper exclusion (points < 15cm from camera are filtered)
+5. Generates two folders:
+   - videos_no_icp: Videos before ICP optimization
+   - videos_icp: Videos after ICP optimization
 
 Usage:
     python conversions/droid/icp_improved_video_and_pointcloud.py
@@ -27,7 +29,6 @@ import pyzed.sl as sl
 
 from utils import (
     pose6_to_T,
-    rvec_tvec_to_matrix,
     transform_points,
     compute_wrist_cam_offset,
     precompute_wrist_trajectory,
@@ -39,13 +40,12 @@ from utils import (
     VideoRecorder,
     project_points_to_image,
     draw_points_on_image,
-    # ICP functions
-    optimize_wrist_z_offset_multi_frame,
-    apply_z_offset_to_wrist_transforms,
+    # New ICP functions
+    optimize_wrist_camera_full_icp,
 )
 
 
-def copy_transforms(active_cams):
+def deep_copy_transforms(active_cams):
     """
     Create a deep copy of all camera transforms.
     
@@ -53,7 +53,7 @@ def copy_transforms(active_cams):
         active_cams: Dictionary of camera data
         
     Returns:
-        Dictionary mapping serial -> transforms (copied)
+        Dictionary mapping serial -> camera info with copied transforms
     """
     copies = {}
     for serial, cam in active_cams.items():
@@ -70,181 +70,26 @@ def copy_transforms(active_cams):
     return copies
 
 
-def collect_icp_data(active_cams, config):
-    """
-    Collect point cloud data from multiple frames for ICP optimization.
-    
-    This function gathers wrist camera points (excluding gripper) and 
-    external camera points for multi-frame ICP alignment.
-    
-    Args:
-        active_cams: Dictionary of active cameras
-        config: Configuration dictionary
-        
-    Returns:
-        List of frame data dictionaries for ICP optimization
-    """
-    # Find wrist and external cameras
-    wrist_cam = None
-    external_cams = {}
-    
-    for serial, cam in active_cams.items():
-        if cam['type'] == 'wrist':
-            wrist_cam = cam
-        else:
-            external_cams[serial] = cam
-    
-    if wrist_cam is None or len(external_cams) == 0:
-        print("[ICP] Warning: Need both wrist and external cameras")
-        return []
-    
-    # Parameters
-    num_icp_frames = config.get('icp_num_frames', 10)
-    min_depth_icp = config.get('min_depth_wrist_icp', 0.15)  # Exclude gripper (15cm)
-    max_depth_wrist = config.get('wrist_max_depth', 0.75)
-    ext_max_depth = config.get('ext_max_depth', 1.5)
-    min_depth_ext = config.get('min_depth', 0.1)
-    
-    # Reset cameras
-    wrist_cam['zed'].set_svo_position(0)
-    for cam in external_cams.values():
-        cam['zed'].set_svo_position(0)
-    
-    total_frames = len(wrist_cam['transforms'])
-    frame_indices = np.linspace(0, total_frames - 1, num_icp_frames, dtype=int)
-    
-    frames_data = []
-    
-    print(f"[ICP] Collecting {num_icp_frames} frames for Z-offset optimization...")
-    print(f"[ICP] Excluding gripper points (< {min_depth_icp}m from camera)")
-    
-    for frame_idx in frame_indices:
-        # Get wrist data
-        wrist_cam['zed'].set_svo_position(frame_idx)
-        if wrist_cam['zed'].grab(wrist_cam['runtime']) != sl.ERROR_CODE.SUCCESS:
-            continue
-        
-        # Get wrist points (excluding gripper - min_depth = 15cm)
-        wrist_xyz, wrist_rgb = get_filtered_cloud(
-            wrist_cam['zed'], wrist_cam['runtime'],
-            max_depth=max_depth_wrist,
-            min_depth=min_depth_icp  # 15cm to exclude gripper
-        )
-        
-        if wrist_xyz is None or len(wrist_xyz) < 100:
-            continue
-        
-        wrist_transform = wrist_cam['transforms'][frame_idx]
-        
-        # Collect external camera points
-        external_world_points = []
-        
-        for ext_serial, ext_cam in external_cams.items():
-            ext_cam['zed'].set_svo_position(frame_idx)
-            if ext_cam['zed'].grab(ext_cam['runtime']) != sl.ERROR_CODE.SUCCESS:
-                continue
-            
-            ext_xyz, ext_rgb = get_filtered_cloud(
-                ext_cam['zed'], ext_cam['runtime'],
-                max_depth=ext_max_depth,
-                min_depth=min_depth_ext
-            )
-            
-            if ext_xyz is None or len(ext_xyz) < 100:
-                continue
-            
-            # Transform to world frame
-            T_ext = ext_cam['world_T_cam']
-            ext_world = transform_points(ext_xyz, T_ext)
-            external_world_points.append(ext_world)
-        
-        if len(external_world_points) == 0:
-            continue
-        
-        external_points_world = np.vstack(external_world_points)
-        
-        frames_data.append({
-            'wrist_points_local': wrist_xyz,
-            'wrist_transform': wrist_transform,
-            'external_points_world': external_points_world
-        })
-    
-    print(f"[ICP] Collected {len(frames_data)} valid frames")
-    return frames_data
-
-
-def optimize_wrist_z(active_cams, config):
-    """
-    Optimize wrist camera Z offset using point-to-plane ICP.
-    
-    Args:
-        active_cams: Dictionary of active cameras
-        config: Configuration dictionary
-        
-    Returns:
-        Optimal Z offset value (meters)
-    """
-    # Find wrist camera
-    wrist_serial = None
-    wrist_cam = None
-    for serial, cam in active_cams.items():
-        if cam['type'] == 'wrist':
-            wrist_serial = serial
-            wrist_cam = cam
-            break
-    
-    if wrist_cam is None:
-        print("[ICP] No wrist camera found")
-        return 0.0
-    
-    # Collect ICP data
-    frames_data = collect_icp_data(active_cams, config)
-    
-    if len(frames_data) == 0:
-        print("[ICP] No valid frames for optimization")
-        return 0.0
-    
-    # Optimize Z offset
-    voxel_size = config.get('icp_voxel_size', 0.01)
-    max_corr_dist = config.get('icp_max_correspondence_distance', 0.05)
-    
-    print("[ICP] Running point-to-plane ICP optimization...")
-    z_offset, fitness = optimize_wrist_z_offset_multi_frame(
-        frames_data,
-        z_range=(-0.05, 0.05),  # Search +/- 5cm
-        voxel_size=voxel_size,
-        max_correspondence_distance=max_corr_dist
-    )
-    
-    print(f"[ICP] Optimal Z offset: {z_offset * 100:.2f}cm, Fitness: {fitness:.4f}")
-    
-    # Apply offset to wrist transforms
-    wrist_cam['transforms'] = apply_z_offset_to_wrist_transforms(
-        wrist_cam['transforms'], z_offset
-    )
-    
-    return z_offset
-
-
-def generate_reprojection_videos(
-    active_cams, 
-    transforms_no_icp, 
-    transforms_icp, 
-    num_frames, 
+def generate_comparison_videos(
+    active_cams,
+    transforms_no_icp,
+    transforms_icp,
+    num_frames,
     config
 ):
     """
-    Generate reprojected point cloud videos before and after ICP optimization.
+    Generate comparison videos showing reprojected point clouds 
+    before and after ICP optimization.
     
     Creates two folders:
     - videos_no_icp: Reprojections using original transforms
     - videos_icp: Reprojections using ICP-optimized transforms
     
     Args:
-        active_cams: Dictionary of active cameras
+        active_cams: Dictionary of active cameras with ZED objects
         transforms_no_icp: Transforms before ICP
         transforms_icp: Transforms after ICP  
-        num_frames: Total number of frames
+        num_frames: Total number of frames in the trajectory
         config: Configuration dictionary
     """
     video_base_dir = config.get('video_output_path', 'point_clouds/videos')
@@ -256,8 +101,8 @@ def generate_reprojection_videos(
     os.makedirs(dir_icp, exist_ok=True)
     
     print(f"\n[VIDEO] Generating comparison videos...")
-    print(f"[VIDEO] No ICP: {dir_no_icp}")
-    print(f"[VIDEO] With ICP: {dir_icp}")
+    print(f"[VIDEO] No ICP folder: {dir_no_icp}")
+    print(f"[VIDEO] With ICP folder: {dir_icp}")
     
     # Initialize video recorders for each camera
     recorders = {}
@@ -272,23 +117,23 @@ def generate_reprojection_videos(
     for cam in active_cams.values():
         cam['zed'].set_svo_position(0)
     
-    max_frames = min(num_frames, config.get('max_frames', 50))
+    max_frames = min(num_frames, config.get('max_frames', 100))
     
-    # Parameters for point cloud filtering (exclude gripper for wrist cam rendering)
-    min_depth_wrist = config.get('min_depth_wrist', 0.01)  # Include gripper for visualization
+    # Depth filtering parameters
+    min_depth_wrist = config.get('min_depth_wrist', 0.01)
     max_depth_wrist = config.get('wrist_max_depth', 0.75)
     min_depth_ext = config.get('min_depth', 0.1)
     max_depth_ext = config.get('ext_max_depth', 1.5)
     
-    for i in range(max_frames):
-        if i % 10 == 0:
-            print(f"  -> Processing frame {i}/{max_frames}")
+    for frame_idx in range(max_frames):
+        if frame_idx % 10 == 0:
+            print(f"  -> Processing frame {frame_idx}/{max_frames}")
         
         # Collect frame data from all cameras
         frame_data = {}
         
         for serial, cam in active_cams.items():
-            cam['zed'].set_svo_position(i)
+            cam['zed'].set_svo_position(frame_idx)
             if cam['zed'].grab(cam['runtime']) != sl.ERROR_CODE.SUCCESS:
                 continue
             
@@ -298,10 +143,8 @@ def generate_reprojection_videos(
             img_bgra = mat_img.get_data()
             img_bgr = cv2.cvtColor(img_bgra, cv2.COLOR_BGRA2BGR)
             
-            # Get points (exclude gripper for wrist cam)
+            # Get points with appropriate depth filtering
             if cam['type'] == 'wrist':
-                # For rendering: use min_depth_wrist (may include gripper)
-                # But for better alignment visualization, we still render everything
                 xyz, rgb = get_filtered_cloud(
                     cam['zed'], cam['runtime'],
                     max_depth=max_depth_wrist,
@@ -320,7 +163,7 @@ def generate_reprojection_videos(
                 'colors': rgb
             }
         
-        # Build world point clouds for both versions (No ICP and ICP)
+        # Build world point clouds for both versions
         def build_world_cloud(transforms_dict):
             cloud_points = []
             cloud_colors = []
@@ -332,8 +175,8 @@ def generate_reprojection_videos(
                 cam_info = transforms_dict[serial]
                 
                 if cam_info['type'] == 'wrist':
-                    if i < len(cam_info['transforms']):
-                        T = cam_info['transforms'][i]
+                    if frame_idx < len(cam_info['transforms']):
+                        T = cam_info['transforms'][frame_idx]
                         pts_world = transform_points(data['points'], T)
                         cloud_points.append(pts_world)
                         cloud_colors.append(data['colors'])
@@ -347,8 +190,8 @@ def generate_reprojection_videos(
                 return np.vstack(cloud_points), np.vstack(cloud_colors)
             return np.empty((0, 3)), np.empty((0, 3))
         
-        pts_world_no_icp, cols_world_no_icp = build_world_cloud(transforms_no_icp)
-        pts_world_icp, cols_world_icp = build_world_cloud(transforms_icp)
+        pts_no_icp, cols_no_icp = build_world_cloud(transforms_no_icp)
+        pts_icp, cols_icp = build_world_cloud(transforms_icp)
         
         # Project and render for each camera
         for serial, cam in active_cams.items():
@@ -363,26 +206,26 @@ def generate_reprojection_videos(
             def get_cam_transform(transforms_dict):
                 cam_info = transforms_dict[serial]
                 if cam_info['type'] == 'wrist':
-                    if i < len(cam_info['transforms']):
-                        return cam_info['transforms'][i]
+                    if frame_idx < len(cam_info['transforms']):
+                        return cam_info['transforms'][frame_idx]
                     return None
                 else:
                     return cam_info['world_T_cam']
             
-            # No ICP version
+            # Render No-ICP version
             T_no_icp = get_cam_transform(transforms_no_icp)
-            if T_no_icp is not None and len(pts_world_no_icp) > 0:
+            if T_no_icp is not None and len(pts_no_icp) > 0:
                 uv, cols = project_points_to_image(
-                    pts_world_no_icp, K, T_no_icp, w, h, colors=cols_world_no_icp
+                    pts_no_icp, K, T_no_icp, w, h, colors=cols_no_icp
                 )
                 img_out = draw_points_on_image(img.copy(), uv, colors=cols, point_size=1)
                 recorders[serial]['no_icp'].write_frame(img_out)
             
-            # ICP version
+            # Render ICP version
             T_icp = get_cam_transform(transforms_icp)
-            if T_icp is not None and len(pts_world_icp) > 0:
+            if T_icp is not None and len(pts_icp) > 0:
                 uv, cols = project_points_to_image(
-                    pts_world_icp, K, T_icp, w, h, colors=cols_world_icp
+                    pts_icp, K, T_icp, w, h, colors=cols_icp
                 )
                 img_out = draw_points_on_image(img.copy(), uv, colors=cols, point_size=1)
                 recorders[serial]['icp'].write_frame(img_out)
@@ -392,7 +235,7 @@ def generate_reprojection_videos(
         recs['no_icp'].close()
         recs['icp'].close()
     
-    print("[VIDEO] Done generating comparison videos.")
+    print("[VIDEO] Comparison videos generated successfully.")
 
 
 def main():
@@ -404,24 +247,25 @@ def main():
     with open(config_path, 'r') as f:
         CONFIG = yaml.safe_load(f)
     
-    print("=" * 60)
-    print("ICP Wrist Camera Z-Offset Optimization")
-    print("=" * 60)
-    print(f"[INFO] Assumes gripper pose is CORRECT")
-    print(f"[INFO] Only optimizes wrist camera Z offset (depth)")
-    print(f"[INFO] Excludes gripper points (< 15cm) from ICP")
-    print("=" * 60)
+    print("=" * 70)
+    print("Robust ICP Wrist Camera Alignment")
+    print("=" * 70)
+    print("[INFO] Full 6-DOF ICP alignment (not just Z-offset)")
+    print("[INFO] Gripper points (< 15cm from camera) are excluded")
+    print("[INFO] Uses multi-scale ICP with robust outlier rejection")
+    print("=" * 70)
     
-    # --- 1. Load Robot Data ---
-    print("\n[INFO] Loading H5 Trajectory...")
+    # --- 1. Load Robot Trajectory Data ---
+    print("\n[1/6] Loading H5 Trajectory...")
     h5_file = h5py.File(CONFIG['h5_path'], 'r')
     cartesian_positions = h5_file['observation/robot_state/cartesian_position'][:]
     gripper_positions = h5_file['observation/robot_state/gripper_position'][:]
     h5_file.close()
     num_frames = len(cartesian_positions)
-    print(f"[INFO] Loaded {num_frames} frames")
+    print(f"[INFO] Loaded {num_frames} frames from trajectory")
     
-    # --- 2. Calculate Wrist Transforms ---
+    # --- 2. Calculate Wrist Camera Transforms ---
+    print("\n[2/6] Computing wrist camera trajectory...")
     wrist_cam_transforms = []
     wrist_serial = None
     T_ee_cam = None
@@ -441,16 +285,16 @@ def main():
         wrist_pose_t0 = meta.get("wrist_cam_extrinsics")
         
         if wrist_pose_t0:
-            # Calculate constant offset from EE to camera
             T_ee_cam = compute_wrist_cam_offset(wrist_pose_t0, cartesian_positions[0])
-            # Precompute all wrist camera poses
             wrist_cam_transforms = precompute_wrist_trajectory(cartesian_positions, T_ee_cam)
             print(f"[INFO] Wrist camera serial: {wrist_serial}")
+            print(f"[INFO] Computed {len(wrist_cam_transforms)} wrist camera poses")
     
-    # --- 3. Init Cameras ---
+    # --- 3. Initialize Cameras ---
+    print("\n[3/6] Initializing cameras...")
     cameras = {}
     
-    # A. External Cameras
+    # External Cameras
     ext_data = find_episode_data_by_date(CONFIG['h5_path'], CONFIG['extrinsics_json_path'])
     if ext_data:
         for cam_id, transform_list in ext_data.items():
@@ -463,12 +307,13 @@ def main():
                     "svo": svo,
                     "world_T_cam": external_cam_to_world(transform_list)
                 }
+                print(f"[INFO] Found external camera: {cam_id}")
     
-    # B. Wrist Camera
+    # Wrist Camera
     if wrist_serial and len(wrist_cam_transforms) > 0:
         svo = find_svo_for_camera(CONFIG['recordings_dir'], wrist_serial)
         if svo:
-            print(f"[INFO] Found Wrist Camera SVO: {wrist_serial}")
+            print(f"[INFO] Found wrist camera SVO: {wrist_serial}")
             cameras[wrist_serial] = {
                 "type": "wrist",
                 "svo": svo,
@@ -495,31 +340,43 @@ def main():
         else:
             print(f"[ERROR] Failed to open camera {serial}")
     
-    print(f"[INFO] Active cameras: {len(active_cams)}")
+    if len(active_cams) == 0:
+        print("[ERROR] No cameras available!")
+        return
     
-    # --- 4. Capture transforms BEFORE ICP ---
-    print("\n[INFO] Saving transforms before ICP...")
-    transforms_no_icp = copy_transforms(active_cams)
+    print(f"[INFO] Total active cameras: {len(active_cams)}")
     
-    # --- 5. Run ICP Optimization (Z offset only) ---
-    print("\n" + "=" * 60)
-    print("Running ICP Z-Offset Optimization")
-    print("=" * 60)
-    z_offset = optimize_wrist_z(active_cams, CONFIG)
+    # --- 4. Save Transforms BEFORE ICP ---
+    print("\n[4/6] Saving transforms before ICP optimization...")
+    transforms_before_icp = deep_copy_transforms(active_cams)
     
-    # --- 6. Capture transforms AFTER ICP ---
-    print("\n[INFO] Saving transforms after ICP...")
-    transforms_icp = copy_transforms(active_cams)
+    # --- 5. Run Full 6-DOF ICP Optimization ---
+    print("\n[5/6] Running ICP optimization...")
+    correction_transform, icp_fitness = optimize_wrist_camera_full_icp(active_cams, CONFIG)
+    
+    # Analyze the correction
+    translation = correction_transform[:3, 3]
+    rotation = R.from_matrix(correction_transform[:3, :3])
+    euler_deg = rotation.as_euler('xyz', degrees=True)
+    
+    print(f"\n[ICP RESULT]")
+    print(f"  Correction translation: [{translation[0]*1000:.1f}, {translation[1]*1000:.1f}, {translation[2]*1000:.1f}] mm")
+    print(f"  Correction rotation: [{euler_deg[0]:.2f}, {euler_deg[1]:.2f}, {euler_deg[2]:.2f}] degrees")
+    print(f"  ICP fitness: {icp_fitness:.4f}")
+    
+    # --- 6. Save Transforms AFTER ICP ---
+    print("\n[6/6] Saving transforms after ICP optimization...")
+    transforms_after_icp = deep_copy_transforms(active_cams)
     
     # --- 7. Generate Comparison Videos ---
-    print("\n" + "=" * 60)
+    print("\n" + "=" * 70)
     print("Generating Comparison Videos")
-    print("=" * 60)
-    generate_reprojection_videos(
-        active_cams, 
-        transforms_no_icp, 
-        transforms_icp, 
-        num_frames, 
+    print("=" * 70)
+    generate_comparison_videos(
+        active_cams,
+        transforms_before_icp,
+        transforms_after_icp,
+        num_frames,
         CONFIG
     )
     
@@ -527,14 +384,18 @@ def main():
     for cam in active_cams.values():
         cam['zed'].close()
     
-    print("\n" + "=" * 60)
-    print("DONE")
-    print("=" * 60)
-    print(f"[RESULT] Optimal Z offset: {z_offset * 100:.2f} cm")
-    print(f"[RESULT] Videos saved to:")
+    # --- Summary ---
     video_base_dir = CONFIG.get('video_output_path', 'point_clouds/videos')
-    print(f"  - {os.path.join(video_base_dir, 'videos_no_icp')}")
-    print(f"  - {os.path.join(video_base_dir, 'videos_icp')}")
+    print("\n" + "=" * 70)
+    print("COMPLETE")
+    print("=" * 70)
+    print(f"[RESULT] ICP Fitness Score: {icp_fitness:.4f}")
+    print(f"[RESULT] Correction (translation): {np.linalg.norm(translation)*1000:.1f} mm")
+    print(f"[RESULT] Correction (rotation): {np.linalg.norm(euler_deg):.2f} degrees")
+    print(f"\n[OUTPUT] Videos saved to:")
+    print(f"  - {os.path.join(video_base_dir, 'videos_no_icp')} (before ICP)")
+    print(f"  - {os.path.join(video_base_dir, 'videos_icp')} (after ICP)")
+    print("=" * 70)
 
 
 if __name__ == "__main__":
