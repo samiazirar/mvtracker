@@ -24,7 +24,6 @@ from utils import (
     project_points_to_image,
     draw_points_on_image
 )
-from utils.optimization import optimize_external_cameras_multi_frame, optimize_wrist_multi_frame
 
 
 def capture_transforms(active_cams):
@@ -278,24 +277,14 @@ def main():
             print(f"[ERROR] Failed to open {serial}")
 
     # ====================================================
-    # [NEW] MULTI-FRAME OPTIMIZATION PIPELINE
+    # Generate Videos (NO ICP - just use original transforms)
     # ====================================================
     
-    # Capture BEFORE state
-    transforms_before = capture_transforms(active_cams)
+    # Capture current transforms (no optimization)
+    transforms_current = capture_transforms(active_cams)
 
-    # 1. Optimize External Cameras (using 20-frame accumulation)
-    optimize_external_cameras_multi_frame(active_cams, CONFIG)
-
-    # 2. Optimize Wrist Camera (using 5 different test angles)
-    if wrist_serial and wrist_serial in active_cams:
-        optimize_wrist_multi_frame(active_cams, cartesian_positions, CONFIG)
-    
-    # Capture AFTER state
-    transforms_after = capture_transforms(active_cams)
-
-    # Generate Comparison Videos
-    generate_comparison_videos(active_cams, transforms_before, transforms_after, num_frames, CONFIG)
+    # Generate Videos with current transforms
+    generate_comparison_videos(active_cams, transforms_current, transforms_current, num_frames, CONFIG)
 
     # ====================================================
 
