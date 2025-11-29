@@ -25,18 +25,34 @@ from .gripper_visualizer import GripperVisualizer
 from .object_detector import ObjectDetector, boxes_to_mask
 from .video_utils import (
     VideoRecorder, 
-    project_points_to_image, 
-    draw_points_on_image
+    project_points_to_image,
+    project_points_with_depth,
+    draw_points_on_image,
+    draw_points_on_image_fast,
+    create_reprojection_video,
 )
 from .optimization import (
+    # ICP optimization functions
     optimize_wrist_camera_icp,
     optimize_wrist_camera_icp_z_only,
     optimize_wrist_z_offset_icp,
     apply_z_offset_to_wrist_transforms,
+    optimize_wrist_z_offset,
+    optimize_wrist_z_offset_multi_frame,
+    # Open3D utilities
     numpy_to_o3d_pointcloud,
+    o3d_to_numpy,
     downsample_pointcloud,
     estimate_normals,
+    # ICP registration
     run_icp_point_to_plane,
+    run_icp_point_to_point,
+    # Filtering
+    filter_points_by_distance_from_camera,
+    filter_wrist_cloud_for_icp,
+    # Multi-frame optimization
+    optimize_external_cameras_multi_frame,
+    optimize_wrist_multi_frame,
 )
 
 __all__ = [
@@ -62,16 +78,32 @@ __all__ = [
     'GripperVisualizer',
     'ObjectDetector',
     'boxes_to_mask',
-    # Video
+    # Video utilities
     'VideoRecorder',
     'project_points_to_image',
+    'project_points_with_depth',
     'draw_points_on_image',
+    'draw_points_on_image_fast',
+    'create_reprojection_video',
     # ICP Optimization
     'optimize_wrist_camera_icp',
+    'optimize_wrist_camera_icp_z_only',
     'optimize_wrist_z_offset_icp',
     'apply_z_offset_to_wrist_transforms',
+    'optimize_wrist_z_offset',
+    'optimize_wrist_z_offset_multi_frame',
+    # Open3D utilities
     'numpy_to_o3d_pointcloud',
+    'o3d_to_numpy',
     'downsample_pointcloud',
     'estimate_normals',
+    # ICP registration
     'run_icp_point_to_plane',
+    'run_icp_point_to_point',
+    # Filtering
+    'filter_points_by_distance_from_camera',
+    'filter_wrist_cloud_for_icp',
+    # Multi-frame optimization
+    'optimize_external_cameras_multi_frame',
+    'optimize_wrist_multi_frame',
 ]
