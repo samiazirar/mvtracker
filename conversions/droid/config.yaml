@@ -15,11 +15,17 @@ video_output_path: "point_clouds/videos"
 wrist_max_depth: 0.75  # Meters (Close range for manipulation)
 ext_max_depth: 1.5     # Meters (Wider context)
 min_depth: 0.1         # Meters (Minimum valid depth)
-min_depth_wrist: 0.001 # Meters (Wrist cam can see closer)
+min_depth_wrist: 0.001 # Meters (Wrist cam can see closer for rendering)
+min_icp_depth: 0.15    # Meters (Exclude gripper at ~15cm for ICP optimization)
 
 # Visualization parameters
 max_frames: 20        # Max frames to process
 radii_size: 0.001      # Point size in meters
+
+# ICP optimization parameters
+icp_num_frames: 10     # Number of frames to sample for ICP optimization
+icp_max_correspondence_distance: 0.05  # Max point correspondence distance (meters)
+icp_voxel_size: 0.01   # Voxel size for downsampling (meters)
 
 # Object detection parameters (for mask version)
 debug_object_text: "Black Lid" # If set, skips VLM and uses this text for Grounding DINO
