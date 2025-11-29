@@ -109,7 +109,9 @@ def get_filtered_cloud(zed, runtime, max_depth=2.0, min_depth=0.1, highlight_mas
     mat_image = sl.Mat()
     zed.retrieve_image(mat_image, sl.VIEW.LEFT)
     image_data = mat_image.get_data()
-    rgb = image_data[:, :, :3].reshape(-1, 3)
+    # ZED returns BGRA by default; convert to RGB so downstream point clouds are correct
+    rgb_image = cv2.cvtColor(image_data, cv2.COLOR_BGRA2RGB)
+    rgb = rgb_image.reshape(-1, 3)
 
     if highlight_mask is not None:
         mask_flat = highlight_mask.reshape(-1) > 0

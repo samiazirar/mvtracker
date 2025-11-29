@@ -1,0 +1,31 @@
+# Configuration for DROID Point Cloud Generation - ILIAD Low Quality
+
+# Input paths
+h5_path: "/data/droid/data/droid_raw/1.0.1/ILIAD/success/2023-07-12/Wed_Jul_12_21:19:52_2023/trajectory.h5"
+extrinsics_json_path: "/data/droid/calib_and_annot/droid/cam2base_extrinsic_superset.json"
+recordings_dir: "/data/droid/data/droid_raw/1.0.1/ILIAD/success/2023-07-12/Wed_Jul_12_21:19:52_2023/recordings/SVO"
+metadata_path: null  # Auto-discover if null
+
+# Output paths
+rrd_output_path: "point_clouds/iliad_low_fusion.rrd"
+rrd_output_path_with_mask: "point_clouds/iliad_low_fusion_with_mask.rrd"
+video_output_path: "point_clouds/videos"
+
+# Depth filtering parameters
+wrist_max_depth: 0.75  # Meters (Close range for manipulation)
+ext_max_depth: 1.5     # Meters (Wider context)
+min_depth: 0.1         # Meters (Minimum valid depth)
+min_depth_wrist: 0.001 # Meters (Wrist cam can see closer)
+
+# Visualization parameters
+max_frames: 250        # Max frames to process
+radii_size: 0.001      # Point size in meters
+
+# Object detection parameters (for mask version)
+debug_object_text: null # If set, skips VLM and uses this text for Grounding DINO
+vlm_model: "gpt-4"
+vlm_query_prompt: "What is the main object being manipulated? Answer in 2-3 words."
+box_threshold: 0.35
+text_threshold: 0.25
+gdino_config: "/workspace/third_party/groundingdino-cu128/groundingdino/config/GroundingDINO_SwinT_OGC.py"
+gdino_weights: "/workspace/third_party/groundingdino-cu128/weights/groundingdino_swint_ogc.pth"
