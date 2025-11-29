@@ -3,7 +3,6 @@ import os
 import glob
 import h5py
 import yaml
-import cv2
 from scipy.spatial.transform import Rotation as R
 import rerun as rr
 import pyzed.sl as sl
@@ -21,7 +20,6 @@ from utils import (
     get_filtered_cloud,
     GripperVisualizer
 )
-from utils.optimization import optimize_external_cameras_multi_frame, optimize_wrist_multi_frame
 
 
 def main():
@@ -31,7 +29,10 @@ def main():
     
     print("=== DROID Full Fusion (Wrist + External) ===")
     rr.init("droid_full_fusion", spawn=True)
-    rr.save(CONFIG['rrd_output_path'])
+    save_path = CONFIG['rrd_output_path']
+    save_path = save_path.replace(".rrd", "")
+    save_path = f"{save_path}_no_optimization.rrd"
+    rr.save(save_path)
     
     # Define Up-Axis for the World (Z-up is standard for Robotics)
     rr.log("world", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
@@ -66,11 +67,22 @@ def main():
         wrist_pose_t0 = meta.get("wrist_cam_extrinsics")
 
         if wrist_pose_t0:
-            # Calculate constant offset
-            T_ee_cam = compute_wrist_cam_offset(wrist_pose_t0, cartesian_positions[0])
+            # Apply the same 90-degree rotation fix to the initial EE pose
+            cartesian_t0 = cartesian_positions[0].copy()
+            T_base_ee0 = pose6_to_T(cartesian_t0)
+            R_fix = R.from_euler('z', 90, degrees=True).as_matrix()
+            T_base_ee0[:3, :3] = T_base_ee0[:3, :3] @ R_fix
             
-            # Precompute all wrist camera poses
-            wrist_cam_transforms = precompute_wrist_trajectory(cartesian_positions, T_ee_cam)
+            # Calculate constant offset using the corrected pose
+            T_base_cam0 = pose6_to_T(wrist_pose_t0)
+            T_ee_cam = np.linalg.inv(T_base_ee0) @ T_base_cam0
+            
+            # Precompute all wrist camera poses with rotation fix applied
+            wrist_cam_transforms = []
+            for cart_pos in cartesian_positions:
+                T_base_ee_t = pose6_to_T(cart_pos)
+                T_base_ee_t[:3, :3] = T_base_ee_t[:3, :3] @ R_fix
+                wrist_cam_transforms.append(T_base_ee_t @ T_ee_cam)
     
     # --- 3. Init Cameras ---
     cameras = {} # Holds all cameras (Ext + Wrist)
@@ -96,8 +108,7 @@ def main():
             cameras[wrist_serial] = {
                 "type": "wrist",
                 "svo": svo,
-                "transforms": wrist_cam_transforms, # List of 4x4 matrices
-                "T_ee_cam": T_ee_cam
+                "transforms": wrist_cam_transforms # List of 4x4 matrices
             }
         else:
             print(f"[WARN] Wrist SVO not found for serial {wrist_serial}")
@@ -120,24 +131,7 @@ def main():
         else:
             print(f"[ERROR] Failed to open {serial}")
 
-    # ====================================================
-    # [NEW] MULTI-FRAME OPTIMIZATION PIPELINE
-    # ====================================================
-
-    # 1. Optimize External Cameras (using 20-frame accumulation)
-    optimize_external_cameras_multi_frame(active_cams, CONFIG)
-
-    # 2. Optimize Wrist Camera (using 5 different test angles)
-    if wrist_serial and wrist_serial in active_cams:
-        optimize_wrist_multi_frame(active_cams, cartesian_positions, CONFIG)
-
-    # ====================================================
-
     # --- 4. Render Loop ---
-    # Reset cameras for Rerun logging
-    for cam in active_cams.values():
-        cam['zed'].set_svo_position(0)
-
     max_frames = CONFIG["max_frames"]
     print(f"[INFO] Processing {min(max_frames, num_frames)} frames...")
     
@@ -147,7 +141,7 @@ def main():
 
         # Update Gripper (use end-effector pose directly)
         T_base_ee = pose6_to_T(cartesian_positions[i])
-        #rotate by 90 degrees to align
+        # Rotate by 90 degrees to align
         R_fix = R.from_euler('z', 90, degrees=True).as_matrix()
         T_base_ee[:3, :3] = T_base_ee[:3, :3] @ R_fix
         gripper_viz.update(T_base_ee, gripper_positions[i])
@@ -237,7 +231,7 @@ def main():
     # Cleanup
     for c in active_cams.values(): c['zed'].close()
     print("[SUCCESS] Done.")
-    print(f"[INFO] RRD saved to: {CONFIG['rrd_output_path']}")
+    print(f"[INFO] RRD saved to: {save_path}")
 
 
 if __name__ == "__main__":
