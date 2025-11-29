@@ -26,6 +26,14 @@ except ImportError:
     DEPENDENCIES_AVAILABLE = False
 
 
+# =============================================================================
+# Constants
+# =============================================================================
+
+# Minimum fitness threshold for valid ICP alignment
+MIN_ICP_FITNESS_THRESHOLD = 0.3
+
+
 def numpy_to_o3d_pointcloud(points, colors=None):
     """Convert numpy array to Open3D point cloud."""
     if points is None or len(points) == 0:
@@ -234,7 +242,7 @@ def align_external_cameras(active_cams, config, reference_serial=None):
                 source_pcd, ref_pcd, max_corr_dist
             )
             
-            if fitness > 0.3:  # Good alignment
+            if fitness > MIN_ICP_FITNESS_THRESHOLD:  # Good alignment
                 accumulated_transform = delta_transform @ accumulated_transform
                 total_fitness += fitness
                 valid_alignments += 1

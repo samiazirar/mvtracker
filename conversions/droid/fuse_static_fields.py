@@ -244,12 +244,24 @@ class WristDepthScanner:
         if self.prev_points is not None and self.prev_colors is not None:
             # Use color change to detect static regions
             # (This is a simplified approach - more sophisticated methods possible)
-            static_mask = compute_color_change(
-                filtered_cols, self.prev_colors[:len(filtered_cols)],
-                self.color_change_threshold
-            )
-            static_pts = pts_world[static_mask]
-            static_cols = filtered_cols[static_mask]
+            # Ensure we compare arrays of matching size
+            min_len = min(len(filtered_cols), len(self.prev_colors))
+            if min_len > 0:
+                static_mask = compute_color_change(
+                    filtered_cols[:min_len], self.prev_colors[:min_len],
+                    self.color_change_threshold
+                )
+                # Extend mask to cover all points (assume additional points are static)
+                if len(filtered_cols) > min_len:
+                    full_mask = np.ones(len(filtered_cols), dtype=bool)
+                    full_mask[:min_len] = static_mask
+                    static_mask = full_mask
+                
+                static_pts = pts_world[static_mask]
+                static_cols = filtered_cols[static_mask]
+            else:
+                static_pts = pts_world
+                static_cols = filtered_cols
         else:
             static_pts = pts_world
             static_cols = filtered_cols

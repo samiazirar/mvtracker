@@ -23,6 +23,26 @@ from scipy.optimize import minimize_scalar, minimize
 
 
 # =============================================================================
+# Constants
+# =============================================================================
+
+# ICP optimization weights for combined fitness/RMSE scoring
+ICP_FITNESS_WEIGHT = 0.7
+ICP_RMSE_WEIGHT = 0.3
+
+# Grid search parameters
+GRID_SEARCH_STEPS = 21
+GRID_SEARCH_REFINEMENT_DIVISOR = 20  # Divides z_range for refinement radius
+LOCAL_REFINEMENT_DIVISOR = 10  # Divides z_range for local refinement
+
+# Minimum fitness threshold for valid ICP alignment
+MIN_ICP_FITNESS_THRESHOLD = 0.3
+
+# Minimum points required for valid ICP
+MIN_POINTS_FOR_ICP = 50
+
+
+# =============================================================================
 # Open3D Point Cloud Utilities
 # =============================================================================
 
@@ -436,15 +456,13 @@ def compute_alignment_error_for_z_offset(
     Returns:
         Negative fitness score (to minimize)
     """
-    min_points = 50  # Minimum points required for valid comparison
-    
-    if len(wrist_points_local) < min_points or len(external_points_world) < min_points:
+    if len(wrist_points_local) < MIN_POINTS_FOR_ICP or len(external_points_world) < MIN_POINTS_FOR_ICP:
         return 1.0  # Return high error if not enough points
     
     # Transform wrist points to world with Z offset
     wrist_world = transform_points_to_world(wrist_points_local, wrist_transform, z_offset)
     
-    if len(wrist_world) < min_points:
+    if len(wrist_world) < MIN_POINTS_FOR_ICP:
         return 1.0
     
     # Create and preprocess point clouds
@@ -466,7 +484,7 @@ def compute_alignment_error_for_z_offset(
         # Combine fitness and RMSE for better optimization
         if rmse == float('inf') or rmse > max_correspondence_distance:
             return 1.0
-        return -(fitness * 0.7 + (1.0 - min(rmse / max_correspondence_distance, 1.0)) * 0.3)
+        return -(fitness * ICP_FITNESS_WEIGHT + (1.0 - min(rmse / max_correspondence_distance, 1.0)) * ICP_RMSE_WEIGHT)
     else:
         # Direct evaluation without ICP (faster, more stable for grid search)
         metrics = compute_alignment_metric(
@@ -557,7 +575,7 @@ def optimize_wrist_z_offset(
         Tuple of (optimal_z_offset, best_fitness)
     """
     # Grid search
-    z_values = np.linspace(z_range[0], z_range[1], 21)
+    z_values = np.linspace(z_range[0], z_range[1], GRID_SEARCH_STEPS)
     best_z = 0.0
     best_fitness = -float('inf')
     
@@ -577,7 +595,7 @@ def optimize_wrist_z_offset(
             best_z = z_offset
     
     # Local refinement around best Z
-    search_radius = (z_range[1] - z_range[0]) / 20
+    search_radius = (z_range[1] - z_range[0]) / GRID_SEARCH_REFINEMENT_DIVISOR
     refined_range = (max(z_range[0], best_z - search_radius), 
                      min(z_range[1], best_z + search_radius))
     
@@ -626,13 +644,13 @@ def optimize_wrist_z_offset_multi_frame(
     
     # Stage 1: Grid search
     grid_z, grid_fitness = grid_search_z_offset(
-        frames_data, z_range, num_steps=21, 
+        frames_data, z_range, num_steps=GRID_SEARCH_STEPS, 
         voxel_size=voxel_size, 
         max_correspondence_distance=max_correspondence_distance
     )
     
     # Stage 2: Local refinement with ICP
-    search_radius = (z_range[1] - z_range[0]) / 10
+    search_radius = (z_range[1] - z_range[0]) / LOCAL_REFINEMENT_DIVISOR
     refined_range = (max(z_range[0], grid_z - search_radius), 
                      min(z_range[1], grid_z + search_radius))
     
