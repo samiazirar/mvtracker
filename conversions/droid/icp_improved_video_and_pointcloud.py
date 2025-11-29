@@ -1,13 +1,17 @@
 """
-ICP-based Wrist Camera Z-Offset Optimization and Video Generation.
+High-Quality ICP-based Wrist Camera Alignment and Video Generation.
 
-This script optimizes the Z-offset of the wrist camera relative to the gripper
-using point-to-plane ICP alignment against external camera point clouds.
+This script optimizes the wrist camera pose relative to the gripper using
+a multi-stage ICP pipeline for high-quality point cloud alignment.
 
 Key features:
-1. Assumes gripper pose is correct - only optimizes wrist camera Z offset
-2. Excludes gripper points (< 15cm from camera) during ICP alignment
-3. Generates two folders of reprojected videos:
+1. Full 6-DOF ICP optimization (not just Z-offset)
+2. Multi-scale ICP with coarse-to-fine refinement
+3. FPFH-based global registration for robust initial alignment
+4. Statistical outlier removal for noise reduction
+5. Optional colored ICP when color information is available
+6. Excludes gripper points (< 15cm from camera) during ICP
+7. Generates comparison videos:
    - videos_no_icp: Before ICP optimization
    - videos_icp: After ICP optimization
 
@@ -39,9 +43,13 @@ from utils import (
     VideoRecorder,
     project_points_to_image,
     draw_points_on_image,
-    # ICP functions
-    optimize_wrist_z_offset_multi_frame,
+    # High-quality ICP functions
+    optimize_wrist_camera_full_icp,
+    run_full_icp_pipeline,
+    apply_6dof_correction_to_wrist_transforms,
     apply_z_offset_to_wrist_transforms,
+    preprocess_pointcloud,
+    numpy_to_o3d_pointcloud,
 )
 
 
@@ -173,57 +181,134 @@ def collect_icp_data(active_cams, config):
     return frames_data
 
 
-def optimize_wrist_z(active_cams, config):
+def run_high_quality_icp(active_cams, config):
     """
-    Optimize wrist camera Z offset using point-to-plane ICP.
+    Run high-quality ICP optimization for wrist camera alignment.
+    
+    Uses multi-stage ICP pipeline:
+    1. Multi-frame point cloud accumulation
+    2. Preprocessing with outlier removal
+    3. FPFH-based global registration
+    4. Multi-scale ICP refinement
+    5. Optional colored ICP
     
     Args:
         active_cams: Dictionary of active cameras
         config: Configuration dictionary
         
     Returns:
-        Optimal Z offset value (meters)
+        Tuple of (correction_transform, fitness_score)
     """
-    # Find wrist camera
-    wrist_serial = None
+    print("\n" + "=" * 60)
+    print("HIGH-QUALITY ICP OPTIMIZATION")
+    print("=" * 60)
+    
+    # Find wrist and external cameras
     wrist_cam = None
+    wrist_serial = None
+    external_cams = {}
+    
     for serial, cam in active_cams.items():
         if cam['type'] == 'wrist':
-            wrist_serial = serial
             wrist_cam = cam
-            break
+            wrist_serial = serial
+        else:
+            external_cams[serial] = cam
     
     if wrist_cam is None:
-        print("[ICP] No wrist camera found")
-        return 0.0
+        print("[ICP] Error: No wrist camera found")
+        return np.eye(4), 0.0
     
-    # Collect ICP data
+    if len(external_cams) == 0:
+        print("[ICP] Error: No external cameras found")
+        return np.eye(4), 0.0
+    
+    # Collect point clouds from multiple frames
     frames_data = collect_icp_data(active_cams, config)
     
     if len(frames_data) == 0:
-        print("[ICP] No valid frames for optimization")
-        return 0.0
+        print("[ICP] Error: No valid frames collected")
+        return np.eye(4), 0.0
     
-    # Optimize Z offset
+    # Accumulate all wrist and external points in world frame
+    print("\n[ICP] Accumulating point clouds for alignment...")
+    all_wrist_world = []
+    all_wrist_colors = []
+    all_external_world = []
+    all_external_colors = []
+    
+    for frame in frames_data:
+        wrist_local = frame['wrist_points_local']
+        wrist_transform = frame['wrist_transform']
+        external_world = frame['external_points_world']
+        
+        # Transform wrist points to world
+        wrist_world = transform_points(wrist_local, wrist_transform)
+        all_wrist_world.append(wrist_world)
+        all_external_world.append(external_world)
+    
+    if not all_wrist_world or not all_external_world:
+        print("[ICP] Error: No points accumulated")
+        return np.eye(4), 0.0
+    
+    wrist_points = np.vstack(all_wrist_world)
+    external_points = np.vstack(all_external_world)
+    
+    print(f"[ICP] Total wrist points: {len(wrist_points)}")
+    print(f"[ICP] Total external points: {len(external_points)}")
+    
+    # Run full ICP pipeline
     voxel_size = config.get('icp_voxel_size', 0.01)
-    max_corr_dist = config.get('icp_max_correspondence_distance', 0.05)
     
-    print("[ICP] Running point-to-plane ICP optimization...")
-    z_offset, fitness = optimize_wrist_z_offset_multi_frame(
-        frames_data,
-        z_range=(-0.05, 0.05),  # Search +/- 5cm
+    icp_result = run_full_icp_pipeline(
+        source_points=wrist_points,
+        target_points=external_points,
+        source_colors=None,  # Colors not collected in frames_data
+        target_colors=None,
         voxel_size=voxel_size,
-        max_correspondence_distance=max_corr_dist
+        use_global_registration=True,
+        use_multiscale=True,
+        use_colored_icp=False
     )
     
-    print(f"[ICP] Optimal Z offset: {z_offset * 100:.2f}cm, Fitness: {fitness:.4f}")
+    if icp_result['success']:
+        print(f"\n[ICP] SUCCESS: fitness={icp_result['fitness']:.4f}, rmse={icp_result['rmse']:.4f}")
+        
+        # Apply the correction to wrist transforms
+        # The ICP gives us the correction needed to align wrist to external
+        # We need to apply this as a post-multiplication to all wrist transforms
+        correction = icp_result['transformation']
+        
+        wrist_cam['transforms'] = apply_6dof_correction_to_wrist_transforms(
+            wrist_cam['transforms'],
+            correction
+        )
+        
+        return correction, icp_result['fitness']
+    else:
+        print(f"\n[ICP] WARNING: Alignment quality below threshold (fitness={icp_result['fitness']:.4f})")
+        return icp_result['transformation'], icp_result['fitness']
+
+
+def optimize_wrist_z(active_cams, config):
+    """
+    Optimize wrist camera pose using high-quality ICP.
     
-    # Apply offset to wrist transforms
-    wrist_cam['transforms'] = apply_z_offset_to_wrist_transforms(
-        wrist_cam['transforms'], z_offset
-    )
+    This is the main entry point for ICP optimization.
+    Uses full 6-DOF optimization by default.
     
-    return z_offset
+    Args:
+        active_cams: Dictionary of active cameras
+        config: Configuration dictionary
+        
+    Returns:
+        fitness_score (for backward compatibility with scripts expecting z_offset)
+    """
+    # Use the new high-quality ICP pipeline
+    correction, fitness = run_high_quality_icp(active_cams, config)
+    
+    # Return fitness for backward compatibility (old code expected z_offset)
+    return fitness
 
 
 def generate_reprojection_videos(
@@ -405,11 +490,15 @@ def main():
         CONFIG = yaml.safe_load(f)
     
     print("=" * 60)
-    print("ICP Wrist Camera Z-Offset Optimization")
+    print("HIGH-QUALITY ICP WRIST CAMERA ALIGNMENT")
     print("=" * 60)
-    print(f"[INFO] Assumes gripper pose is CORRECT")
-    print(f"[INFO] Only optimizes wrist camera Z offset (depth)")
-    print(f"[INFO] Excludes gripper points (< 15cm) from ICP")
+    print("[INFO] Features:")
+    print("  - Full 6-DOF transformation optimization")
+    print("  - Multi-scale ICP (coarse-to-fine refinement)")
+    print("  - FPFH-based global registration")
+    print("  - Statistical outlier removal")
+    print("  - Assumes gripper pose is CORRECT")
+    print("  - Excludes gripper points (< 15cm) from ICP")
     print("=" * 60)
     
     # --- 1. Load Robot Data ---
@@ -501,11 +590,8 @@ def main():
     print("\n[INFO] Saving transforms before ICP...")
     transforms_no_icp = copy_transforms(active_cams)
     
-    # --- 5. Run ICP Optimization (Z offset only) ---
-    print("\n" + "=" * 60)
-    print("Running ICP Z-Offset Optimization")
-    print("=" * 60)
-    z_offset = optimize_wrist_z(active_cams, CONFIG)
+    # --- 5. Run High-Quality ICP Optimization ---
+    fitness = optimize_wrist_z(active_cams, CONFIG)
     
     # --- 6. Capture transforms AFTER ICP ---
     print("\n[INFO] Saving transforms after ICP...")
@@ -530,7 +616,7 @@ def main():
     print("\n" + "=" * 60)
     print("DONE")
     print("=" * 60)
-    print(f"[RESULT] Optimal Z offset: {z_offset * 100:.2f} cm")
+    print(f"[RESULT] ICP Fitness Score: {fitness:.4f}")
     print(f"[RESULT] Videos saved to:")
     video_base_dir = CONFIG.get('video_output_path', 'point_clouds/videos')
     print(f"  - {os.path.join(video_base_dir, 'videos_no_icp')}")

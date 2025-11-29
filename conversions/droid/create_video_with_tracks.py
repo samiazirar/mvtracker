@@ -27,6 +27,91 @@ from utils import (
 from utils.optimization import optimize_external_cameras_multi_frame, optimize_wrist_multi_frame
 
 
+from utils.transforms import invert_transform
+
+
+def draw_trajectory_on_image(
+    image: np.ndarray,
+    track_points_world: np.ndarray,
+    K: np.ndarray,
+    world_T_cam: np.ndarray,
+    width: int,
+    height: int,
+    color: tuple = (0, 255, 255),  # Yellow in BGR
+    thickness: int = 2
+) -> np.ndarray:
+    """
+    Draw trajectory track on image.
+    
+    Projects 3D world trajectory points to 2D and draws lines connecting them.
+    
+    Args:
+        image: BGR image as numpy array
+        track_points_world: Nx3 array of trajectory points in world frame
+        K: 3x3 camera intrinsic matrix
+        world_T_cam: 4x4 transformation from camera to world
+        width: Image width
+        height: Image height
+        color: BGR color for trajectory line
+        thickness: Line thickness
+        
+    Returns:
+        Image with trajectory drawn
+    """
+    if len(track_points_world) < 2:
+        return image
+    
+    img_out = image.copy()
+    
+    # Transform from world to camera frame
+    cam_T_world = invert_transform(world_T_cam)
+    
+    # Convert to homogeneous and transform
+    ones = np.ones((track_points_world.shape[0], 1))
+    pts_homo = np.hstack([track_points_world, ones])
+    pts_cam = (cam_T_world @ pts_homo.T).T[:, :3]
+    
+    # Filter points behind camera
+    z = pts_cam[:, 2]
+    valid = z > 0.01  # Minimum depth
+    
+    if not np.any(valid):
+        return img_out
+    
+    # Project to 2D
+    fx, fy = K[0, 0], K[1, 1]
+    cx, cy = K[0, 2], K[1, 2]
+    
+    u = (pts_cam[:, 0] * fx / pts_cam[:, 2]) + cx
+    v = (pts_cam[:, 1] * fy / pts_cam[:, 2]) + cy
+    
+    # Draw connected line segments
+    prev_pt = None
+    for i in range(len(u)):
+        if not valid[i]:
+            prev_pt = None
+            continue
+        
+        # Check if point is in bounds
+        if 0 <= u[i] < width and 0 <= v[i] < height:
+            curr_pt = (int(u[i]), int(v[i]))
+            
+            if prev_pt is not None:
+                cv2.line(img_out, prev_pt, curr_pt, color, thickness)
+            
+            # Draw point marker at current position (latest point gets larger marker)
+            if i == len(u) - 1:
+                cv2.circle(img_out, curr_pt, 5, color, -1)  # Filled circle for current pos
+            else:
+                cv2.circle(img_out, curr_pt, 2, color, -1)  # Small marker for history
+            
+            prev_pt = curr_pt
+        else:
+            prev_pt = None
+    
+    return img_out
+
+
 def capture_transforms(active_cams):
     """Capture the current state of camera transforms."""
     state = {}
@@ -39,10 +124,18 @@ def capture_transforms(active_cams):
         state[serial] = entry
     return state
 
-def generate_comparison_videos(active_cams, transforms_before, transforms_after, num_frames, config):
+def generate_comparison_videos(active_cams, transforms_before, transforms_after, num_frames, config, cartesian_positions=None):
     """
     Generate MP4 videos for each camera showing reprojected point clouds
-    before and after ICP optimization.
+    before and after ICP optimization, with optional trajectory tracks.
+    
+    Args:
+        active_cams: Dictionary of active cameras
+        transforms_before: Camera transforms before ICP
+        transforms_after: Camera transforms after ICP
+        num_frames: Total number of frames
+        config: Configuration dictionary
+        cartesian_positions: Optional Nx6 array of end-effector poses for trajectory tracks
     """
     print("\n[VIDEO] Generating comparison videos (Before vs After ICP)...")
     video_dir = config.get('video_output_path', 'point_clouds/videos')
@@ -55,6 +148,16 @@ def generate_comparison_videos(active_cams, transforms_before, transforms_after,
             'before': VideoRecorder(video_dir, serial, "before_icp", w, h),
             'after': VideoRecorder(video_dir, serial, "after_icp", w, h)
         }
+
+    # 2. Precompute trajectory points for track visualization
+    track_history_length = config.get('track_history_length', 30)  # Number of past frames to show
+    ee_track_points = []  # End-effector trajectory points
+    
+    if cartesian_positions is not None:
+        for pos in cartesian_positions:
+            T_ee = pose6_to_T(pos)
+            ee_track_points.append(T_ee[:3, 3])  # Extract position
+        ee_track_points = np.array(ee_track_points)
 
     # 2. Processing Loop
     # We need to iterate through frames, grab data, build world clouds, and project.
@@ -135,6 +238,10 @@ def generate_comparison_videos(active_cams, transforms_before, transforms_after,
         pts_world_after = np.vstack(cloud_after) if cloud_after else np.empty((0, 3))
         cols_world_after = np.vstack(colors_after) if colors_after else np.empty((0, 3))
         
+        # C. Get track points for this frame (trajectory history)
+        track_start = max(0, i - track_history_length)
+        current_track = ee_track_points[track_start:i+1] if len(ee_track_points) > 0 else np.empty((0, 3))
+        
         # C. Project and Write
         for serial, cam in active_cams.items():
             if serial not in frame_data: continue
@@ -156,7 +263,12 @@ def generate_comparison_videos(active_cams, transforms_before, transforms_after,
             if T_cam_before is not None:
                 # Project GLOBAL world points back to this camera
                 uv, cols = project_points_to_image(pts_world_before, K, T_cam_before, w, h, colors=cols_world_before)
-                img_out = draw_points_on_image(img, uv, colors=cols)
+                img_out = draw_points_on_image(img.copy(), uv, colors=cols)
+                
+                # Draw trajectory track
+                if len(current_track) > 1:
+                    img_out = draw_trajectory_on_image(img_out, current_track, K, T_cam_before, w, h)
+                
                 recorders[serial]['before'].write_frame(img_out)
             
             # -- AFTER --
@@ -169,7 +281,12 @@ def generate_comparison_videos(active_cams, transforms_before, transforms_after,
             if T_cam_after is not None:
                 # Project GLOBAL world points back to this camera
                 uv, cols = project_points_to_image(pts_world_after, K, T_cam_after, w, h, colors=cols_world_after)
-                img_out = draw_points_on_image(img, uv, colors=cols)
+                img_out = draw_points_on_image(img.copy(), uv, colors=cols)
+                
+                # Draw trajectory track
+                if len(current_track) > 1:
+                    img_out = draw_trajectory_on_image(img_out, current_track, K, T_cam_after, w, h)
+                
                 recorders[serial]['after'].write_frame(img_out)
 
     # 3. Cleanup
@@ -294,8 +411,15 @@ def main():
     # Capture AFTER state
     transforms_after = capture_transforms(active_cams)
 
-    # Generate Comparison Videos
-    generate_comparison_videos(active_cams, transforms_before, transforms_after, num_frames, CONFIG)
+    # Generate Comparison Videos WITH TRACKS
+    generate_comparison_videos(
+        active_cams, 
+        transforms_before, 
+        transforms_after, 
+        num_frames, 
+        CONFIG,
+        cartesian_positions=cartesian_positions  # Pass trajectory data for tracks
+    )
 
     # ====================================================
 
