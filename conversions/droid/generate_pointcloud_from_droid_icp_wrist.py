@@ -21,7 +21,7 @@ from utils import (
     project_points_to_image,
     draw_points_on_image
 )
-from utils.optimization import optimize_wrist_camera_icp
+from utils.optimization import optimize_wrist_camera_icp, optimize_wrist_camera_icp_z_only
 
 
 def capture_transforms(active_cams):
@@ -94,12 +94,12 @@ def generate_videos_for_state(active_cams, transforms_state, num_frames, config,
             img_bgra = mat_img.get_data()
             img_bgr = cv2.cvtColor(img_bgra, cv2.COLOR_BGRA2BGR)
             
-            # Get Points (exclude gripper for wrist camera)
+            # Get Points (use min_depth_wrist for wrist camera rendering - includes gripper)
             if cam['type'] == 'wrist':
                 xyz, rgb = get_filtered_cloud_wrist(
                     zed, cam['runtime'],
                     config.get('wrist_max_depth', 0.75),
-                    0.15  # Exclude gripper at <15cm
+                    config.get('min_depth_wrist', 0.01)  # Low threshold to include gripper
                 )
             else:
                 xyz, rgb = get_filtered_cloud(
@@ -278,7 +278,7 @@ def main():
     # WRIST CAMERA ICP OPTIMIZATION PIPELINE
     # ====================================================
     
-    # Capture BEFORE state
+    # Capture BEFORE state (original transforms)
     print("\n[STEP 1] Capturing initial transforms (no ICP)...")
     transforms_before = capture_transforms(active_cams)
     
@@ -286,21 +286,53 @@ def main():
     print("\n[STEP 2] Generating videos WITHOUT ICP optimization...")
     generate_videos_for_state(active_cams, transforms_before, num_frames, CONFIG, "videos_no_icp")
 
-    # Run ICP Optimization (full 3D offset: X, Y, Z)
-    print("\n[STEP 3] Running ICP optimization for wrist camera 3D offset...")
+    # ====================================================
+    # Z-ONLY ICP OPTIMIZATION
+    # ====================================================
+    
+    # Run Z-only ICP Optimization
+    print("\n[STEP 3] Running ICP optimization for wrist camera (Z-only)...")
+    if wrist_serial and wrist_serial in active_cams:
+        z_offset = optimize_wrist_camera_icp_z_only(active_cams, cartesian_positions, CONFIG)
+        print(f"[ICP-Z] Applied Z offset: {z_offset:.4f}m")
+    else:
+        print("[ICP-Z] No wrist camera found, skipping ICP optimization")
+    
+    # Capture Z-only state
+    print("\n[STEP 4] Capturing Z-only ICP transforms...")
+    transforms_z_only = capture_transforms(active_cams)
+    
+    # Generate "Z-only ICP" videos
+    print("\n[STEP 5] Generating videos WITH Z-only ICP optimization...")
+    generate_videos_for_state(active_cams, transforms_z_only, num_frames, CONFIG, "videos_icp_z")
+
+    # ====================================================
+    # FULL 3D ICP OPTIMIZATION (X, Y, Z)
+    # ====================================================
+    
+    # Reset wrist transforms to original state before applying 3D ICP
+    print("\n[STEP 6] Resetting wrist transforms for 3D ICP...")
+    for serial, cam in active_cams.items():
+        if cam['type'] == 'wrist' and serial in transforms_before:
+            cam['transforms'] = [t.copy() for t in transforms_before[serial]['transforms']]
+            if 'T_ee_cam' in transforms_before[serial]:
+                cam['T_ee_cam'] = transforms_before[serial]['T_ee_cam'].copy()
+    
+    # Run full 3D ICP Optimization
+    print("\n[STEP 7] Running ICP optimization for wrist camera (full 3D: X, Y, Z)...")
     if wrist_serial and wrist_serial in active_cams:
         xyz_offset = optimize_wrist_camera_icp(active_cams, cartesian_positions, CONFIG)
-        print(f"[ICP] Applied 3D offset: X={xyz_offset[0]:.4f}m, Y={xyz_offset[1]:.4f}m, Z={xyz_offset[2]:.4f}m")
+        print(f"[ICP-3D] Applied 3D offset: X={xyz_offset[0]:.4f}m, Y={xyz_offset[1]:.4f}m, Z={xyz_offset[2]:.4f}m")
     else:
-        print("[ICP] No wrist camera found, skipping ICP optimization")
+        print("[ICP-3D] No wrist camera found, skipping ICP optimization")
     
-    # Capture AFTER state
-    print("\n[STEP 4] Capturing optimized transforms (with ICP)...")
-    transforms_after = capture_transforms(active_cams)
+    # Capture 3D ICP state
+    print("\n[STEP 8] Capturing 3D ICP transforms...")
+    transforms_3d = capture_transforms(active_cams)
     
-    # Generate "with ICP" videos
-    print("\n[STEP 5] Generating videos WITH ICP optimization...")
-    generate_videos_for_state(active_cams, transforms_after, num_frames, CONFIG, "videos_icp")
+    # Generate "3D ICP" videos
+    print("\n[STEP 9] Generating videos WITH 3D ICP optimization...")
+    generate_videos_for_state(active_cams, transforms_3d, num_frames, CONFIG, "videos_icp_xyz")
 
     # ====================================================
 
@@ -310,7 +342,7 @@ def main():
         cam['zed'].set_svo_position(0)
 
     max_frames = CONFIG["max_frames"]
-    print(f"\n[STEP 6] Logging to Rerun ({min(max_frames, num_frames)} frames)...")
+    print(f"\n[STEP 10] Logging to Rerun ({min(max_frames, num_frames)} frames)...")
     
     for i in range(min(max_frames, num_frames)):
         if i % 10 == 0: print(f"Frame {i}")
@@ -352,10 +384,10 @@ def main():
                     )
                 )
                 
-                # 2. Get Local Points (exclude gripper at <15cm)
+                # 2. Get Local Points (use min_depth_wrist for rendering - includes gripper)
                 xyz, rgb = get_filtered_cloud_wrist(zed, cam['runtime'], 
                                                    CONFIG.get('wrist_max_depth', 0.75), 
-                                                   0.15)  # Exclude gripper
+                                                   CONFIG.get('min_depth_wrist', 0.01))
                 if xyz is None: continue
 
                 # 3. Transform Points to World
@@ -412,8 +444,9 @@ def main():
     print("[SUCCESS] Done.")
     print(f"[INFO] RRD saved to: {rrd_save_path}")
     print(f"[INFO] Videos saved to:")
-    print(f"       - {CONFIG.get('video_output_path', 'point_clouds/videos')}/videos_no_icp/")
-    print(f"       - {CONFIG.get('video_output_path', 'point_clouds/videos')}/videos_icp/")
+    print(f"       - {CONFIG.get('video_output_path', 'point_clouds/videos')}/videos_no_icp/   (no optimization)")
+    print(f"       - {CONFIG.get('video_output_path', 'point_clouds/videos')}/videos_icp_z/   (Z-only ICP)")
+    print(f"       - {CONFIG.get('video_output_path', 'point_clouds/videos')}/videos_icp_xyz/ (full 3D ICP)")
     print("=" * 60)
 
 
