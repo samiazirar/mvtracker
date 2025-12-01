@@ -23,6 +23,7 @@ from typing import Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 import rerun as rr
+from scipy.spatial.transform import Rotation as R
 
 # Ensure utils package is importable when running as a standalone script
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -82,14 +83,6 @@ def load_extrinsics(extrinsics_path: str):
     wrist_extrinsics = data["wrist_extrinsics"] if "wrist_extrinsics" in data else None
     num_frames = int(data["num_frames"]) if "num_frames" in data else 0
     return external, wrist_serial, wrist_extrinsics, num_frames
-
-
-def normalize_rrd_path(base_path: str, suffix: str) -> str:
-    """Match RRD naming used by other DROID scripts (strip .rrd, append suffix)."""
-    stem = base_path[:-4] if base_path.lower().endswith(".rrd") else base_path
-    if stem.endswith(suffix):
-        return f"{stem}.rrd"
-    return f"{stem}_{suffix}.rrd"
 
 
 def depth_to_points(depth: np.ndarray, K: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
@@ -201,7 +194,8 @@ def main():
 
     # Init Rerun
     rr.init("droid_full_fusion", spawn=False)
-    rrd_path = normalize_rrd_path(rrd_path, "render_from_saved")
+    rrd_path = rrd_path.replace(".rrd", "")
+    rrd_path = f"{rrd_path}_render_from_saved.rrd"
     rr.save(rrd_path)
     rr.log("world", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
 
@@ -228,10 +222,17 @@ def main():
 
             # Pose selection (external cams are static)
             world_T_cam = cam.world_T_cam
+            is_wrist = False
             if world_T_cam is None and cam.wrist_extrinsics is not None:
                 world_T_cam = cam.wrist_extrinsics[frame_idx]
+                is_wrist = True
+
             if world_T_cam is None:
                 continue
+
+            if is_wrist:
+                R_fix = R.from_euler("z", 90, degrees=True).as_matrix()
+                world_T_cam[:3, :3] = world_T_cam[:3, :3] @ R_fix
 
             rgb_path = cam.rgb_files[frame_idx]
             depth_path = cam.depth_files[frame_idx]
