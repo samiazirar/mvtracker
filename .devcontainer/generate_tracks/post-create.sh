@@ -29,6 +29,7 @@ apt-get install -y --no-install-recommends \
   ffmpeg \
   libgl1 libglu1-mesa libglib2.0-0 libusb-1.0-0 \
   libxext6 libxrender1 libsm6 libx11-6 \
+  libnvidia-encode-535 libnvidia-decode-535 \
   file zstd unzip \
   && rm -rf /var/lib/apt/lists/*
 
