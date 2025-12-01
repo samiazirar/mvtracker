@@ -1,4 +1,4 @@
-"""Extract RGB and depth frames as lossless PNGs from DROID SVO recordings.
+"""Extract RGB frames as PNG and depth frames as per-frame NPY from DROID SVO recordings.
 
 This script processes DROID episodes and extracts frames to:
     {output_root}/{lab}/success/{date}/{timestamp}/
@@ -9,8 +9,8 @@ This script processes DROID episodes and extracts frames to:
             │   │   ├── 000001.png
             │   │   └── ...
             │   └── depth/
-            │       ├── 000000.png  (16-bit PNG, depth in mm)
-            │       ├── 000001.png
+            │       ├── 000000.npy  (float32 array, depth in meters)
+            │       ├── 000001.npy
             │       └── ...
             └── ...
 
@@ -155,39 +155,21 @@ def save_frame_png(
     frame_idx: int,
     rgb_dir: str,
     depth_dir: str,
-    png_compression: int = 3,
-    depth_scale: float = 1000.0,
 ) -> Tuple[str, str]:
-    """Save RGB and depth frames as PNG files.
+    """Save RGB as PNG and depth as raw NPY files."""
+    filename = f"{frame_idx:06d}"
     
-    Args:
-        rgb: HxWx3 uint8 RGB image
-        depth: HxW float32 depth in meters
-        frame_idx: Frame index for filename
-        rgb_dir: Output directory for RGB
-        depth_dir: Output directory for depth
-        png_compression: PNG compression level (0-9)
-        depth_scale: Scale factor for depth (1000 = millimeters)
-    
-    Returns:
-        Tuple of (rgb_path, depth_path)
-    """
-    filename = f"{frame_idx:06d}.png"
-    
-    # Save RGB (lossless PNG)
-    rgb_path = os.path.join(rgb_dir, filename)
+    # Save RGB (lossless/uncompressed PNG)
+    rgb_path = os.path.join(rgb_dir, f"{filename}.png")
     # OpenCV expects BGR, convert from RGB
     rgb_bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-    cv2.imwrite(rgb_path, rgb_bgr, [cv2.IMWRITE_PNG_COMPRESSION, png_compression])
+    cv2.imwrite(rgb_path, rgb_bgr)
     
-    # Save depth as 16-bit PNG (millimeters)
-    depth_path = os.path.join(depth_dir, filename)
-    # Convert to millimeters and clip to uint16 range
-    depth_mm = (depth * depth_scale).astype(np.float32)
-    depth_mm = np.clip(depth_mm, 0, 65535).astype(np.uint16)
-    # Handle invalid depth (NaN, inf) -> 0
-    depth_mm[~np.isfinite(depth)] = 0
-    cv2.imwrite(depth_path, depth_mm, [cv2.IMWRITE_PNG_COMPRESSION, png_compression])
+    # Save depth as float32 NPY (meters)
+    depth_path = os.path.join(depth_dir, f"{filename}.npy")
+    depth_to_save = depth.copy()
+    depth_to_save[~np.isfinite(depth_to_save)] = 0.0  # Keep invalid values consistent
+    np.save(depth_path, depth_to_save)
     
     return rgb_path, depth_path
 
@@ -197,8 +179,6 @@ def process_camera(
     camera_serial: str,
     output_base_dir: str,
     max_frames: Optional[int] = None,
-    png_compression: int = 3,
-    depth_scale: float = 1000.0,
 ) -> dict:
     """Process a single camera SVO file and extract frames.
     
@@ -207,8 +187,6 @@ def process_camera(
         camera_serial: Camera serial number for output folder
         output_base_dir: Base output directory
         max_frames: Maximum frames to process (None = all)
-        png_compression: PNG compression level
-        depth_scale: Depth scale factor
     
     Returns:
         dict with processing statistics
@@ -279,8 +257,6 @@ def process_camera(
         save_frame_png(
             rgb, depth, frame_idx,
             rgb_dir, depth_dir,
-            png_compression=png_compression,
-            depth_scale=depth_scale,
         )
         frames_saved += 1
     
@@ -380,8 +356,6 @@ def main():
             camera_serial=serial,
             output_base_dir=output_dir,
             max_frames=config.get('max_frames'),
-            png_compression=config.get('png_compression', 3),
-            depth_scale=config.get('depth_scale', 1000.0),
         )
         results.append(result)
     
@@ -390,9 +364,6 @@ def main():
         'episode_id': args.episode_id,
         'source_path': episode_paths['relative_path'],
         'cameras': results,
-        'depth_encoding': 'uint16_mm',
-        'depth_scale': config.get('depth_scale', 1000.0),
-        'png_compression': config.get('png_compression', 3),
     }
     
     metadata_path = os.path.join(output_dir, 'recordings', 'extraction_metadata.json')

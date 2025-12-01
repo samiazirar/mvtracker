@@ -61,7 +61,7 @@ Extracts RGB and depth frames from SVO recordings. Requires GPU for ZED depth co
 
 **Outputs:**
 - `recordings/{camera_serial}/rgb/*.png` - Lossless RGB frames
-- `recordings/{camera_serial}/depth/*.png` - 16-bit depth in millimeters
+- `recordings/{camera_serial}/depth/*.npy` - float32 depth in meters
 - `recordings/{camera_serial}/intrinsics.json` - Camera intrinsics
 
 **Usage:**
@@ -149,9 +149,8 @@ Depth is stored as 16-bit PNG in millimeters:
 
 ```python
 import cv2
-depth_mm = cv2.imread('000000.png', cv2.IMREAD_UNCHANGED)  # uint16
-depth_m = depth_mm.astype(np.float32) / 1000.0  # Convert to meters
-depth_m[depth_mm == 0] = np.nan  # Invalid depth
+depth_m = np.load('000000.npy').astype(np.float32)  # meters
+depth_m[~np.isfinite(depth_m)] = np.nan  # Invalid depth
 ```
 
 ## Cluster Deployment

@@ -1,5 +1,7 @@
 - [ ] Create large scale data processing script for droid 
     - [ ] Do not use the low callibrated cameras for now
+
+- [ ] FIX time alignment.. Save how often it happens..
 - [ ] Train a model to recoginize the gripper and contact flow first
 - [ ] Get mask only for Gripper
 
