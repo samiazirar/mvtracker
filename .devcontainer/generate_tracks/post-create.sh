@@ -2,7 +2,37 @@
 set -euo pipefail
 
 echo "[post-create] Minimal setup for DROID training data generation"
+
+# Persist useful CUDA env (A100 = sm80)
 export CUDA_HOME=${CUDA_HOME:-/usr/local/cuda}
+export NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
+export NVIDIA_DRIVER_CAPABILITIES=${NVIDIA_DRIVER_CAPABILITIES:-compute,utility,video}
+export TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST:-80}
+
+persist_env() {
+  local key="$1" val="$2"
+  if ! grep -q "^${key}=" /etc/environment 2>/dev/null; then
+    echo "${key}=${val}" | tee -a /etc/environment >/dev/null
+  fi
+}
+
+persist_env CUDA_HOME "$CUDA_HOME"
+persist_env NVIDIA_VISIBLE_DEVICES "$NVIDIA_VISIBLE_DEVICES"
+persist_env NVIDIA_DRIVER_CAPABILITIES "$NVIDIA_DRIVER_CAPABILITIES"
+persist_env TORCH_CUDA_ARCH_LIST "$TORCH_CUDA_ARCH_LIST"
+
+echo "[post-create] Installing system packages..."
+apt-get update
+apt-get install -y --no-install-recommends \
+  python3 python3-pip python3-venv python3-dev \
+  git curl wget ca-certificates build-essential pkg-config openssh-client \
+  ffmpeg \
+  libgl1 libglu1-mesa libglib2.0-0 libusb-1.0-0 \
+  libxext6 libxrender1 libsm6 libx11-6 \
+  file zstd unzip \
+  && rm -rf /var/lib/apt/lists/*
+
+ln -sf /usr/bin/python3 /usr/bin/python
 
 # Base Python tooling
 python -m pip install --upgrade pip
@@ -24,8 +54,6 @@ ZED_INSTALLER="${ZED_INSTALLER:-/tmp/ZED_SDK.run}"
 if [ "$INSTALL_ZED_SDK" = "1" ]; then
   if [ ! -d "/usr/local/zed" ]; then
     echo "[post-create] Installing ZED SDK (set INSTALL_ZED_SDK=0 to skip)..."
-    apt-get update
-    apt-get install -y --no-install-recommends curl wget file zstd libusb-1.0-0
     wget -O "$ZED_INSTALLER" "$ZED_INSTALLER_URL"
     chmod +x "$ZED_INSTALLER"
     set +e
@@ -62,6 +90,8 @@ fi
 
 echo "[post-create] Configuring git defaults..."
 git config --global --add safe.directory /workspace
+git config --system url."ssh://git@github.com/".insteadOf https://github.com/
+mkdir -p /etc/ssh && ssh-keyscan -t rsa,ecdsa,ed25519 github.com >> /etc/ssh/ssh_known_hosts 2>/dev/null || true
 git config --global core.sshCommand 'ssh -o StrictHostKeyChecking=accept-new' || true
 git config --global credential.helper store || true
 
