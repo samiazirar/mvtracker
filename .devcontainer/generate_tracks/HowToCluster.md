@@ -1,6 +1,5 @@
 enroot import -o ~/depth_tracks_generator.sqsh docker://nvidia/cuda:12.2.2-runtime-ubuntu22.04
-
-enroot create --name depth_tracks_generator ~/depth_tracks_generator.sqsh
+enroot create --force --name depth_tracks_generator ~/depth_tracks_generator.sqsh
 enroot start -r -w depth_tracks_generator
 
 # Inside the container, run:

@@ -29,8 +29,7 @@ apt-get install -y --no-install-recommends \
   ffmpeg \
   libgl1 libglu1-mesa libglib2.0-0 libusb-1.0-0 \
   libxext6 libxrender1 libsm6 libx11-6 \
-  libturbojpeg0 udev \
-  libnvidia-encode-535 libnvidia-decode-535 \
+  libturbojpeg0 libturbojpeg0-dev udev \
   file zstd unzip \
   && rm -rf /var/lib/apt/lists/*
 
@@ -67,7 +66,7 @@ if [ "$INSTALL_ZED_SDK" = "1" ]; then
       echo "[WARN] ZED installer exited with code $INSTALL_EXIT"
     fi
     rm -f "$ZED_INSTALLER"
-    rm -rf /var/lib/apt/lists/*
+    # Do not clear apt lists here to avoid breaking subsequent apt calls if needed
   else
     echo "[post-create] ZED SDK already present, skipping installer."
   fi
@@ -90,16 +89,11 @@ else
   echo "[post-create] INSTALL_ZED_SDK=0, skipping ZED install."
 fi
 
-# echo "[post-create] Configuring git defaults..."
-# git config --global --add safe.directory /workspace
-# git config --system url."ssh://git@github.com/".insteadOf https://github.com/
-# mkdir -p /etc/ssh && ssh-keyscan -t rsa,ecdsa,ed25519 github.com >> /etc/ssh/ssh_known_hosts 2>/dev/null || true
-# git config --global core.sshCommand 'ssh -o StrictHostKeyChecking=accept-new' || true
-# git config --global credential.helper store || true
-
-echo "[post-create] Fixing libturbojpeg link for ZED..."
+echo "[post-create] Ensuring libturbojpeg compatibility..."
+# Force link creation if the dev package didn't do it perfectly for pyzed
 if [ -f "/usr/lib/x86_64-linux-gnu/libturbojpeg.so.0" ]; then
     ln -sf /usr/lib/x86_64-linux-gnu/libturbojpeg.so.0 /usr/lib/libturbojpeg.so.0
 fi
+ldconfig
 
 echo "[post-create] Done."
