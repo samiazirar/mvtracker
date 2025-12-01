@@ -37,7 +37,7 @@ class VideoRecorder:
         height: int, 
         fps: float = 30.0,
         ext: str = "mp4",
-        fourcc: str = "avc1",
+        fourcc: str = "mp4v",
     ):
         """
         Initialize video recorder.
@@ -71,15 +71,16 @@ class VideoRecorder:
         # Fallback to MJPG/AVI if the requested codec/container fails to open
         if not self.writer.isOpened():
             print("[VideoRecorder] Main codec failed, trying fallback...")
-            fallback_ext = "mp4"
-            fallback_fourcc = "avc1"
-            self.filename = os.path.join(output_dir, f"{camera_name}_{suffix}.{fallback_ext}")
-            fourcc_code = cv2.VideoWriter_fourcc(*fallback_fourcc)
-            self.writer = cv2.VideoWriter(self.filename, fourcc_code, fps, (width, height))
-            self.ext = fallback_ext
-            self.fourcc = fallback_fourcc
-            if not self.writer.isOpened():
-                raise RuntimeError(f"[VideoRecorder] Failed to open VideoWriter for {camera_name}_{suffix}")
+            raise RuntimeError(f"[VideoRecorder] Failed to open VideoWriter for {camera_name}_{suffix} with {self.ext}/{self.fourcc}")
+            # fallback_ext = "mp4"
+            # fallback_fourcc = "avc1"
+            # self.filename = os.path.join(output_dir, f"{camera_name}_{suffix}.{fallback_ext}")
+            # fourcc_code = cv2.VideoWriter_fourcc(*fallback_fourcc)
+            # self.writer = cv2.VideoWriter(self.filename, fourcc_code, fps, (width, height))
+            # self.ext = fallback_ext
+            # self.fourcc = fallback_fourcc
+            # if not self.writer.isOpened():
+            #     raise RuntimeError(f"[VideoRecorder] Failed to open VideoWriter for {camera_name}_{suffix}")
         
         self.frame_count = 0
     

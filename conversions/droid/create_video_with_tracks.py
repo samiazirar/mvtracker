@@ -233,7 +233,7 @@ def main():
     video_dir = os.path.join(CONFIG.get("video_output_path", "point_clouds/videos"), "tracks_reprojection")
     os.makedirs(video_dir, exist_ok=True)
     recorders = {
-        serial: VideoRecorder(video_dir, serial, "tracks", cam["w"], cam["h"], fps=fps, ext="avi", fourcc="XVID")
+        serial: VideoRecorder(video_dir, serial, "tracks", cam["w"], cam["h"], fps=fps, ext="avi", fourcc="MJPG")
         for serial, cam in active_cams.items()
     }
 
