@@ -5,6 +5,9 @@
 droid_root: "/data/droid/data/droid_raw/1.0.1"
 cam2base_extrinsics_path: "/data/droid/calib_and_annot/droid/cam2base_extrinsic_superset.json"
 
+# Download directory (for episodes downloaded from GCS)
+download_dir: "./droid_downloads"
+
 # Output root for processed training data
 # Will maintain DROID folder structure: {output_root}/{lab}/{success|failure}/{date}/{timestamp}/
 # output_root: "/data/droid/training_data"

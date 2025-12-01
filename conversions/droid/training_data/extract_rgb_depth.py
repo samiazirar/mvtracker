@@ -91,8 +91,10 @@ def parse_episode_id(episode_id: str) -> dict:
     }
 
 
-def find_episode_paths(droid_root: str, episode_info: dict) -> dict:
+def find_episode_paths(droid_root: str, episode_info: dict, extra_roots: list = None) -> dict:
     """Find all paths for an episode.
+    
+    Searches in droid_root and any extra_roots (e.g., download directory).
     
     Returns:
         dict with keys: h5_path, recordings_dir, metadata_path, relative_path
@@ -101,28 +103,34 @@ def find_episode_paths(droid_root: str, episode_info: dict) -> dict:
     date = episode_info['date']
     timestamp_folder = episode_info['timestamp_folder']
     
-    # Search in both success and failure folders
-    for outcome in ['success', 'failure']:
-        base_path = os.path.join(droid_root, lab, outcome, date, timestamp_folder)
-        h5_path = os.path.join(base_path, 'trajectory.h5')
-        
-        if os.path.exists(h5_path):
-            recordings_dir = os.path.join(base_path, 'recordings', 'SVO')
+    # Build list of roots to search
+    roots_to_search = [droid_root]
+    if extra_roots:
+        roots_to_search.extend(extra_roots)
+    
+    # Search in all roots, both success and failure folders
+    for root in roots_to_search:
+        for outcome in ['success', 'failure']:
+            base_path = os.path.join(root, lab, outcome, date, timestamp_folder)
+            h5_path = os.path.join(base_path, 'trajectory.h5')
             
-            # Find metadata file
-            metadata_files = glob.glob(os.path.join(base_path, 'metadata_*.json'))
-            metadata_path = metadata_files[0] if metadata_files else None
-            
-            # Relative path for output structure
-            relative_path = os.path.join(lab, outcome, date, timestamp_folder)
-            
-            return {
-                'h5_path': h5_path,
-                'recordings_dir': recordings_dir,
-                'metadata_path': metadata_path,
-                'relative_path': relative_path,
-                'outcome': outcome,
-            }
+            if os.path.exists(h5_path):
+                recordings_dir = os.path.join(base_path, 'recordings', 'SVO')
+                
+                # Find metadata file
+                metadata_files = glob.glob(os.path.join(base_path, 'metadata_*.json'))
+                metadata_path = metadata_files[0] if metadata_files else None
+                
+                # Relative path for output structure
+                relative_path = os.path.join(lab, outcome, date, timestamp_folder)
+                
+                return {
+                    'h5_path': h5_path,
+                    'recordings_dir': recordings_dir,
+                    'metadata_path': metadata_path,
+                    'relative_path': relative_path,
+                    'outcome': outcome,
+                }
     
     raise FileNotFoundError(f"Episode not found: {episode_info['full_id']}")
 
@@ -325,8 +333,9 @@ def main():
     print(f"  Lab: {episode_info['lab']}")
     print(f"  Date: {episode_info['date']}")
     
-    # Find episode paths
-    episode_paths = find_episode_paths(config['droid_root'], episode_info)
+    # Find episode paths (search both droid_root and download directory)
+    extra_roots = [config.get('download_dir', './droid_downloads')]
+    episode_paths = find_episode_paths(config['droid_root'], episode_info, extra_roots)
     print(f"  Found: {episode_paths['relative_path']}")
     print(f"  Recordings: {episode_paths['recordings_dir']}")
     
