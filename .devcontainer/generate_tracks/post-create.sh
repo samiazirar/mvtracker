@@ -26,12 +26,17 @@ apt-get update
 apt-get install -y --no-install-recommends \
   python3 python3-pip python3-venv python3-dev \
   git curl wget ca-certificates build-essential pkg-config openssh-client \
+  cmake git-lfs \
+  libboost-all-dev libopencv-dev libeigen3-dev \
   ffmpeg \
   libgl1 libglu1-mesa libglib2.0-0 libusb-1.0-0 \
   libxext6 libxrender1 libsm6 libx11-6 \
-  libturbojpeg0 libturbojpeg0-dev udev \
+  libturbojpeg libturbojpeg0-dev udev \
   file zstd unzip \
   && rm -rf /var/lib/apt/lists/*
+
+# Initialize Git LFS
+git lfs install
 
 ln -sf /usr/bin/python3 /usr/bin/python
 
@@ -66,7 +71,6 @@ if [ "$INSTALL_ZED_SDK" = "1" ]; then
       echo "[WARN] ZED installer exited with code $INSTALL_EXIT"
     fi
     rm -f "$ZED_INSTALLER"
-    # Do not clear apt lists here to avoid breaking subsequent apt calls if needed
   else
     echo "[post-create] ZED SDK already present, skipping installer."
   fi
