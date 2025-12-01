@@ -131,3 +131,7 @@ weights/groundingdino_swint_ogc.pth
 test_data
 test_data/
 test_data/*
+
+droid_downloads
+droid_downloads/
+droid_downloads/*
