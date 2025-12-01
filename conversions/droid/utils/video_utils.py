@@ -35,7 +35,9 @@ class VideoRecorder:
         suffix: str, 
         width: int, 
         height: int, 
-        fps: float = 30.0
+        fps: float = 30.0,
+        ext: str = "mp4",
+        fourcc: str = "avc1",
     ):
         """
         Initialize video recorder.
@@ -47,6 +49,8 @@ class VideoRecorder:
             width: Video width in pixels
             height: Video height in pixels
             fps: Frames per second (default: 30)
+            ext: File extension/container (default: mp4)
+            fourcc: FourCC codec string (default: mp4v)
         """
         self.output_dir = output_dir
         self.camera_name = camera_name
@@ -54,14 +58,28 @@ class VideoRecorder:
         self.width = width
         self.height = height
         self.fps = fps
+        self.ext = ext.lstrip(".")
+        self.fourcc = fourcc
         
         # Create output directory if needed
         os.makedirs(output_dir, exist_ok=True)
         
         # Setup video writer
-        self.filename = os.path.join(output_dir, f"{camera_name}_{suffix}.mp4")
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        self.writer = cv2.VideoWriter(self.filename, fourcc, fps, (width, height))
+        self.filename = os.path.join(output_dir, f"{camera_name}_{suffix}.{self.ext}")
+        fourcc_code = cv2.VideoWriter_fourcc(*self.fourcc)
+        self.writer = cv2.VideoWriter(self.filename, fourcc_code, fps, (width, height))
+        # Fallback to MJPG/AVI if the requested codec/container fails to open
+        if not self.writer.isOpened():
+            print("[VideoRecorder] Main codec failed, trying fallback...")
+            fallback_ext = "mp4"
+            fallback_fourcc = "avc1"
+            self.filename = os.path.join(output_dir, f"{camera_name}_{suffix}.{fallback_ext}")
+            fourcc_code = cv2.VideoWriter_fourcc(*fallback_fourcc)
+            self.writer = cv2.VideoWriter(self.filename, fourcc_code, fps, (width, height))
+            self.ext = fallback_ext
+            self.fourcc = fallback_fourcc
+            if not self.writer.isOpened():
+                raise RuntimeError(f"[VideoRecorder] Failed to open VideoWriter for {camera_name}_{suffix}")
         
         self.frame_count = 0
     
@@ -230,6 +248,7 @@ def draw_points_on_image(
     uv: np.ndarray,
     colors: Optional[np.ndarray] = None,
     point_size: int = 2,
+    radius: Optional[int] = None,
     default_color: Tuple[int, int, int] = (0, 255, 0)
 ) -> np.ndarray:
     """
@@ -239,7 +258,8 @@ def draw_points_on_image(
         image: BGR image as numpy array (H, W, 3)
         uv: Mx2 array of 2D pixel coordinates
         colors: Optional Mx3 array of RGB colors (0-255)
-        point_size: Radius of drawn points in pixels
+        point_size: Radius of drawn points in pixels (ignored if radius provided)
+        radius: Optional alias for point_size (kept for backward compatibility)
         default_color: BGR color for points if colors not provided
         
     Returns:
@@ -255,6 +275,7 @@ def draw_points_on_image(
     
     # Round to integer pixel coordinates
     uv_int = uv.astype(np.int32)
+    circle_radius = radius if radius is not None else point_size
     
     for i in range(len(uv_int)):
         u, v = uv_int[i]
@@ -269,7 +290,7 @@ def draw_points_on_image(
         else:
             color_bgr = default_color
         
-        cv2.circle(img_out, (u, v), point_size, color_bgr, -1)
+        cv2.circle(img_out, (u, v), circle_radius, color_bgr, -1)
     
     return img_out
 
