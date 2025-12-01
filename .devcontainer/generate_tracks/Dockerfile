@@ -5,7 +5,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-pip python3-venv python3-dev \
-    git curl wget ca-certificates build-essential pkg-config \
+    git curl wget ca-certificates build-essential pkg-config openssh-client \
     libgl1 libglib2.0-0 libusb-1.0-0 \
  && rm -rf /var/lib/apt/lists/*
 RUN ln -sf /usr/bin/python3 /usr/bin/python

@@ -29,17 +29,19 @@ import numpy as np
 import yaml
 from scipy.spatial.transform import Rotation as R
 
-# Add parent directory to path for imports
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from utils import (
+# Minimal imports from utils without pulling the full package (which brings heavy deps)
+UTILS_DIR = Path(__file__).resolve().parents[1] / "utils"
+if str(UTILS_DIR) not in sys.path:
+    sys.path.insert(0, str(UTILS_DIR))
+
+from transforms import (  # type: ignore
     pose6_to_T,
     rvec_tvec_to_matrix,
     compute_wrist_cam_offset,
     precompute_wrist_trajectory,
     external_cam_to_world,
-    find_episode_data_by_date,
 )
-from utils.tracking import ContactSurfaceTracker, compute_finger_transforms
+from tracking import ContactSurfaceTracker, compute_finger_transforms  # type: ignore
 
 
 def parse_episode_id(episode_id: str) -> dict:

@@ -1,53 +1,64 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
-echo "Starting post-create setup..."
+echo "[post-create] Minimal setup for DROID training data generation"
 
-# Upgrade pip
-echo "Upgrading pip..."
+# Base Python tooling
 python -m pip install --upgrade pip
-echo "Upgrading setuptools, wheel, ninja..."
-pip install --upgrade setuptools wheel ninja
+pip install --upgrade setuptools wheel
 
-# Install PyTorch with CUDA 12.8 support
-echo "Installing PyTorch with CUDA 12.8..."
-pip install --index-url https://download.pytorch.org/whl/cu128 \
-    torch==2.7.1 \
-    torchvision==0.22.* \
-    torchaudio==2.7.*
+echo "[post-create] Installing Python deps for track generation + depth extraction"
+pip install --no-cache-dir \
+  numpy scipy h5py PyYAML opencv-python-headless \
+  pytransform3d trimesh rerun-sdk tqdm
 
-# Install project requirements (allow failures)
-echo "Installing project requirements..."
-pip install -r requirements.txt || true
+# Optional ZED SDK install (needed for extract_rgb_depth.py)
+INSTALL_ZED_SDK="${INSTALL_ZED_SDK:-1}"
+ZED_INSTALLER_URL="${ZED_INSTALLER_URL:-https://download.stereolabs.com/zedsdk/5.1/cu12/ubuntu22}"
+ZED_INSTALLER="${ZED_INSTALLER:-/tmp/ZED_SDK.run}"
 
-# Set CUDA architecture list for building extensions
-# echo "Setting CUDA architecture list..."
-# export TORCH_CUDA_ARCH_LIST='80;86;89;90;100'
+if [ "$INSTALL_ZED_SDK" = "1" ]; then
+  if [ ! -d "/usr/local/zed" ]; then
+    echo "[post-create] Installing ZED SDK (set INSTALL_ZED_SDK=0 to skip)..."
+    apt-get update
+    apt-get install -y --no-install-recommends curl wget file zstd libusb-1.0-0
+    wget -O "$ZED_INSTALLER" "$ZED_INSTALLER_URL"
+    chmod +x "$ZED_INSTALLER"
+    set +e
+    "$ZED_INSTALLER" -- silent skip_ai_module
+    INSTALL_EXIT=$?
+    set -e
+    if [ $INSTALL_EXIT -ne 0 ]; then
+      echo "[WARN] ZED installer exited with code $INSTALL_EXIT"
+    fi
+    rm -f "$ZED_INSTALLER"
+    rm -rf /var/lib/apt/lists/*
+  else
+    echo "[post-create] ZED SDK already present, skipping installer."
+  fi
 
-# # Uninstall existing CUDA packages to rebuild with correct arch
-# echo "Cleaning existing CUDA packages..."
-# pip uninstall -y flash-attn xformers pointops || true
+  if python - <<'PY' >/dev/null 2>&1; then
+import pyzed.sl as sl
+print(sl.__version__)
+PY
+  then
+    echo "[post-create] pyzed already available."
+  else
+    echo "[post-create] Installing pyzed wheel from ZED SDK..."
+    PYZED_WHEEL=$(find /usr/local/zed -name "pyzed-*.whl" | head -n 1 || true)
+    if [ -n "$PYZED_WHEEL" ]; then
+      pip install --no-cache-dir "$PYZED_WHEEL"
+    else
+      echo "[WARN] Could not locate pyzed wheel under /usr/local/zed."
+    fi
+  fi
+else
+  echo "[post-create] INSTALL_ZED_SDK=0, skipping ZED install."
+fi
 
-# # Reinstall flash-attn with correct CUDA architectures
-# echo "Installing flash-attn..."
-# pip install -v --no-build-isolation --no-cache-dir --force-reinstall flash-attn
-
-# # Reinstall pointops with correct CUDA architectures
-# echo "Installing pointops..."
-# pip install -v --no-build-isolation --no-cache-dir --force-reinstall \
-#     'git+https://github.com/ethz-vlg/pointcept.git@2082918#subdirectory=libs/pointops'
-echo "Update safetensors"
-pip install --upgrade safetensors
-#clone if not exist
-# pip install -r rh20t_api/requirements.txt
-
-
-# Configure git
-echo "Configuring git..."
+echo "[post-create] Configuring git defaults..."
 git config --global --add safe.directory /workspace
-git config --global core.sshCommand 'ssh -o StrictHostKeyChecking=accept-new'
+git config --global core.sshCommand 'ssh -o StrictHostKeyChecking=accept-new' || true
 git config --global credential.helper store || true
 
-echo "Post-create setup completed successfully!"
-unset TORCH_CUDA_ARCH_LIST
-#clone if does not exist
+echo "[post-create] Done."
