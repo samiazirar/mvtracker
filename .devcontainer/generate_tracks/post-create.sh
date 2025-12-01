@@ -2,10 +2,14 @@
 set -euo pipefail
 
 echo "[post-create] Minimal setup for DROID training data generation"
+export CUDA_HOME=${CUDA_HOME:-/usr/local/cuda}
 
 # Base Python tooling
 python -m pip install --upgrade pip
 pip install --upgrade setuptools wheel
+
+echo "[post-create] Installing gsutil and GCS clients for episode downloads"
+pip install --no-cache-dir gsutil google-cloud-storage gcsfs
 
 echo "[post-create] Installing Python deps for track generation + depth extraction"
 pip install --no-cache-dir \
