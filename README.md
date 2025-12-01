@@ -9,3 +9,13 @@
 - Generate the fused point cloud: `python conversions/droid/generate_pointcloud_from_droid_refactored.py`
 - (Optional) Run the version with object masks: `python conversions/droid/generate_pointcloud_from_droid_with_object_tracking_refactored.py`
 - Outputs are written as `.rrd` files under `point_clouds/`; view them with `rerun`.
+
+
+
+### Debug 
+
+- Nvidia driver suddenly not detected:
+  Failed to initialize NVML: Driver/library version mismatch
+  NVML library version: 570.195
+
+  - This can be if the driver is updated on the host while the container is running. Restart the host machine without stopping the container.
