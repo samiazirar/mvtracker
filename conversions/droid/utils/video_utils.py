@@ -13,6 +13,51 @@ import imageio
 from typing import Optional, Tuple
 from .transforms import transform_points, invert_transform
 
+# =============================================================================
+# Track Trail Rendering
+# =============================================================================
+
+
+def draw_track_trails_on_image(
+    image: np.ndarray,
+    tracks_world: np.ndarray,
+    K: np.ndarray,
+    world_T_cam: np.ndarray,
+    width: int,
+    height: int,
+    colors: Optional[np.ndarray],
+    min_depth: float = 0.01,
+) -> np.ndarray:
+    """
+    Draw polylines showing recent track history onto an image.
+
+    Args:
+        image: BGR image to draw on.
+        tracks_world: [L, N, 3] world positions for N tracks over L frames (oldest->newest).
+        K: Camera intrinsics.
+        world_T_cam: Camera pose (4x4) in world frame.
+        width: Image width.
+        height: Image height.
+        colors: [N,3] uint8 colors for each track (RGB order).
+        min_depth: Minimum valid depth for projection.
+    """
+    if tracks_world is None or tracks_world.size == 0:
+        return image
+
+    num_tracks = tracks_world.shape[1]
+    for idx in range(num_tracks):
+        history = tracks_world[:, idx, :]
+        uv, _ = project_points_to_image(history, K, world_T_cam, width, height, colors=None, min_depth=min_depth)
+        if uv.shape[0] < 2:
+            continue
+        pts = uv.reshape(-1, 1, 2).astype(np.int32)
+        color = (0, 0, 255)
+        if colors is not None and len(colors) > idx:
+            c = colors[idx]
+            color = (int(c[2]), int(c[1]), int(c[0]))  # Convert RGB->BGR for OpenCV
+        cv2.polylines(image, [pts], isClosed=False, color=color, thickness=2, lineType=cv2.LINE_AA)
+    return image
+
 
 # =============================================================================
 # Video Recording

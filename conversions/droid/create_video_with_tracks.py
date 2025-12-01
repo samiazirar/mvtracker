@@ -1,5 +1,6 @@
 """ Reproject the tracks only into the videos, and save full fusion RRD + tracks NPZ."""
 
+import argparse
 import numpy as np
 import os
 import glob
@@ -26,14 +27,26 @@ from utils import (
     draw_points_on_image,
     draw_points_on_image_fast,
     ContactSurfaceTracker,
+    draw_track_trails_on_image,
 )
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Create videos with gripper tracks reprojected.")
+    parser.add_argument(
+        "--config",
+        default="conversions/droid/config.yaml",
+        help="Path to YAML config file.",
+    )
+    args = parser.parse_args()
+
     # Load configuration
-    with open('conversions/droid/config.yaml', 'r') as f:
+    with open(args.config, 'r') as f:
         CONFIG = yaml.safe_load(f)
     fps = CONFIG.get('fps', 30.0)
+    tracks_npz_path = CONFIG.get("tracks_npz_path")
+    use_precomputed_tracks = tracks_npz_path is not None and os.path.exists(tracks_npz_path)
+    track_trail_length_video = CONFIG.get("track_trail_length_video", 10)
     
     print("=== DROID Full Fusion (Wrist + External) with Tracks + Reprojection ===")
     # Headless init to avoid GPU/viewer issues on servers
@@ -61,17 +74,44 @@ def main():
     # Init Gripper Viz
     gripper_viz = GripperVisualizer()
     gripper_viz.init_rerun()
-    contact_tracker = ContactSurfaceTracker(num_track_points=CONFIG.get('num_track_points', 24))
-    num_contact_pts = len(contact_tracker.contact_points_local) if contact_tracker.contact_points_local is not None else 0
-    total_track_pts = num_contact_pts * 2
-    print(f"[INFO] Tracking {total_track_pts} contact points across both fingers")
-
-    tracks_3d = np.zeros((actual_frames, total_track_pts, 3), dtype=np.float32)
+    # Track sources
+    contact_tracker = None
+    tracks_3d = None
     gripper_poses = []
-    track_colors_rgb = np.zeros((total_track_pts, 3), dtype=np.uint8)
-    if total_track_pts > 0:
-        track_colors_rgb[:num_contact_pts, :] = [51, 127, 255]  # Blue-ish for left finger
-        track_colors_rgb[num_contact_pts:, :] = [51, 255, 127]  # Green-ish for right finger
+    num_contact_pts = 0
+    total_track_pts = 0
+    track_colors_rgb = np.zeros((0, 3), dtype=np.uint8)
+
+    if use_precomputed_tracks:
+        loaded = np.load(tracks_npz_path)
+        tracks_3d = loaded["tracks_3d"]
+        # Align frame count with both config and loaded data
+        actual_frames = min(actual_frames, tracks_3d.shape[0])
+        num_contact_pts = int(loaded.get("num_points_per_finger", 0))
+        if num_contact_pts == 0 and "contact_points_local" in loaded:
+            num_contact_pts = len(loaded["contact_points_local"])
+        if num_contact_pts == 0:
+            num_contact_pts = tracks_3d.shape[1] // 2
+        total_track_pts = tracks_3d.shape[1]
+        # Ensure even split if possible
+        if total_track_pts and num_contact_pts * 2 != total_track_pts:
+            num_contact_pts = total_track_pts // 2
+        track_colors_rgb = np.zeros((total_track_pts, 3), dtype=np.uint8)
+        if total_track_pts > 0:
+            track_colors_rgb[:num_contact_pts, :] = [51, 127, 255]
+            track_colors_rgb[num_contact_pts:, :] = [51, 255, 127]
+        print(f"[INFO] Loaded precomputed tracks from {tracks_npz_path} with {total_track_pts} points")
+    else:
+        contact_tracker = ContactSurfaceTracker(num_track_points=CONFIG.get('num_track_points', 24))
+        num_contact_pts = len(contact_tracker.contact_points_local) if contact_tracker.contact_points_local is not None else 0
+        total_track_pts = num_contact_pts * 2
+        print(f"[INFO] Tracking {total_track_pts} contact points across both fingers")
+
+        tracks_3d = np.zeros((actual_frames, total_track_pts, 3), dtype=np.float32)
+        track_colors_rgb = np.zeros((total_track_pts, 3), dtype=np.uint8)
+        if total_track_pts > 0:
+            track_colors_rgb[:num_contact_pts, :] = [51, 127, 255]  # Blue-ish for left finger
+            track_colors_rgb[num_contact_pts:, :] = [51, 255, 127]  # Green-ish for right finger
 
     # --- 2. Calculate Wrist Transforms ---
     wrist_cam_transforms = []
@@ -145,7 +185,8 @@ def main():
         else:
             print(f"[ERROR] Failed to open {serial}")
 
-    video_dir = os.path.join(CONFIG.get("video_output_path", "point_clouds/videos"), "tracks_reprojection")
+    config_tag = os.path.splitext(os.path.basename(args.config))[0]
+    video_dir = os.path.join(CONFIG.get("video_output_path", "point_clouds/videos"), config_tag, "tracks_reprojection")
     os.makedirs(video_dir, exist_ok=True)
     recorders = {
         serial: VideoRecorder(video_dir, serial, "tracks", cam["w"], cam["h"], fps=fps, ext="avi", fourcc="MJPG")
@@ -170,14 +211,22 @@ def main():
         gripper_viz.update(T_base_ee, gripper_positions[i])
         gripper_poses.append(T_base_ee.copy())
 
-        # Track gripper contact points
+        # Track gripper contact points (either precomputed NPZ or on-the-fly)
         track_points_world = None
-        if num_contact_pts > 0:
-            pts_left, pts_right = contact_tracker.get_contact_points_world(T_base_ee, gripper_positions[i])
-            if pts_left is not None:
-                tracks_3d[i, :num_contact_pts, :] = pts_left
-                tracks_3d[i, num_contact_pts:, :] = pts_right
-                track_points_world = np.vstack([pts_left, pts_right])
+        if total_track_pts > 0:
+            if use_precomputed_tracks:
+                track_points_world = tracks_3d[i]
+            else:
+                pts_left, pts_right = contact_tracker.get_contact_points_world(T_base_ee, gripper_positions[i])
+                if pts_left is not None:
+                    tracks_3d[i, :num_contact_pts, :] = pts_left
+                    tracks_3d[i, num_contact_pts:, :] = pts_right
+                    track_points_world = np.vstack([pts_left, pts_right])
+
+        tracks_window = None
+        if total_track_pts > 0 and track_trail_length_video > 1:
+            start_idx = max(0, i - track_trail_length_video + 1)
+            tracks_window = tracks_3d[start_idx:i + 1]
 
         for serial, cam in active_cams.items():
             zed = cam['zed']
@@ -237,6 +286,17 @@ def main():
                         track_points_world, cam['K'], T_wrist, cam['w'], cam['h'], colors=track_colors_rgb
                     )
                     overlay = draw_points_on_image(overlay, uv_tracks, colors=cols_tracks, radius=3, default_color=(0, 0, 255))
+                if tracks_window is not None:
+                    overlay = draw_track_trails_on_image(
+                        overlay,
+                        tracks_window,
+                        cam['K'],
+                        T_wrist,
+                        cam['w'],
+                        cam['h'],
+                        track_colors_rgb,
+                        min_depth=CONFIG.get('min_depth_wrist', 0.01)
+                    )
 
                 if serial in recorders:
                     recorders[serial].write_frame(overlay)
@@ -288,6 +348,17 @@ def main():
                         track_points_world, cam['K'], T, cam['w'], cam['h'], colors=track_colors_rgb
                     )
                     overlay = draw_points_on_image(overlay, uv_tracks, colors=cols_tracks, radius=3, default_color=(0, 0, 255))
+                if tracks_window is not None:
+                    overlay = draw_track_trails_on_image(
+                        overlay,
+                        tracks_window,
+                        cam['K'],
+                        T,
+                        cam['w'],
+                        cam['h'],
+                        track_colors_rgb,
+                        min_depth=CONFIG.get('min_depth', 0.01)
+                    )
 
                 if serial in recorders:
                     recorders[serial].write_frame(overlay)
@@ -325,24 +396,30 @@ def main():
 
     tracks_save_path = rrd_save_path.replace(".rrd", "_gripper_tracks.npz")
     gripper_poses_array = np.stack(gripper_poses, axis=0) if len(gripper_poses) > 0 else np.empty((0, 4, 4))
-    np.savez(
-        tracks_save_path,
-        tracks_3d=tracks_3d,
-        contact_points_local=contact_tracker.contact_points_local,
-        gripper_poses=gripper_poses_array,
-        gripper_positions=gripper_positions[:actual_frames],
-        cartesian_positions=cartesian_positions[:actual_frames],
-        num_frames=actual_frames,
-        num_points_per_finger=num_contact_pts,
-        fps=fps,
-    )
+    if use_precomputed_tracks:
+        print(f"[INFO] Skipping track re-save (using precomputed file: {tracks_npz_path})")
+    else:
+        np.savez(
+            tracks_save_path,
+            tracks_3d=tracks_3d,
+            contact_points_local=contact_tracker.contact_points_local,
+            gripper_poses=gripper_poses_array,
+            gripper_positions=gripper_positions[:actual_frames],
+            cartesian_positions=cartesian_positions[:actual_frames],
+            num_frames=actual_frames,
+            num_points_per_finger=num_contact_pts,
+            fps=fps,
+        )
 
     # Cleanup
     for c in active_cams.values(): c['zed'].close()
     for rec in recorders.values(): rec.close()
     print("[SUCCESS] Done.")
     print(f"[INFO] RRD saved to: {rrd_save_path}")
-    print(f"[INFO] Tracks saved to: {tracks_save_path}")
+    if use_precomputed_tracks:
+        print(f"[INFO] Tracks loaded from: {tracks_npz_path}")
+    else:
+        print(f"[INFO] Tracks saved to: {tracks_save_path}")
     print(f"[INFO] Videos saved to: {video_dir}")
 
 

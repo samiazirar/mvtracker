@@ -1,13 +1,18 @@
-- [x] Fit the urd end effector model on the robot 
-- [x] Calibrate the wrist camera z direction with ICP 
-- [x] 2D Video -> 3D lifting code 
-- [ ] Where the depth does not change, there it should have "static" points (until it becomes close to the gripper at least) -> keep static if no extreme changes otherwise..
-- [ ] Make sure everything within a radios of xy is absolutley static
+- [ ] Create large scale data processing script for droid 
+    - [ ] Do not use the low callibrated cameras for now
+- [ ] Train a model to recoginize the gripper and contact flow first
+- [ ] Get mask only for Gripper
+
+
+
+- [ ] Calibrate the wrist camera z direction with ICP  -> postponed!
+- [ ] Do not use the wrist camera for depth improvement for now -> postponed
 - [ ] Wrist cam relies on gripper -> fir the grippr in the external cameras and with the robot urdf and then fit the wrist cam based on the gripper and test if the other depths aligm mooe or less afterward (which is better the locaiton of the ee or the wrist cam) -> but wrist cam relies on gripper so gripper should be more accurate
-- [ ] make transformations with pytransform3d not rerun
+- [ ] Make sure everything within a radios of xy is absolutley static
+- [ ] Where the depth does not change, there it should have "static" points (until it becomes close to the gripper at least) -> keep static if no extreme changes otherwise..
+- [ ] Use sensor depth for not, and the reprojections later -> using reprojection postponed
 - [ ] Align gripper and wrist camera and CtRNet-X callibration for optimal alignment
 - [ ] Fuse point cloud and improve with cleaning and plane-to-plane ICP
-- [ ] Mask the robot with CtRNet-X Framework, test if it is alignet etc.
 
 
 - [ ] Track with SpaTrackV2 and MVTracker the object in 3D

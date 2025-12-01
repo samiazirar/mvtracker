@@ -1,3 +1,4 @@
+import argparse
 import numpy as np
 import os
 import glob
@@ -98,8 +99,16 @@ def init_video_recorders(active_cams, output_dir):
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Mark and reproject gripper points into camera views.")
+    parser.add_argument(
+        "--config",
+        default="conversions/droid/config.yaml",
+        help="Path to YAML config file.",
+    )
+    args = parser.parse_args()
+
     # Load configuration
-    with open('conversions/droid/config.yaml', 'r') as f:
+    with open(args.config, 'r') as f:
         CONFIG = yaml.safe_load(f)
 
     print("=== DROID Gripper Points (No URDF mesh) ===")
@@ -202,7 +211,8 @@ def main():
         else:
             print(f"[ERROR] Failed to open {serial}")
 
-    video_dir = os.path.join(CONFIG.get('video_output_path', 'point_clouds/videos'), "gripper_points_only")
+    config_tag = os.path.splitext(os.path.basename(args.config))[0]
+    video_dir = os.path.join(CONFIG.get('video_output_path', 'point_clouds/videos'), config_tag, "gripper_points_only")
     recorders = init_video_recorders(active_cams, video_dir) if active_cams else {}
 
     # --- 4. Render Loop ---

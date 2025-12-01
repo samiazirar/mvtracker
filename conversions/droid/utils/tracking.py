@@ -32,9 +32,11 @@ def extract_contact_surface(mesh):
 
 def sample_contact_points(mesh, num_points):
     """Sample points uniformly on the contact surface."""
-    if len(mesh.vertices) <= num_points:
-        points = mesh.vertices.copy()
+    if num_points <= len(mesh.vertices):
+        # Use a deterministic subset when requesting fewer points
+        points = mesh.vertices[:num_points].copy()
     else:
+        # Allow oversampling beyond vertex count
         points, _ = trimesh.sample.sample_surface(mesh, num_points)
     print(f"[INFO] Sampled {len(points)} contact points for tracking")
     return points

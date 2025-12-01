@@ -1,0 +1,51 @@
+# Example config for training data export scripts.
+#
+# Supports two usage patterns:
+# 1) Direct episode: fill the explicit h5/recordings/metadata paths below.
+# 2) ID-based selection: set `episode_id` to a DROID-style relative id
+#    (e.g., "AUTOLab/success/2023-08-18/Fri_Aug_18_11:58:51_2023") and
+#    derive the paths externally before invoking the exporters.
+#
+# The exporters currently expect concrete file paths; they do not perform
+# dataset sampling by themselves. A launcher can sample per-lab episodes
+# and populate this file before running:
+#   python conversions/droid/training_data/export_tracks.py --config this.yaml
+#   python conversions/droid/training_data/export_rgb_depth_pngs.py --config this.yaml
+
+###############
+# Episode selection
+###############
+# If you have a specific id, set it here for external path resolution:
+episode_id: "AUTOLab/success/2023-08-18/Fri_Aug_18_11:58:51_2023"
+
+# Optional lab sampling hints for a launcher (not used by exporters directly):
+lab_sampling:
+  labs: ["AUTOLab", "ILIAD"]
+  samples_per_lab: 2
+
+###############
+# Direct paths (required by exporters)
+###############
+# Point directly at the episode files:
+h5_path: "/data/droid/data/droid_raw/1.0.1/AUTOLab/success/2023-08-18/Fri_Aug_18_11:58:51_2023/trajectory.h5"
+recordings_dir: "/data/droid/data/droid_raw/1.0.1/AUTOLab/success/2023-08-18/Fri_Aug_18_11:58:51_2023/recordings/SVO"
+extrinsics_json_path: "/data/droid/calib_and_annot/droid/cam2base_extrinsic_superset.json"
+metadata_path: null  # leave null to auto-discover metadata_*.json in the episode folder
+
+###############
+# Outputs
+###############
+training_output_root: "/data/droid/training_output"
+
+###############
+# Export controls
+###############
+max_frames: 0    # 0 or unset = export all frames
+fps: 30.0
+num_track_points: 480
+
+# Depth filtering (used if running RGB/depth export on GPU)
+wrist_max_depth: 0.75
+ext_max_depth: 5.5
+min_depth: 0.1
+min_depth_wrist: 0.01

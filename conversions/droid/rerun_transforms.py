@@ -1,3 +1,4 @@
+import argparse
 import numpy as np
 import os
 import glob
@@ -19,8 +20,16 @@ from utils import (
 #only for debugging
 
 def main():
+    parser = argparse.ArgumentParser(description="Debug Rerun transforms for cameras and gripper.")
+    parser.add_argument(
+        "--config",
+        default="conversions/droid/config.yaml",
+        help="Path to YAML config file.",
+    )
+    args = parser.parse_args()
+
     # Load configuration
-    with open('conversions/droid/config.yaml', 'r') as f:
+    with open(args.config, 'r') as f:
         CONFIG = yaml.safe_load(f)
     
     print("=== DROID Full Fusion (Wrist + External) ===")

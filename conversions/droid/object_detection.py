@@ -1,3 +1,4 @@
+import argparse
 import numpy as np
 import os
 import glob
@@ -34,8 +35,16 @@ load_dotenv()
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Run object detection and gripper visualization.")
+    parser.add_argument(
+        "--config",
+        default="conversions/droid/config.yaml",
+        help="Path to YAML config file.",
+    )
+    args = parser.parse_args()
+
     # Load configuration
-    with open('conversions/droid/config.yaml', 'r') as f:
+    with open(args.config, 'r') as f:
         CONFIG = yaml.safe_load(f)
     
     # Init Detectors

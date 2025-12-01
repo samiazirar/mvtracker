@@ -30,6 +30,7 @@ from .video_utils import (
     draw_points_on_image,
     draw_points_on_image_fast,
     create_reprojection_video,
+    draw_track_trails_on_image,
 )
 from .optimization import (
     # ICP optimization functions
@@ -92,6 +93,7 @@ __all__ = [
     'draw_points_on_image',
     'draw_points_on_image_fast',
     'create_reprojection_video',
+    'draw_track_trails_on_image',
     # ICP Optimization
     'optimize_wrist_camera_icp',
     'optimize_wrist_camera_icp_z_only',
