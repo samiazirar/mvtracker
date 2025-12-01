@@ -9,8 +9,6 @@ import cv2
 from scipy.spatial.transform import Rotation as R
 import rerun as rr
 import pyzed.sl as sl
-import trimesh
-
 from utils import (
     pose6_to_T,
     rvec_tvec_to_matrix,
@@ -27,91 +25,8 @@ from utils import (
     project_points_to_image,
     draw_points_on_image,
     draw_points_on_image_fast,
+    ContactSurfaceTracker,
 )
-
-
-class ContactSurfaceTracker:
-    """Sample and track contact surface points on the gripper fingers."""
-
-    def __init__(self, num_track_points=24):
-        base_path = "/workspace/third_party/robotiq_arg85_description/meshes"
-        mesh_file = os.path.join(base_path, "inner_finger_fine.STL")
-        self.num_track_points = num_track_points
-        self.contact_points_local = None
-
-        if os.path.exists(mesh_file):
-            finger_mesh = trimesh.load(mesh_file)
-            contact_mesh = self._extract_contact_surface(finger_mesh)
-            if contact_mesh is not None:
-                self.contact_points_local = self._sample_contact_points(contact_mesh, num_track_points)
-        else:
-            print(f"[WARN] Mesh not found for contact sampling: {mesh_file}")
-
-    def _extract_contact_surface(self, mesh):
-        """Extract the inner rubber contact pad (faces pointing -Y)."""
-        vertices = mesh.vertices
-        contact_face_indices = []
-        for i, face in enumerate(mesh.faces):
-            face_verts = vertices[face]
-            y_min = face_verts[:, 1].min()
-            if y_min < -0.0095:
-                contact_face_indices.append(i)
-
-        if len(contact_face_indices) == 0:
-            print("[WARN] Could not extract contact surface for tracking")
-            return None
-
-        contact_submesh = mesh.submesh([contact_face_indices], only_watertight=False)[0]
-        print(f"[INFO] Extracted contact pad: {len(contact_submesh.vertices)} verts, {len(contact_submesh.faces)} faces")
-        return contact_submesh
-
-    def _sample_contact_points(self, mesh, num_points):
-        """Sample evenly on the contact surface."""
-        if len(mesh.vertices) <= num_points:
-            points = mesh.vertices.copy()
-        else:
-            points, _ = trimesh.sample.sample_surface(mesh, num_points)
-        print(f"[INFO] Sampled {len(points)} contact points for tracking")
-        return points
-
-    def _compute_finger_transforms(self, T_base_ee, gripper_pos):
-        """Compute transforms for left/right finger tips."""
-        val = gripper_pos[0] if isinstance(gripper_pos, (list, np.ndarray)) else gripper_pos
-        theta = val * 0.8
-
-        # Left finger chain: base_ee -> left_inner_knuckle -> left_inner_finger
-        T_lik = np.eye(4)
-        T_lik[:3, 3] = [0.0127, 0, 0.0693]
-        T_lik[:3, :3] = R.from_rotvec([0, -theta, 0]).as_matrix()
-
-        T_lif = np.eye(4)
-        T_lif[:3, 3] = [0.03458531, 0, 0.04549702]
-        T_lif[:3, :3] = R.from_rotvec([0, theta, 0]).as_matrix()
-        T_world_left_finger = T_base_ee @ T_lik @ T_lif
-
-        # Right finger chain: base_ee -> right_inner_knuckle -> right_inner_finger
-        T_rik = np.eye(4)
-        T_rik[:3, 3] = [-0.0127, 0, 0.0693]
-        T_rik[:3, :3] = R.from_euler('z', np.pi).as_matrix() @ R.from_rotvec([0, -theta, 0]).as_matrix()
-
-        T_rif = np.eye(4)
-        T_rif[:3, 3] = [0.03410605, 0, 0.04585739]
-        T_rif[:3, :3] = R.from_rotvec([0, theta, 0]).as_matrix()
-        T_world_right_finger = T_base_ee @ T_rik @ T_rif
-
-        return T_world_left_finger, T_world_right_finger
-
-    def get_contact_points_world(self, T_base_ee, gripper_pos):
-        """Return sampled contact surface points for both fingers in world frame."""
-        if self.contact_points_local is None:
-            return None, None
-
-        pts_local = np.hstack([self.contact_points_local, np.ones((len(self.contact_points_local), 1))])
-        T_left, T_right = self._compute_finger_transforms(T_base_ee, gripper_pos)
-
-        pts_left_world = (T_left @ pts_local.T).T[:, :3]
-        pts_right_world = (T_right @ pts_local.T).T[:, :3]
-        return pts_left_world, pts_right_world
 
 
 def main():

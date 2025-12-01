@@ -54,6 +54,13 @@ from .optimization import (
     optimize_external_cameras_multi_frame,
     optimize_wrist_multi_frame,
 )
+from .tracking import (
+    extract_contact_surface,
+    sample_contact_points,
+    compute_finger_transforms,
+    ContactSurfaceTracker,
+    MinimalGripperVisualizer,
+)
 
 __all__ = [
     # Basic transform utilities
@@ -106,4 +113,10 @@ __all__ = [
     # Multi-frame optimization
     'optimize_external_cameras_multi_frame',
     'optimize_wrist_multi_frame',
+    # Tracking utilities
+    'extract_contact_surface',
+    'sample_contact_points',
+    'compute_finger_transforms',
+    'ContactSurfaceTracker',
+    'MinimalGripperVisualizer',
 ]

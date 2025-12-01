@@ -9,6 +9,7 @@ This module provides functions for:
 import cv2
 import numpy as np
 import os
+import imageio
 from typing import Optional, Tuple
 from .transforms import transform_points, invert_transform
 
@@ -19,7 +20,8 @@ from .transforms import transform_points, invert_transform
 
 class VideoRecorder:
     """
-    Simple video recorder using OpenCV's VideoWriter.
+    Robust video recorder using ImageIO (FFmpeg wrapper).
+    Generates VS Code/Web compatible MP4 (H.264) files.
     
     Usage:
         recorder = VideoRecorder(output_dir, camera_name, suffix, width, height)
@@ -37,7 +39,7 @@ class VideoRecorder:
         height: int, 
         fps: float = 30.0,
         ext: str = "mp4",
-        fourcc: str = "mp4v",
+        fourcc: str = "mp4v", # Ignored by imageio, kept for API compatibility
     ):
         """
         Initialize video recorder.
@@ -45,12 +47,12 @@ class VideoRecorder:
         Args:
             output_dir: Directory to save video files
             camera_name: Camera identifier for filename
-            suffix: Suffix for filename (e.g., "before_icp", "after_icp")
+            suffix: Suffix for filename
             width: Video width in pixels
             height: Video height in pixels
             fps: Frames per second (default: 30)
-            ext: File extension/container (default: mp4)
-            fourcc: FourCC codec string (default: mp4v)
+            ext: File extension (ignored, always forces mp4 for compatibility)
+            fourcc: Codec string (ignored, always uses libx264)
         """
         self.output_dir = output_dir
         self.camera_name = camera_name
@@ -58,29 +60,24 @@ class VideoRecorder:
         self.width = width
         self.height = height
         self.fps = fps
-        self.ext = ext.lstrip(".")
-        self.fourcc = fourcc
         
         # Create output directory if needed
         os.makedirs(output_dir, exist_ok=True)
         
-        # Setup video writer
-        self.filename = os.path.join(output_dir, f"{camera_name}_{suffix}.{self.ext}")
-        fourcc_code = cv2.VideoWriter_fourcc(*self.fourcc)
-        self.writer = cv2.VideoWriter(self.filename, fourcc_code, fps, (width, height))
-        # Fallback to MJPG/AVI if the requested codec/container fails to open
-        if not self.writer.isOpened():
-            print("[VideoRecorder] Main codec failed, trying fallback...")
-            raise RuntimeError(f"[VideoRecorder] Failed to open VideoWriter for {camera_name}_{suffix} with {self.ext}/{self.fourcc}")
-            # fallback_ext = "mp4"
-            # fallback_fourcc = "avc1"
-            # self.filename = os.path.join(output_dir, f"{camera_name}_{suffix}.{fallback_ext}")
-            # fourcc_code = cv2.VideoWriter_fourcc(*fallback_fourcc)
-            # self.writer = cv2.VideoWriter(self.filename, fourcc_code, fps, (width, height))
-            # self.ext = fallback_ext
-            # self.fourcc = fallback_fourcc
-            # if not self.writer.isOpened():
-            #     raise RuntimeError(f"[VideoRecorder] Failed to open VideoWriter for {camera_name}_{suffix}")
+        # Force MP4 extension for VS Code compatibility
+        self.filename = os.path.join(output_dir, f"{camera_name}_{suffix}.mp4")
+        
+        print(f"[VideoRecorder] Initializing ImageIO writer for {self.filename}...")
+        
+        # codec='libx264' and pixelformat='yuv420p' are CRITICAL for VS Code/QuickTime support
+        self.writer = imageio.get_writer(
+            self.filename, 
+            fps=fps, 
+            codec='libx264', 
+            quality=8,
+            pixelformat='yuv420p',
+            macro_block_size=None # Prevents errors if resolution isn't div by 16
+        )
         
         self.frame_count = 0
     
@@ -97,14 +94,18 @@ class VideoRecorder:
         # Ensure correct size
         if frame.shape[1] != self.width or frame.shape[0] != self.height:
             frame = cv2.resize(frame, (self.width, self.height))
+            
+        # OpenCV uses BGR, ImageIO (and most players) expect RGB.
+        # We must convert here, otherwise people look blue.
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         
-        self.writer.write(frame)
+        self.writer.append_data(frame_rgb)
         self.frame_count += 1
     
     def close(self):
         """Release the video writer."""
         if self.writer is not None:
-            self.writer.release()
+            self.writer.close()
             print(f"[VideoRecorder] Saved {self.frame_count} frames to {self.filename}")
 
 
@@ -350,10 +351,10 @@ def create_reprojection_video(
     fps: float = 30.0
 ):
     """
-    Create a video from a list of frames.
+    Create a video from a list of frames using ImageIO.
     
     Args:
-        output_path: Path to save the video
+        output_path: Path to save the video (forced to .mp4)
         frames: List of BGR images (numpy arrays)
         fps: Frames per second
     """
@@ -361,20 +362,33 @@ def create_reprojection_video(
         print(f"[create_reprojection_video] No frames to save")
         return
     
-    # Get dimensions from first frame
-    h, w = frames[0].shape[:2]
-    
     # Create directory if needed
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     
-    # Setup video writer
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    writer = cv2.VideoWriter(output_path, fourcc, fps, (w, h))
+    # Force MP4 extension
+    base, _ = os.path.splitext(output_path)
+    final_path = base + ".mp4"
+    
+    # ImageIO Writer (H.264)
+    writer = imageio.get_writer(
+        final_path, 
+        fps=fps, 
+        codec='libx264', 
+        quality=8, 
+        pixelformat='yuv420p',
+        macro_block_size=None
+    )
+    
+    h, w = frames[0].shape[:2]
     
     for frame in frames:
+        # Resize if needed
         if frame.shape[1] != w or frame.shape[0] != h:
             frame = cv2.resize(frame, (w, h))
-        writer.write(frame)
+            
+        # BGR -> RGB
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        writer.append_data(frame_rgb)
     
-    writer.release()
-    print(f"[create_reprojection_video] Saved {len(frames)} frames to {output_path}")
+    writer.close()
+    print(f"[create_reprojection_video] Saved {len(frames)} frames to {final_path}")
