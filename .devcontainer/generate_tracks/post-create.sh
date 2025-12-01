@@ -73,7 +73,6 @@ if [ "$INSTALL_ZED_SDK" = "1" ]; then
 import pyzed.sl as sl
 print(sl.__version__)
 PY
-  then
     echo "[post-create] pyzed already available."
   else
     echo "[post-create] Installing pyzed wheel from ZED SDK..."
