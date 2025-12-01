@@ -1,0 +1,36 @@
+# Configuration for DROID Training Data Generation
+# This config is used by both generate_tracks_and_metadata.py and extract_rgb_depth.py
+
+# Input paths (modify these for your cluster setup)
+droid_root: "/data/droid/data/droid_raw/1.0.1"
+cam2base_extrinsics_path: "/data/droid/calib_and_annot/droid/cam2base_extrinsic_superset.json"
+
+# Output root for processed training data
+# Will maintain DROID folder structure: {output_root}/{lab}/{success|failure}/{date}/{timestamp}/
+# output_root: "/data/droid/training_data"
+output_root: "/workspace/"
+
+# Processing parameters
+max_frames: null  # null = process all frames
+num_track_points: 480  # Number of points to track on each gripper finger
+fps: 30.0
+
+# Depth filtering for track generation
+wrist_max_depth: 0.75
+ext_max_depth: 1.5
+min_depth: 0.1
+min_depth_wrist: 0.01
+
+# PNG compression level (0=no compression, 9=max compression)
+# Higher compression = smaller files but slower
+png_compression: 3
+
+# Depth encoding
+# 'uint16': depth in millimeters as 16-bit PNG (max ~65m range)
+# 'float32': depth as 32-bit TIFF (full precision, larger files)
+depth_encoding: "uint16"
+depth_scale: 1000.0  # Multiply meters by this to get storage units (1000 = mm)
+
+# Parallel processing settings (for cluster deployment)
+num_workers: 4  # Number of parallel frame extraction workers
+batch_size: 100  # Frames per batch for memory management

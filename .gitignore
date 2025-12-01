@@ -127,3 +127,7 @@ weights/groundingdino_swint_ogc.pth
 
 *.out
 *.err
+
+test_data
+test_data/
+test_data/*
