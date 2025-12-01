@@ -24,7 +24,8 @@ LIMIT=${1:-10}
 WORKERS_PER_GPU=${2:-${DROID_WORKERS_PER_GPU:-3}}
 NUM_GPUS=${3:-${DROID_NUM_GPUS:-0}}      # 0 = auto-detect
 
-CAM2BASE_PATH="/data/droid/calib_and_annot/droid/cam2base_extrinsic_superset.json"
+# Paths
+CAM2BASE_PATH="/data/cam2base_extrinsic_superset.json"
 CONFIG_PATH="conversions/droid/training_data/config.yaml"
 SCRIPT_DIR="conversions/droid/training_data"
 LOG_DIR="logs/pipeline_$(date +%Y%m%d_%H%M%S)"
@@ -37,8 +38,8 @@ GCS_BUCKET="gs://gresearch/robotics/droid_raw/1.0.1"
 # Storage Configuration
 # ----------------------------------------------------------------------------
 # FAST_LOCAL_DIR="/data/droid_scratch"     # Node-local fast storage (NVMe)
-FAST_LOCAL_DIR="droid_processed"
-PERMANENT_STORAGE_DIR="droid_processed" # Final destination for processed data
+FAST_LOCAL_DIR="/data/"
+PERMANENT_STORAGE_DIR="./droid_processed" # Final destination for processed data
 # ----------------------------------------------------------------------------
 
 

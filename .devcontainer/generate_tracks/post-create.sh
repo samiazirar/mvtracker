@@ -29,6 +29,7 @@ apt-get install -y --no-install-recommends \
   ffmpeg \
   libgl1 libglu1-mesa libglib2.0-0 libusb-1.0-0 \
   libxext6 libxrender1 libsm6 libx11-6 \
+  libturbojpeg0 udev \
   libnvidia-encode-535 libnvidia-decode-535 \
   file zstd unzip \
   && rm -rf /var/lib/apt/lists/*
@@ -55,6 +56,7 @@ ZED_INSTALLER="${ZED_INSTALLER:-/tmp/ZED_SDK.run}"
 if [ "$INSTALL_ZED_SDK" = "1" ]; then
   if [ ! -d "/usr/local/zed" ]; then
     echo "[post-create] Installing ZED SDK (set INSTALL_ZED_SDK=0 to skip)..."
+    mkdir -p /etc/udev/rules.d || true
     wget -O "$ZED_INSTALLER" "$ZED_INSTALLER_URL"
     chmod +x "$ZED_INSTALLER"
     set +e
@@ -88,11 +90,16 @@ else
   echo "[post-create] INSTALL_ZED_SDK=0, skipping ZED install."
 fi
 
-echo "[post-create] Configuring git defaults..."
-git config --global --add safe.directory /workspace
-git config --system url."ssh://git@github.com/".insteadOf https://github.com/
-mkdir -p /etc/ssh && ssh-keyscan -t rsa,ecdsa,ed25519 github.com >> /etc/ssh/ssh_known_hosts 2>/dev/null || true
-git config --global core.sshCommand 'ssh -o StrictHostKeyChecking=accept-new' || true
-git config --global credential.helper store || true
+# echo "[post-create] Configuring git defaults..."
+# git config --global --add safe.directory /workspace
+# git config --system url."ssh://git@github.com/".insteadOf https://github.com/
+# mkdir -p /etc/ssh && ssh-keyscan -t rsa,ecdsa,ed25519 github.com >> /etc/ssh/ssh_known_hosts 2>/dev/null || true
+# git config --global core.sshCommand 'ssh -o StrictHostKeyChecking=accept-new' || true
+# git config --global credential.helper store || true
+
+echo "[post-create] Fixing libturbojpeg link for ZED..."
+if [ -f "/usr/lib/x86_64-linux-gnu/libturbojpeg.so.0" ]; then
+    ln -sf /usr/lib/x86_64-linux-gnu/libturbojpeg.so.0 /usr/lib/libturbojpeg.so.0
+fi
 
 echo "[post-create] Done."
