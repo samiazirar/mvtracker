@@ -77,11 +77,15 @@ class ContactSurfaceTracker:
         self.num_track_points = num_track_points
         self.mesh_path = mesh_path
         self.contact_points_local = None
+        self.contact_mesh_vertices = None
+        self.contact_mesh_faces = None
 
         if os.path.exists(mesh_path):
             finger_mesh = trimesh.load(mesh_path)
             contact_mesh = extract_contact_surface(finger_mesh)
             if contact_mesh is not None:
+                self.contact_mesh_vertices = contact_mesh.vertices.copy()
+                self.contact_mesh_faces = contact_mesh.faces.copy()
                 self.contact_points_local = sample_contact_points(contact_mesh, num_track_points)
         else:
             print(f"[WARN] Mesh not found for contact sampling: {mesh_path}")

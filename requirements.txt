@@ -41,3 +41,5 @@ pycocotools
 timm
 openai
 python-dotenv
+conversions
+pytest

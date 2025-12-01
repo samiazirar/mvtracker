@@ -3,6 +3,8 @@
 import argparse
 import glob
 import os
+import re
+from pathlib import Path
 from typing import Dict, Optional
 
 import cv2
@@ -16,6 +18,43 @@ from utils import find_episode_data_by_date, find_svo_for_camera
 def _derive_episode_relative_path(h5_path: str) -> str:
     parts = os.path.normpath(os.path.dirname(h5_path)).split(os.sep)
     return os.path.join(*parts[-5:]) if len(parts) >= 5 else os.path.basename(os.path.dirname(h5_path))
+
+
+def _normalize_episode_id_to_rel_path(episode_id: str, cam2base_path: str = None) -> str:
+    if cam2base_path and os.path.exists(cam2base_path):
+        with open(cam2base_path, "r") as f:
+            cam2base = yaml.safe_load(f) if cam2base_path.endswith((".yaml", ".yml")) else __import__("json").load(f)
+        rels = set()
+        def collect(obj):
+            if isinstance(obj, dict):
+                for k, v in obj.items():
+                    if k == "relative_path" and isinstance(v, str):
+                        rels.add(v)
+                    collect(v)
+            elif isinstance(obj, list):
+                for i in obj:
+                    collect(i)
+        collect(cam2base)
+        parts = episode_id.split("+")
+        ts = parts[-1] if parts else episode_id
+        ts_norm = ts.replace("h", ":").replace("m", ":").replace("s", "")
+        date_bits = ts.split("-")[0:3]
+        date_fragment = "-".join(date_bits) if date_bits else ""
+        time_digits = re.sub(r"[^0-9]", "", ts_norm)
+        for rel in rels:
+            rel_digits = re.sub(r"[^0-9]", "", rel)
+            if date_fragment and date_fragment in rel and time_digits and time_digits in rel_digits:
+                return rel
+    parts = episode_id.split("+")
+    if len(parts) >= 3:
+        lab = parts[0]
+        timestamp = parts[-1]
+        date_bits = timestamp.split("-")
+        if len(date_bits) >= 4:
+            date_folder = "-".join(date_bits[:3])
+            time_folder = timestamp.replace("h", ":").replace("m", ":").replace("s", "")
+            return os.path.join(lab, date_folder, time_folder)
+    return episode_id
 
 
 def _init_cameras(config: Dict):
@@ -60,6 +99,15 @@ def main():
 
     with open(args.config, "r") as f:
         config = yaml.safe_load(f)
+
+    # Resolve episode paths from episode_id + data_root when provided
+    if config.get("episode_id") and config.get("data_root"):
+        rel_path = _normalize_episode_id_to_rel_path(config["episode_id"], config.get("extrinsics_json_path"))
+        base = Path(config["data_root"]) / rel_path
+        config["h5_path"] = str(base / "trajectory.h5")
+        config["recordings_dir"] = str(base / "recordings" / "SVO")
+        if config.get("metadata_path") is None:
+            config["metadata_path"] = None
 
     output_root = args.output_root or config.get("training_output_root", "training_output")
     rel_path = _derive_episode_relative_path(config["h5_path"])

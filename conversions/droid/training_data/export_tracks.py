@@ -4,6 +4,8 @@ import argparse
 import glob
 import json
 import os
+import re
+from pathlib import Path
 from typing import Dict, Tuple
 
 import h5py
@@ -25,6 +27,54 @@ def _derive_episode_relative_path(h5_path: str) -> str:
     """Take last 5 components to keep org/success/date/timestamp layout."""
     parts = os.path.normpath(os.path.dirname(h5_path)).split(os.sep)
     return os.path.join(*parts[-5:]) if len(parts) >= 5 else os.path.basename(os.path.dirname(h5_path))
+
+
+def _normalize_episode_id_to_rel_path(episode_id: str, cam2base_path: str = None) -> str:
+    """
+    Convert an episode_id like 'AUTOLab+hash+2023-11-03-16h-51m-20s'
+    into a relative path as used in cam2base, if possible.
+    """
+    # Try direct cam2base lookup for relative_path entries
+    if cam2base_path and os.path.exists(cam2base_path):
+        with open(cam2base_path, "r") as f:
+            cam2base = json.load(f)
+        rels = set()
+
+        def collect(obj):
+            if isinstance(obj, dict):
+                for k, v in obj.items():
+                    if k == "relative_path" and isinstance(v, str):
+                        rels.add(v)
+                    collect(v)
+            elif isinstance(obj, list):
+                for i in obj:
+                    collect(i)
+
+        collect(cam2base)
+
+        parts = episode_id.split("+")
+        ts = parts[-1] if parts else episode_id
+        ts_norm = ts.replace("h", ":").replace("m", ":").replace("s", "")
+        date_bits = ts.split("-")[0:3]
+        date_fragment = "-".join(date_bits) if date_bits else ""
+        time_digits = re.sub(r"[^0-9]", "", ts_norm)
+
+        for rel in rels:
+            rel_digits = re.sub(r"[^0-9]", "", rel)
+            if date_fragment and date_fragment in rel and time_digits and time_digits in rel_digits:
+                return rel
+
+    # Fallback: attempt to map episode_id structure to a path
+    parts = episode_id.split("+")
+    if len(parts) >= 3:
+        lab = parts[0]
+        timestamp = parts[-1]
+        date_bits = timestamp.split("-")
+        if len(date_bits) >= 4:
+            date_folder = "-".join(date_bits[:3])
+            time_folder = timestamp.replace("h", ":").replace("m", ":").replace("s", "")
+            return os.path.join(lab, date_folder, time_folder)
+    return episode_id
 
 
 def _load_wrist_transforms(cartesian_positions: np.ndarray, config: Dict) -> Tuple[str, list]:
@@ -64,6 +114,16 @@ def main():
 
     with open(args.config, "r") as f:
         CONFIG = yaml.safe_load(f)
+
+    # Resolve episode paths from episode_id + data_root when provided
+    if CONFIG.get("episode_id") and CONFIG.get("data_root"):
+        rel_path = _normalize_episode_id_to_rel_path(CONFIG["episode_id"], CONFIG.get("extrinsics_json_path"))
+        base = Path(CONFIG["data_root"]) / rel_path
+        CONFIG["h5_path"] = str(base / "trajectory.h5")
+        CONFIG["recordings_dir"] = str(base / "recordings" / "SVO")
+        if CONFIG.get("metadata_path") is None:
+            # allow auto-discovery later
+            CONFIG["metadata_path"] = None
 
     h5_path = CONFIG["h5_path"]
     output_root = args.output_root or CONFIG.get("training_output_root", "training_output")
@@ -122,6 +182,8 @@ def main():
         tracks_path,
         tracks_3d=tracks_3d,
         contact_points_local=contact_tracker.contact_points_local,
+        contact_mesh_vertices=contact_tracker.contact_mesh_vertices,
+        contact_mesh_faces=contact_tracker.contact_mesh_faces,
         gripper_poses=gripper_poses_array,
         gripper_positions=gripper_positions[:actual_frames],
         cartesian_positions=cartesian_positions[:actual_frames],
