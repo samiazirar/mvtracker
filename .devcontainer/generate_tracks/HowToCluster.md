@@ -24,4 +24,4 @@ cd mvtracker
 bash .devcontainer/generate_tracks/post-create.sh
 
 
-symlink in ld config phad toolkit per hand angeben
+enroot export --output ~/depth_tracks_generator_final.sqsh depth_tracks_generator

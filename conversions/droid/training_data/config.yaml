@@ -1,5 +1,5 @@
 # Configuration for DROID Training Data Generation
-# This config is used by both generate_tracks_and_metadata.py and extract_rgb_depth.py
+# This config is used by generate_tracks_and_metadata.py, extract_rgb_depth.py, and render_episode_validation.py
 
 # Input paths (modify these for your cluster setup)
 droid_root: "/data/droid/data/droid_raw/1.0.1"
@@ -24,6 +24,11 @@ wrist_max_depth: 0.75
 ext_max_depth: 1.5
 min_depth: 0.1
 min_depth_wrist: 0.01
+
+# Visualization/Rendering settings
+radii_size: 0.002  # Point cloud radius in meters for Rerun visualization
+track_trail_length: 10  # Number of frames for track trails in 3D visualization
+track_trail_length_video: 10  # Number of frames for track trails in video overlay
 
 # PNG compression level (0=no compression, 9=max compression)
 # Higher compression = smaller files but slower

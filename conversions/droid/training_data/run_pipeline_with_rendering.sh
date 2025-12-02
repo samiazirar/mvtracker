@@ -1,13 +1,34 @@
 #!/bin/bash
-# DROID Training Data Processing Pipeline (Multi-GPU Parallel Optimized)
-# Downloads, extracts RGB/depth, and generates tracks for episodes
+# DROID Training Data Processing Pipeline (Multi-GPU Parallel Optimized + Validation Rendering)
+# Downloads, extracts RGB/depth, generates tracks, and renders validation RRDs for episodes
+#
+# Pipeline Steps:
+#   A. Download episode data from GCS
+#   B. Extract RGB and Depth frames from SVO files (GPU)
+#   C. Generate gripper tracks and camera extrinsics (CPU)
+#   D. Render validation RRD and videos to point_clouds/ folder
+#   E. Move results to permanent storage
+#
+# Output Structure:
+#   {output_root}/{lab}/success/{date}/{timestamp}/
+#       ├── tracks.npz              # Gripper contact tracks
+#       ├── extrinsics.npz          # Camera extrinsics
+#       ├── quality.json            # Episode metadata
+#       ├── recordings/
+#       │   └── {camera_serial}/
+#       │       ├── rgb/            # PNG frames
+#       │       ├── depth/          # NPY depth maps
+#       │       └── intrinsics.json
+#       └── point_clouds/           # Validation outputs
+#           ├── validation.rrd      # Rerun visualization
+#           └── videos/             # MP4 videos with tracks
 #
 # Usage:
-#   ./run_pipeline.sh                    # Process 10 episodes, auto-detect GPUs, 3 workers/GPU
-#   ./run_pipeline.sh 100                # Process 100 episodes (workers/GPU=3, auto GPUs)
-#   ./run_pipeline.sh 100 6              # Process 100 episodes, 6 workers/GPU, auto GPUs
-#   ./run_pipeline.sh 100 6 4            # Process 100 episodes, 6 workers/GPU, 4 GPUs
-#   ./run_pipeline.sh -1                 # Process all episodes
+#   ./run_pipeline_with_rendering.sh                    # Process 10 episodes, auto-detect GPUs, 3 workers/GPU
+#   ./run_pipeline_with_rendering.sh 100                # Process 100 episodes (workers/GPU=3, auto GPUs)
+#   ./run_pipeline_with_rendering.sh 100 6              # Process 100 episodes, 6 workers/GPU, auto GPUs
+#   ./run_pipeline_with_rendering.sh 100 6 4            # Process 100 episodes, 6 workers/GPU, 4 GPUs
+#   ./run_pipeline_with_rendering.sh -1                 # Process all episodes
 #
 # Environment Variables:
 #   CUDA_VISIBLE_DEVICES    Override which GPUs to use (e.g., "0,1,2,3")
@@ -172,8 +193,8 @@ echo "Final Output: ${PERMANENT_STORAGE_DIR}"
 echo "Log dir: ${LOG_DIR}"
 echo ""
 
-# Initialize timing CSV
-echo "episode_id,gpu_id,download_time_sec,rgb_depth_time_sec,tracks_time_sec,total_time_sec" > "${TIMING_FILE}"
+# Initialize timing CSV (now includes rendering time)
+echo "episode_id,gpu_id,download_time_sec,rgb_depth_time_sec,tracks_time_sec,render_time_sec,total_time_sec" > "${TIMING_FILE}"
 
 # ============================================================================
 # WORKER FUNCTION (Multi-GPU Parallel Execution)
@@ -271,7 +292,24 @@ process_episode_worker() {
     local TRACKS_TIME=$((TRACKS_END - TRACKS_START))
     
     # ------------------------------------------------------------------------
-    # STEP D: Move Results & Cleanup
+    # STEP D: Render Validation RRD and Videos (point_clouds folder)
+    # ------------------------------------------------------------------------
+    local RENDER_START=$(date +%s)
+    
+    python "${SCRIPT_DIR}/render_episode_validation.py" \
+        --episode_id "${EPISODE_ID}" \
+        --config "${TEMP_CONFIG}" \
+        --headless \
+        > "${JOB_LOGS}/render.log" 2>&1 || {
+            echo "[WARN] Rendering failed for ${EPISODE_ID} (See ${JOB_LOGS}/render.log)"
+            # Don't fail the whole job if rendering fails - data is still valid
+        }
+    
+    local RENDER_END=$(date +%s)
+    local RENDER_TIME=$((RENDER_END - RENDER_START))
+    
+    # ------------------------------------------------------------------------
+    # STEP E: Move Results & Cleanup
     # ------------------------------------------------------------------------
     # Sync the generated output folder structure to permanent storage
     # rsync is safer than cp for merging directory trees
@@ -286,8 +324,8 @@ process_episode_worker() {
     local EPISODE_END=$(date +%s)
     local TOTAL_TIME=$((EPISODE_END - EPISODE_START))
     
-    # Atomic append to CSV (with GPU info)
-    echo "${EPISODE_ID},${ASSIGNED_GPU},${DOWNLOAD_TIME},${RGB_DEPTH_TIME},${TRACKS_TIME},${TOTAL_TIME}" >> "${TIMING_FILE}"
+    # Atomic append to CSV (with GPU info and render time)
+    echo "${EPISODE_ID},${ASSIGNED_GPU},${DOWNLOAD_TIME},${RGB_DEPTH_TIME},${TRACKS_TIME},${RENDER_TIME},${TOTAL_TIME}" >> "${TIMING_FILE}"
     
     echo "[Worker ${WORKER_NUM} | GPU ${ASSIGNED_GPU}] Finished: ${EPISODE_ID} (Total: ${TOTAL_TIME}s)"
 }
@@ -410,14 +448,15 @@ echo "Output dir: ${PERMANENT_STORAGE_DIR}"
 if [ "${PROCESSED_COUNT}" -gt 0 ]; then
     # Calculate averages and per-GPU statistics using awk from the CSV
     awk -F',' 'NR>1 {
-        sum_dl+=$3; sum_rgb+=$4; sum_tracks+=$5; sum_total+=$6; count++;
-        gpu_count[$2]++; gpu_time[$2]+=$6
+        sum_dl+=$3; sum_rgb+=$4; sum_tracks+=$5; sum_render+=$6; sum_total+=$7; count++;
+        gpu_count[$2]++; gpu_time[$2]+=$7
     } END {
         if (count > 0) {
             print "\nFinal Averages:";
             printf "  Download:   %.1fs\n", sum_dl/count;
             printf "  RGB/Depth:  %.1fs\n", sum_rgb/count;
             printf "  Tracks:     %.1fs\n", sum_tracks/count;
+            printf "  Render:     %.1fs\n", sum_render/count;
             printf "  Total:      %.1fs\n", sum_total/count;
             
             print "\nPer-GPU Statistics:";

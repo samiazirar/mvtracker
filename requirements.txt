@@ -43,3 +43,4 @@ openai
 python-dotenv
 conversions
 pytest
+gsutil
