@@ -184,6 +184,7 @@ process_episode_worker() {
     local EPISODE_ID=$1
     local WORKER_NUM=$2
     local WORKER_ID=$BASHPID
+    local DEST_LOG_DIR="${LOG_DIR}/${EPISODE_ID}"
 
     IFS=',' read -ra GPU_ARRAY <<< "${GPU_LIST_STR}"
     local GPU_IDX=$((WORKER_NUM % NUM_GPUS))
@@ -200,6 +201,7 @@ process_episode_worker() {
     local TEMP_CONFIG="${JOB_DIR}/config.yaml"
 
     mkdir -p "${JOB_DATA}" "${JOB_OUTPUT}" "${JOB_LOGS}"
+    mkdir -p "${DEST_LOG_DIR}"
 
     cp "${CONFIG_PATH}" "${TEMP_CONFIG}"
     {
@@ -227,7 +229,8 @@ process_episode_worker() {
         --output_dir "${JOB_DATA}" \
         --gcs_bucket "${GCS_BUCKET}" \
         > "${JOB_LOGS}/download.log" 2>&1 || {
-            record_error "${EPISODE_ID}" "download" "Download failed (see ${JOB_LOGS}/download.log)"
+            cp -a "${JOB_LOGS}/." "${DEST_LOG_DIR}/" 2>/dev/null || true
+            record_error "${EPISODE_ID}" "download" "Download failed (see ${DEST_LOG_DIR}/download.log)"
             record_status "failure" "${EPISODE_ID}" "download"
             rm -rf "${JOB_DIR}"
             return 1
@@ -244,7 +247,8 @@ process_episode_worker() {
         --episode_id "${EPISODE_ID}" \
         --config "${TEMP_CONFIG}" \
         > "${JOB_LOGS}/rgb_depth.log" 2>&1 || {
-            record_error "${EPISODE_ID}" "extract" "Extraction failed (see ${JOB_LOGS}/rgb_depth.log)"
+            cp -a "${JOB_LOGS}/." "${DEST_LOG_DIR}/" 2>/dev/null || true
+            record_error "${EPISODE_ID}" "extract" "Extraction failed (see ${DEST_LOG_DIR}/rgb_depth.log)"
             record_status "failure" "${EPISODE_ID}" "extract"
             rm -rf "${JOB_DIR}"
             return 1
@@ -261,7 +265,8 @@ process_episode_worker() {
         --episode_id "${EPISODE_ID}" \
         --config "${TEMP_CONFIG}" \
         > "${JOB_LOGS}/tracks.log" 2>&1 || {
-            record_error "${EPISODE_ID}" "tracks" "Tracking failed (see ${JOB_LOGS}/tracks.log)"
+            cp -a "${JOB_LOGS}/." "${DEST_LOG_DIR}/" 2>/dev/null || true
+            record_error "${EPISODE_ID}" "tracks" "Tracking failed (see ${DEST_LOG_DIR}/tracks.log)"
             record_status "failure" "${EPISODE_ID}" "tracks"
             rm -rf "${JOB_DIR}"
             return 1
@@ -288,6 +293,9 @@ process_episode_worker() {
     CLEANUP_END_MS=$(ts_ms)
     local CLEANUP_MS
     CLEANUP_MS=$(duration_ms "${CLEANUP_START_MS}" "${CLEANUP_END_MS}")
+
+    # Persist logs before cleanup removal
+    cp -a "${JOB_LOGS}/." "${DEST_LOG_DIR}/" 2>/dev/null || true
 
     local PIPE_END_MS
     PIPE_END_MS=$(ts_ms)

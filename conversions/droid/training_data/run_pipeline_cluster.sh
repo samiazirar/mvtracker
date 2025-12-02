@@ -209,6 +209,7 @@ process_episode_worker() {
     local WORKER_NUM=$2          # Worker number (0 to TOTAL_WORKERS-1)
     local WORKER_ID=$BASHPID     # Unique Process ID for isolation
     local PIPELINE_START=$(date +%s)
+    local DEST_LOG_DIR="${LOG_DIR}/${EPISODE_ID}"
     
     # Determine which GPU this worker should use
     # Workers are distributed round-robin across GPUs
@@ -226,7 +227,7 @@ process_episode_worker() {
     local JOB_LOGS="${JOB_DIR}/logs"
     local TEMP_CONFIG="${JOB_DIR}/config.yaml"
     
-    mkdir -p "${JOB_DATA}" "${JOB_OUTPUT}" "${JOB_LOGS}"
+    mkdir -p "${JOB_DATA}" "${JOB_OUTPUT}" "${JOB_LOGS}" "${DEST_LOG_DIR}"
 
     # Create Temp Config for this worker
     # We override 'droid_root', 'download_dir', and 'output_root' to point to fast local storage
@@ -255,7 +256,8 @@ process_episode_worker() {
         --output_dir "${JOB_DATA}" \
         --gcs_bucket "${GCS_BUCKET}" \
         > "${JOB_LOGS}/download.log" 2>&1 || {
-            record_error "${EPISODE_ID}" "download" "Download failed (see ${JOB_LOGS}/download.log)"
+            cp -a "${JOB_LOGS}/." "${DEST_LOG_DIR}/" 2>/dev/null || true
+            record_error "${EPISODE_ID}" "download" "Download failed (see ${DEST_LOG_DIR}/download.log)"
             record_status "failure" "${EPISODE_ID}" "download"
             rm -rf "${JOB_DIR}"
             return 1
@@ -274,7 +276,8 @@ process_episode_worker() {
         --episode_id "${EPISODE_ID}" \
         --config "${TEMP_CONFIG}" \
         > "${JOB_LOGS}/rgb_depth.log" 2>&1 || {
-            record_error "${EPISODE_ID}" "extract" "Extraction failed (see ${JOB_LOGS}/rgb_depth.log)"
+            cp -a "${JOB_LOGS}/." "${DEST_LOG_DIR}/" 2>/dev/null || true
+            record_error "${EPISODE_ID}" "extract" "Extraction failed (see ${DEST_LOG_DIR}/rgb_depth.log)"
             record_status "failure" "${EPISODE_ID}" "extract"
             rm -rf "${JOB_DIR}"
             return 1
@@ -292,7 +295,8 @@ process_episode_worker() {
         --episode_id "${EPISODE_ID}" \
         --config "${TEMP_CONFIG}" \
         > "${JOB_LOGS}/tracks.log" 2>&1 || {
-            record_error "${EPISODE_ID}" "tracks" "Tracking failed (see ${JOB_LOGS}/tracks.log)"
+            cp -a "${JOB_LOGS}/." "${DEST_LOG_DIR}/" 2>/dev/null || true
+            record_error "${EPISODE_ID}" "tracks" "Tracking failed (see ${DEST_LOG_DIR}/tracks.log)"
             record_status "failure" "${EPISODE_ID}" "tracks"
             rm -rf "${JOB_DIR}"
             return 1
@@ -313,6 +317,7 @@ process_episode_worker() {
     
     # Cleanup local scratch
     local CLEANUP_START=$(date +%s)
+    cp -a "${JOB_LOGS}/." "${DEST_LOG_DIR}/" 2>/dev/null || true
     rm -rf "${JOB_DIR}"
     local CLEANUP_END=$(date +%s)
     local CLEANUP_TIME=$((CLEANUP_END - CLEANUP_START))

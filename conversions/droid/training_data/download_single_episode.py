@@ -33,7 +33,8 @@ def parse_episode_id(episode_id: str) -> dict:
     second = match.group(4)
     
     dt = datetime.strptime(f"{date} {hour}:{minute}:{second}", "%Y-%m-%d %H:%M:%S")
-    timestamp_folder = dt.strftime("%a_%b_%d_%H:%M:%S_%Y")
+    # Use ctime-style format: space-padded day becomes underscore (e.g., "Jul  7" -> "Jul__7")
+    timestamp_folder = dt.strftime("%a_%b_%e_%H:%M:%S_%Y").replace(" ", "_")
     
     return {
         'lab': lab,

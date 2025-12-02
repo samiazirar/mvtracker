@@ -236,7 +236,7 @@ process_episode_worker() {
         --gcs_bucket "${GCS_BUCKET}" \
         > "${JOB_LOGS}/download.log" 2>&1 || {
             persist_job_logs
-            echo "[ERROR] Download failed for ${EPISODE_ID} (See ${JOB_LOGS}/download.log)"
+            echo "[ERROR] Download failed for ${EPISODE_ID} (See ${EPISODE_LOG_DIR}/download.log)"
             rm -rf "${JOB_DIR}"
             return 1
         }
@@ -255,7 +255,7 @@ process_episode_worker() {
         --config "${TEMP_CONFIG}" \
         > "${JOB_LOGS}/rgb_depth.log" 2>&1 || {
             persist_job_logs
-            echo "[ERROR] Extraction failed for ${EPISODE_ID} (See ${JOB_LOGS}/rgb_depth.log)"
+            echo "[ERROR] Extraction failed for ${EPISODE_ID} (See ${EPISODE_LOG_DIR}/rgb_depth.log)"
             rm -rf "${JOB_DIR}"
             return 1
         }
@@ -273,7 +273,7 @@ process_episode_worker() {
         --config "${TEMP_CONFIG}" \
         > "${JOB_LOGS}/tracks.log" 2>&1 || {
             persist_job_logs
-            echo "[ERROR] Tracking failed for ${EPISODE_ID} (See ${JOB_LOGS}/tracks.log)"
+            echo "[ERROR] Tracking failed for ${EPISODE_ID} (See ${EPISODE_LOG_DIR}/tracks.log)"
             rm -rf "${JOB_DIR}"
             return 1
         }

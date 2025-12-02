@@ -130,9 +130,10 @@ def get_relative_path_for_episode(episode_id: str, cam2base_data: dict) -> str:
     minute = match.group(3)
     second = match.group(4)
     
-    # Reconstruct timestamp folder
+    # Reconstruct timestamp folder using ctime-style format
+    # DROID uses space-padded days (e.g., "Jul  7" -> "Jul__7" when replacing spaces with underscores)
     dt = datetime.strptime(f"{date} {hour}:{minute}:{second}", "%Y-%m-%d %H:%M:%S")
-    timestamp_folder = dt.strftime("%a_%b_%d_%H:%M:%S_%Y")
+    timestamp_folder = dt.strftime("%a_%b_%e_%H:%M:%S_%Y").replace(" ", "_")
     
     # We don't know success/failure from just the ID, use success as default
     # The actual scripts will search for both
