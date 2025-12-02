@@ -95,6 +95,8 @@ while read -r EPISODE_ID; do
         echo "droid_root: \"${JOB_DATA}\""
         echo "download_dir: \"${JOB_DATA}\""
         echo "output_root: \"${JOB_OUTPUT}\""
+        echo "log_dir: \"${LOG_DIR}/${EPISODE_ID}\""
+        echo "cam2base_extrinsics_path: \"${CAM2BASE_PATH}\""
     } >> "${TEMP_CONFIG}"
 
     # --- BLOCK 1: DOWNLOAD ---

@@ -17,7 +17,8 @@
   "mounts": [
     // "source=/tmp/.X11-unix,target=/tmp/.X11-unix,type=bind",
     // "source=${localEnv:HOME}/.Xauthority,target=/root/.Xauthority,type=bind",
-    "source=/home/nfs/datasets/internal,target=/data,type=bind,consistency=cached,readonly=false",
+    "source=/home/nfs/datasets/external,target=/data,type=bind,consistency=cached,readonly=false",
+    "source=/home/nfs/datasets/internal,target=/internal,type=bind,consistency=cached,readonly=false",
     "source=${localEnv:HOME}/.ssh,target=/root/.ssh,type=bind,readonly",  // optional: forward host SSH keys for GitHub
     // "source=/home/nfs/datasets/internal,target=/workspace/external_data,type=bind,consistency=cached,readonly=false", 
     "source=${localEnv:HOME}/.codex,target=/root/.codex,type=bind"         // persist Codex auth from host
