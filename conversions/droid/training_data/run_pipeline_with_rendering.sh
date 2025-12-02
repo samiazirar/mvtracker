@@ -46,9 +46,10 @@ WORKERS_PER_GPU=${2:-${DROID_WORKERS_PER_GPU:-3}}
 NUM_GPUS=${3:-${DROID_NUM_GPUS:-0}}      # 0 = auto-detect
 
 CAM2BASE_PATH="/data/droid/calib_and_annot/droid/cam2base_extrinsic_superset.json"
-CONFIG_PATH="conversions/droid/training_data/config.yaml"
-SCRIPT_DIR="conversions/droid/training_data"
-LOG_DIR="logs/pipeline_$(date +%Y%m%d_%H%M%S)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_PATH="${SCRIPT_DIR}/config.yaml"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+LOG_DIR="${REPO_ROOT}/logs/pipeline_$(date +%Y%m%d_%H%M%S)"
 EPISODES_FILE="${LOG_DIR}/episodes.txt"
 TIMING_FILE="${LOG_DIR}/timing.csv"
 

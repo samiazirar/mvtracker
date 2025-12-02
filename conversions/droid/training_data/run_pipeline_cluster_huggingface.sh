@@ -24,26 +24,89 @@ LIMIT=${1:-10}
 WORKERS_PER_GPU=${2:-${DROID_WORKERS_PER_GPU:-3}}
 NUM_GPUS=${3:-${DROID_NUM_GPUS:-0}}      # 0 = auto-detect
 
-CAM2BASE_PATH="/data/droid/calib_and_annot/droid/cam2base_extrinsic_superset.json"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONFIG_PATH="${SCRIPT_DIR}/config.yaml"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
-LOG_DIR="${REPO_ROOT}/logs/pipeline_$(date +%Y%m%d_%H%M%S)"
+# Paths (all on fast /data storage)
+CAM2BASE_PATH="/data/cam2base_extrinsic_superset.json"
+CONFIG_PATH="conversions/droid/training_data/config.yaml"
+SCRIPT_DIR="conversions/droid/training_data"
+LOG_DIR="/data/logs/pipeline_$(date +%Y%m%d_%H%M%S)"
 EPISODES_FILE="${LOG_DIR}/episodes.txt"
 TIMING_FILE="${LOG_DIR}/timing.csv"
+STATUS_FILE="${LOG_DIR}/status.log"
+ERROR_LOG="${LOG_DIR}/errors.log"
+DEFAULT_INNER_FINGER_MESH="/data/robotiq_arg85_description/meshes/inner_finger_fine.STL"
 
 # GCS bucket for downloads
 GCS_BUCKET="gs://gresearch/robotics/droid_raw/1.0.1"
 
-# Storage Configuration
+# Storage Configuration - ALL ON FAST /data SSD
 # ----------------------------------------------------------------------------
-# FAST_LOCAL_DIR="/data/droid_scratch"     # Node-local fast storage (NVMe)
-FAST_LOCAL_DIR="droid_processed"
-PERMANENT_STORAGE_DIR="droid_processed" # Final destination for processed data
+FAST_LOCAL_DIR="/data/droid_scratch"      # Node-local fast storage (NVMe)
+STAGING_DIR="/data/droid_staging"          # Staging area before HF upload
 # ----------------------------------------------------------------------------
 
-## Finger mesh, no need to set on mashine
-# DEFAULT_INNER_FINGER_MESH="/workspace/third_party/robotiq_arg85_description/meshes/inner_finger_fine.STL"
+# Hugging Face Configuration
+# ----------------------------------------------------------------------------
+HF_REPO_ID="sazirarrwth99/trajectory_data"     # Your HF dataset repo
+HF_REPO_TYPE="dataset"                      # Type: dataset, model, or space
+# ----------------------------------------------------------------------------
+
+# Load HF_TOKEN from .env file explicitly
+ENV_FILE="/workspace/.env"
+if [ -f "${ENV_FILE}" ]; then
+    # Extract HF_TOKEN from .env file (handles quotes)
+    HF_TOKEN=$(grep -E '^HF_TOKEN=' "${ENV_FILE}" | sed 's/^HF_TOKEN=//; s/^"//; s/"$//')
+    if [ -z "${HF_TOKEN}" ]; then
+        echo "[ERROR] HF_TOKEN not found in ${ENV_FILE}"
+        echo "Please add: HF_TOKEN=\"hf_your_token_here\" to ${ENV_FILE}"
+        exit 1
+    fi
+    export HF_TOKEN
+    echo "[INFO] Loaded HF_TOKEN from ${ENV_FILE}"
+else
+    echo "[ERROR] .env file not found at ${ENV_FILE}"
+    exit 1
+fi
+
+# ----------------------------------------------------------------------------
+# CREATE HUGGINGFACE REPO IF IT DOESN'T EXIST
+# ----------------------------------------------------------------------------
+echo "[INFO] Ensuring HuggingFace repo exists: ${HF_REPO_ID}..."
+python3 << 'PYTHON_SCRIPT'
+import os
+from huggingface_hub import HfApi, create_repo
+from huggingface_hub.utils import RepositoryNotFoundError
+
+token = os.environ['HF_TOKEN']
+repo_id = os.environ.get('HF_REPO_ID', 'sazirarrwth99/trajectory_data')
+repo_type = os.environ.get('HF_REPO_TYPE', 'dataset')
+
+api = HfApi(token=token)
+
+try:
+    # Check if repo exists
+    api.repo_info(repo_id=repo_id, repo_type=repo_type)
+    print(f"[INFO] Repo '{repo_id}' already exists.")
+except RepositoryNotFoundError:
+    print(f"[INFO] Creating new {repo_type} repo: {repo_id}")
+    create_repo(
+        repo_id=repo_id,
+        repo_type=repo_type,
+        private=False,  # Set to True if you want a private repo
+        token=token,
+    )
+    print(f"[SUCCESS] Created repo: https://huggingface.co/datasets/{repo_id}")
+except Exception as e:
+    print(f"[ERROR] Failed to check/create repo: {e}")
+    exit(1)
+PYTHON_SCRIPT
+
+if [ $? -ne 0 ]; then
+    echo "[ERROR] Failed to create/verify HuggingFace repo"
+    exit 1
+fi
+export HF_REPO_ID HF_REPO_TYPE
+# ----------------------------------------------------------------------------
+
 
 
 # ----------------------------------------------------------------------------
@@ -152,8 +215,32 @@ fi
 GPU_LIST_STR=$(IFS=,; echo "${GPU_LIST[*]}")
 
 # Export variables for parallel workers
-export CAM2BASE_PATH CONFIG_PATH SCRIPT_DIR GCS_BUCKET FAST_LOCAL_DIR PERMANENT_STORAGE_DIR TIMING_FILE
+export CAM2BASE_PATH CONFIG_PATH SCRIPT_DIR GCS_BUCKET FAST_LOCAL_DIR STAGING_DIR TIMING_FILE DEFAULT_INNER_FINGER_MESH
 export NUM_GPUS WORKERS_PER_GPU GPU_LIST_STR
+export STATUS_FILE ERROR_LOG
+export HF_TOKEN HF_REPO_ID HF_REPO_TYPE
+
+record_status() {
+    local status=$1
+    local episode=$2
+    local stage=$3
+    (
+        flock -x 200
+        printf "%s,%s,%s,%s\n" "$(date +%s)" "${status}" "${episode}" "${stage}" >> "${STATUS_FILE}"
+    ) 200>"${STATUS_FILE}.lock"
+}
+
+record_error() {
+    local episode=$1
+    local stage=$2
+    local message=$3
+    (
+        flock -x 201
+        printf "[%s] %s | %s | %s\n" "$(date +'%Y-%m-%d %H:%M:%S')" "${episode}" "${stage}" "${message}" >> "${ERROR_LOG}"
+    ) 201>"${ERROR_LOG}.lock"
+}
+
+export -f record_status record_error
 
 # ============================================================================
 # SETUP
@@ -161,15 +248,16 @@ export NUM_GPUS WORKERS_PER_GPU GPU_LIST_STR
 
 mkdir -p "${LOG_DIR}"
 mkdir -p "${FAST_LOCAL_DIR}"
-mkdir -p "${PERMANENT_STORAGE_DIR}"
+mkdir -p "${STAGING_DIR}"
 
-echo "=== DROID Training Data Pipeline (Multi-GPU Parallel) ==="
+echo "=== DROID Training Data Pipeline (Multi-GPU Parallel + HuggingFace Upload) ==="
 echo "Limit: ${LIMIT}"
 echo "GPUs: ${NUM_GPUS} (${GPU_LIST_STR})"
 echo "Workers/GPU: ${WORKERS_PER_GPU}"
 echo "Total Workers: ${TOTAL_WORKERS}"
 echo "Local Scratch: ${FAST_LOCAL_DIR}"
-echo "Final Output: ${PERMANENT_STORAGE_DIR}"
+echo "Staging Dir: ${STAGING_DIR}"
+echo "HuggingFace Repo: ${HF_REPO_ID}"
 echo "Log dir: ${LOG_DIR}"
 echo ""
 
@@ -185,7 +273,7 @@ process_episode_worker() {
     local WORKER_NUM=$2          # Worker number (0 to TOTAL_WORKERS-1)
     local WORKER_ID=$BASHPID     # Unique Process ID for isolation
     local PIPELINE_START=$(date +%s)
-    local EPISODE_LOG_DIR="${LOG_DIR}/${EPISODE_ID}"
+    local DEST_LOG_DIR="${LOG_DIR}/${EPISODE_ID}"
     
     # Determine which GPU this worker should use
     # Workers are distributed round-robin across GPUs
@@ -202,13 +290,8 @@ process_episode_worker() {
     local JOB_OUTPUT="${JOB_DIR}/output"
     local JOB_LOGS="${JOB_DIR}/logs"
     local TEMP_CONFIG="${JOB_DIR}/config.yaml"
-    local persist_job_logs
-    persist_job_logs() {
-        mkdir -p "${EPISODE_LOG_DIR}"
-        rsync -a "${JOB_LOGS}/" "${EPISODE_LOG_DIR}/" 2>/dev/null || true
-    }
     
-    mkdir -p "${JOB_DATA}" "${JOB_OUTPUT}" "${JOB_LOGS}"
+    mkdir -p "${JOB_DATA}" "${JOB_OUTPUT}" "${JOB_LOGS}" "${DEST_LOG_DIR}"
 
     # Create Temp Config for this worker
     # We override 'droid_root', 'download_dir', and 'output_root' to point to fast local storage
@@ -220,10 +303,11 @@ process_episode_worker() {
     echo "output_root: \"${JOB_OUTPUT}\"" >> "${TEMP_CONFIG}"
     echo "log_dir: \"${LOG_DIR}/${EPISODE_ID}\"" >> "${TEMP_CONFIG}"
     echo "cam2base_extrinsics_path: \"${CAM2BASE_PATH}\"" >> "${TEMP_CONFIG}"
+    echo "finger_mesh_path: \"${DEFAULT_INNER_FINGER_MESH}\"" >> "${TEMP_CONFIG}"
+
+    # Prep timing (directory + config setup)
     local PREP_END=$(date +%s)
     local PREP_TIME=$((PREP_END - PIPELINE_START))
-    
-    echo "[Worker ${WORKER_NUM} | GPU ${ASSIGNED_GPU} | PID ${WORKER_ID}] Starting: ${EPISODE_ID}"
 
     # ------------------------------------------------------------------------
     # STEP A: Download Episode (To Fast Local /data)
@@ -236,8 +320,9 @@ process_episode_worker() {
         --output_dir "${JOB_DATA}" \
         --gcs_bucket "${GCS_BUCKET}" \
         > "${JOB_LOGS}/download.log" 2>&1 || {
-            persist_job_logs
-            echo "[ERROR] Download failed for ${EPISODE_ID} (See ${EPISODE_LOG_DIR}/download.log)"
+            cp -a "${JOB_LOGS}/." "${DEST_LOG_DIR}/" 2>/dev/null || true
+            record_error "${EPISODE_ID}" "download" "Download failed (see ${DEST_LOG_DIR}/download.log)"
+            record_status "failure" "${EPISODE_ID}" "download"
             rm -rf "${JOB_DIR}"
             return 1
         }
@@ -255,8 +340,9 @@ process_episode_worker() {
         --episode_id "${EPISODE_ID}" \
         --config "${TEMP_CONFIG}" \
         > "${JOB_LOGS}/rgb_depth.log" 2>&1 || {
-            persist_job_logs
-            echo "[ERROR] Extraction failed for ${EPISODE_ID} (See ${EPISODE_LOG_DIR}/rgb_depth.log)"
+            cp -a "${JOB_LOGS}/." "${DEST_LOG_DIR}/" 2>/dev/null || true
+            record_error "${EPISODE_ID}" "extract" "Extraction failed (see ${DEST_LOG_DIR}/rgb_depth.log)"
+            record_status "failure" "${EPISODE_ID}" "extract"
             rm -rf "${JOB_DIR}"
             return 1
         }
@@ -273,8 +359,9 @@ process_episode_worker() {
         --episode_id "${EPISODE_ID}" \
         --config "${TEMP_CONFIG}" \
         > "${JOB_LOGS}/tracks.log" 2>&1 || {
-            persist_job_logs
-            echo "[ERROR] Tracking failed for ${EPISODE_ID} (See ${EPISODE_LOG_DIR}/tracks.log)"
+            cp -a "${JOB_LOGS}/." "${DEST_LOG_DIR}/" 2>/dev/null || true
+            record_error "${EPISODE_ID}" "tracks" "Tracking failed (see ${DEST_LOG_DIR}/tracks.log)"
+            record_status "failure" "${EPISODE_ID}" "tracks"
             rm -rf "${JOB_DIR}"
             return 1
         }
@@ -283,19 +370,42 @@ process_episode_worker() {
     local TRACKS_TIME=$((TRACKS_END - TRACKS_START))
     
     # ------------------------------------------------------------------------
-    # STEP D: Move Results & Cleanup
+    # STEP D: Upload to HuggingFace & Cleanup
     # ------------------------------------------------------------------------
-    # Sync the generated output folder structure to permanent storage
-    # rsync is safer than cp for merging directory trees
+    # Upload directly to HuggingFace instead of local permanent storage
     local SYNC_START=$(date +%s)
-    rsync -a "${JOB_OUTPUT}/" "${PERMANENT_STORAGE_DIR}/"
+    
+    # Use huggingface_hub CLI to upload the episode folder
+    # The folder structure will be preserved in the dataset repo
+    python -c "
+import os
+from huggingface_hub import HfApi
+
+api = HfApi(token=os.environ['HF_TOKEN'])
+
+# Upload the entire output folder for this episode
+api.upload_folder(
+    folder_path='${JOB_OUTPUT}',
+    repo_id='${HF_REPO_ID}',
+    repo_type='${HF_REPO_TYPE}',
+    commit_message='Add episode ${EPISODE_ID}',
+    run_as_future=False,
+)
+print('[HF] Uploaded ${EPISODE_ID} to ${HF_REPO_ID}')
+" > "${JOB_LOGS}/hf_upload.log" 2>&1 || {
+        cp -a "${JOB_LOGS}/." "${DEST_LOG_DIR}/" 2>/dev/null || true
+        record_error "${EPISODE_ID}" "hf_upload" "HuggingFace upload failed (see ${DEST_LOG_DIR}/hf_upload.log)"
+        record_status "failure" "${EPISODE_ID}" "hf_upload"
+        rm -rf "${JOB_DIR}"
+        return 1
+    }
+    
     local SYNC_END=$(date +%s)
     local SYNC_TIME=$((SYNC_END - SYNC_START))
-
-    persist_job_logs
     
-    # Cleanup local scratch
+    # Cleanup local scratch (no permanent local storage needed)
     local CLEANUP_START=$(date +%s)
+    cp -a "${JOB_LOGS}/." "${DEST_LOG_DIR}/" 2>/dev/null || true
     rm -rf "${JOB_DIR}"
     local CLEANUP_END=$(date +%s)
     local CLEANUP_TIME=$((CLEANUP_END - CLEANUP_START))
@@ -308,8 +418,7 @@ process_episode_worker() {
     
     # Atomic append to CSV (with GPU info)
     echo "${EPISODE_ID},${ASSIGNED_GPU},${PREP_TIME},${DOWNLOAD_TIME},${RGB_DEPTH_TIME},${TRACKS_TIME},${SYNC_TIME},${CLEANUP_TIME},${TOTAL_TIME}" >> "${TIMING_FILE}"
-    
-    echo "[Worker ${WORKER_NUM} | GPU ${ASSIGNED_GPU}] Finished: ${EPISODE_ID} (Total: ${TOTAL_TIME}s)"
+    record_status "success" "${EPISODE_ID}" "complete"
 }
 
 export -f process_episode_worker
@@ -332,13 +441,22 @@ progress_monitor() {
     local total=$1
     local interval=${2:-5}
     while true; do
-        local done=$(( $(wc -l < "${TIMING_FILE}") - 1 ))
-        if [ "${done}" -lt 0 ]; then done=0; fi
+        local success=0
+        local failure=0
+        if [ -f "${STATUS_FILE}" ]; then
+            success=$(awk -F, '$2=="success"{c++} END{print c+0}' "${STATUS_FILE}")
+            failure=$(awk -F, '$2=="failure"{c++} END{print c+0}' "${STATUS_FILE}")
+        fi
+        local done=$((success + failure))
         local percent=0
         if [ "${total}" -gt 0 ]; then
             percent=$(( 100 * done / total ))
         fi
-        printf "\r[progress] %d/%d episodes ( %d%% )" "${done}" "${total}" "${percent}"
+        printf "\r[progress] %d/%d (%d%%) | success: %d/%d | failures: %d/%d | workers: %d (per GPU: %d; GPUs: %s)" \
+            "${done}" "${total}" "${percent}" \
+            "${success}" "${total}" \
+            "${failure}" "${total}" \
+            "${TOTAL_WORKERS}" "${WORKERS_PER_GPU}" "${GPU_LIST_STR}"
         sleep "${interval}"
     done
 }
@@ -371,6 +489,7 @@ echo "============================================================"
 
 start_progress_monitor
 
+set +e
 # Use GNU parallel if available (better load balancing), otherwise fallback to xargs
 if command -v parallel &> /dev/null; then
     echo "Using GNU parallel for optimal load balancing..."
@@ -404,6 +523,8 @@ else
     
     cat "${EPISODES_FILE}" | xargs -P "${TOTAL_WORKERS}" -I {} bash -c 'process_episode_with_counter "$@"' _ {}
 fi
+PIPELINE_EXIT_CODE=$?
+set -e
 
 stop_progress_monitor
 
@@ -415,6 +536,19 @@ echo ""
 echo "============================================================"
 echo "PIPELINE COMPLETE"
 echo "============================================================"
+SUCCESS_COUNT=0
+FAILURE_COUNT=0
+if [ -f "${STATUS_FILE}" ]; then
+    SUCCESS_COUNT=$(awk -F, '$2=="success"{c++} END{print c+0}' "${STATUS_FILE}")
+    FAILURE_COUNT=$(awk -F, '$2=="failure"{c++} END{print c+0}' "${STATUS_FILE}")
+fi
+echo "Successes: ${SUCCESS_COUNT}/${EPISODE_COUNT}"
+echo "Failures : ${FAILURE_COUNT}/${EPISODE_COUNT}"
+if [ -s "${ERROR_LOG}" ]; then
+    echo "Failure details: ${ERROR_LOG}"
+fi
+
+exit "${PIPELINE_EXIT_CODE}"
 
 PROCESSED_COUNT=$(wc -l < "${TIMING_FILE}")
 # Adjust for header line
@@ -425,7 +559,7 @@ echo "GPUs used: ${NUM_GPUS} (${GPU_LIST_STR})"
 echo "Workers per GPU: ${WORKERS_PER_GPU}"
 echo "Total workers: ${TOTAL_WORKERS}"
 echo "Timing log: ${TIMING_FILE}"
-echo "Output dir: ${PERMANENT_STORAGE_DIR}"
+echo "HuggingFace Repo: ${HF_REPO_ID}"
 
 if [ "${PROCESSED_COUNT}" -gt 0 ]; then
     # Calculate averages and per-GPU statistics using awk from the CSV
