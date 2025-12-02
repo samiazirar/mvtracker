@@ -100,4 +100,68 @@ if [ -f "/usr/lib/x86_64-linux-gnu/libturbojpeg.so.0" ]; then
 fi
 ldconfig
 
+
+# [Install libcuda for enroot containers]
+# --- RUN INSIDE CONTAINER (root@...) ---
+set -e
+
+echo "=== 1. Setup & Detection ==="
+# Remove any broken/32-bit links from previous attempts
+rm -f /usr/lib/x86_64-linux-gnu/libnvidia-encode.so*
+rm -f /usr/lib/x86_64-linux-gnu/libnvcuvid.so*
+
+# Detect driver version from host kernel
+DRIVER_VERSION=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader)
+echo "   -> Detected Driver: $DRIVER_VERSION"
+
+echo "=== 2. Downloading NVIDIA Installer ==="
+# Download the exact driver match (contains the missing files)
+wget -q "https://us.download.nvidia.com/tesla/${DRIVER_VERSION}/NVIDIA-Linux-x86_64-${DRIVER_VERSION}.run" -O nvidia_driver.run
+chmod +x nvidia_driver.run
+
+echo "=== 3. Extracting Files ==="
+./nvidia_driver.run --extract-only --target extract_dir > /dev/null
+
+echo "=== 4. Installing 64-BIT Libraries ==="
+
+# Function to find and install ONLY the 64-bit version
+install_64bit_lib() {
+    local lib_name="$1"
+    local search_name="${lib_name}.${DRIVER_VERSION}"
+    local found=0
+    
+    # Find all files with this name
+    local candidates=$(find extract_dir -name "$search_name")
+    
+    for f in $candidates; do
+        # Check if file is 64-bit (x86-64) using 'file' command
+        if file -L "$f" | grep -q "x86-64"; then
+            echo "   -> Installing 64-bit: $lib_name"
+            cp "$f" /usr/lib/x86_64-linux-gnu/
+            
+            # Create necessary symlinks
+            ln -sf "/usr/lib/x86_64-linux-gnu/$search_name" "/usr/lib/x86_64-linux-gnu/${lib_name}.1"
+            ln -sf "/usr/lib/x86_64-linux-gnu/$search_name" "/usr/lib/x86_64-linux-gnu/${lib_name}"
+            found=1
+            break
+        fi
+    done
+    
+    if [ "$found" -eq 0 ]; then
+        echo "   [ERROR] Could not find 64-bit version of $lib_name"
+        exit 1
+    fi
+}
+
+# Install both missing Video Codec libraries
+install_64bit_lib "libnvidia-encode.so"
+install_64bit_lib "libnvcuvid.so"
+
+echo "=== 5. Finalizing ==="
+ldconfig
+rm -rf nvidia_driver.run extract_dir
+
+echo "=== VERIFICATION ==="
+python3 -c "import pyzed.sl; print('SUCCESS: ZED SDK Imported!')"
+
 echo "[post-create] Done."

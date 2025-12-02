@@ -1,4 +1,9 @@
-enroot import -o ~/depth_tracks_generator.sqsh docker://nvidia/cuda:12.2.2-runtime-ubuntu22.04
+<!-- nvidia/cuda:12.2.2-runtime-ubuntu22.04 -->
+
+
+enroot import -o ~/depth_tracks_generator.sqsh docker://stereolabs/zed:5.0-gl-devel-cuda11.8-ubuntu22.04
+
+export NVIDIA_DRIVER_CAPABILITIES=all
 enroot create --force --name depth_tracks_generator ~/depth_tracks_generator.sqsh
 enroot start -r -w depth_tracks_generator
 
@@ -17,3 +22,6 @@ git lfs install
 git clone https://github.com/samiazirar/mvtracker.git
 cd mvtracker
 bash .devcontainer/generate_tracks/post-create.sh
+
+
+symlink in ld config phad toolkit per hand angeben
