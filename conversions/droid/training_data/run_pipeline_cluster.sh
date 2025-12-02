@@ -31,6 +31,8 @@ SCRIPT_DIR="conversions/droid/training_data"
 LOG_DIR="logs/pipeline_$(date +%Y%m%d_%H%M%S)"
 EPISODES_FILE="${LOG_DIR}/episodes.txt"
 TIMING_FILE="${LOG_DIR}/timing.csv"
+STATUS_FILE="${LOG_DIR}/status.log"
+ERROR_LOG="${LOG_DIR}/errors.log"
 DEFAULT_INNER_FINGER_MESH="/data/robotiq_arg85_description/meshes/inner_finger_fine.STL"
 
 # GCS bucket for downloads
@@ -153,6 +155,29 @@ GPU_LIST_STR=$(IFS=,; echo "${GPU_LIST[*]}")
 # Export variables for parallel workers
 export CAM2BASE_PATH CONFIG_PATH SCRIPT_DIR GCS_BUCKET FAST_LOCAL_DIR PERMANENT_STORAGE_DIR TIMING_FILE DEFAULT_INNER_FINGER_MESH
 export NUM_GPUS WORKERS_PER_GPU GPU_LIST_STR
+export STATUS_FILE ERROR_LOG
+
+record_status() {
+    local status=$1
+    local episode=$2
+    local stage=$3
+    (
+        flock -x 200
+        printf "%s,%s,%s,%s\n" "$(date +%s)" "${status}" "${episode}" "${stage}" >> "${STATUS_FILE}"
+    ) 200>"${STATUS_FILE}.lock"
+}
+
+record_error() {
+    local episode=$1
+    local stage=$2
+    local message=$3
+    (
+        flock -x 201
+        printf "[%s] %s | %s | %s\n" "$(date +'%Y-%m-%d %H:%M:%S')" "${episode}" "${stage}" "${message}" >> "${ERROR_LOG}"
+    ) 201>"${ERROR_LOG}.lock"
+}
+
+export -f record_status record_error
 
 # ============================================================================
 # SETUP
@@ -215,8 +240,6 @@ process_episode_worker() {
     echo "finger_mesh_path: \"${DEFAULT_INNER_FINGER_MESH}\"" >> "${TEMP_CONFIG}"
     # Start Timing
     local EPISODE_START=$(date +%s)
-    
-    echo "[Worker ${WORKER_NUM} | GPU ${ASSIGNED_GPU} | PID ${WORKER_ID}] Starting: ${EPISODE_ID}"
 
     # ------------------------------------------------------------------------
     # STEP A: Download Episode (To Fast Local /data)
@@ -229,7 +252,8 @@ process_episode_worker() {
         --output_dir "${JOB_DATA}" \
         --gcs_bucket "${GCS_BUCKET}" \
         > "${JOB_LOGS}/download.log" 2>&1 || {
-            echo "[ERROR] Download failed for ${EPISODE_ID} (See ${JOB_LOGS}/download.log)"
+            record_error "${EPISODE_ID}" "download" "Download failed (see ${JOB_LOGS}/download.log)"
+            record_status "failure" "${EPISODE_ID}" "download"
             rm -rf "${JOB_DIR}"
             return 1
         }
@@ -247,7 +271,8 @@ process_episode_worker() {
         --episode_id "${EPISODE_ID}" \
         --config "${TEMP_CONFIG}" \
         > "${JOB_LOGS}/rgb_depth.log" 2>&1 || {
-            echo "[ERROR] Extraction failed for ${EPISODE_ID} (See ${JOB_LOGS}/rgb_depth.log)"
+            record_error "${EPISODE_ID}" "extract" "Extraction failed (see ${JOB_LOGS}/rgb_depth.log)"
+            record_status "failure" "${EPISODE_ID}" "extract"
             rm -rf "${JOB_DIR}"
             return 1
         }
@@ -264,7 +289,8 @@ process_episode_worker() {
         --episode_id "${EPISODE_ID}" \
         --config "${TEMP_CONFIG}" \
         > "${JOB_LOGS}/tracks.log" 2>&1 || {
-            echo "[ERROR] Tracking failed for ${EPISODE_ID} (See ${JOB_LOGS}/tracks.log)"
+            record_error "${EPISODE_ID}" "tracks" "Tracking failed (see ${JOB_LOGS}/tracks.log)"
+            record_status "failure" "${EPISODE_ID}" "tracks"
             rm -rf "${JOB_DIR}"
             return 1
         }
@@ -290,8 +316,7 @@ process_episode_worker() {
     
     # Atomic append to CSV (with GPU info)
     echo "${EPISODE_ID},${ASSIGNED_GPU},${DOWNLOAD_TIME},${RGB_DEPTH_TIME},${TRACKS_TIME},${TOTAL_TIME}" >> "${TIMING_FILE}"
-    
-    echo "[Worker ${WORKER_NUM} | GPU ${ASSIGNED_GPU}] Finished: ${EPISODE_ID} (Total: ${TOTAL_TIME}s)"
+    record_status "success" "${EPISODE_ID}" "complete"
 }
 
 export -f process_episode_worker
@@ -314,13 +339,22 @@ progress_monitor() {
     local total=$1
     local interval=${2:-5}
     while true; do
-        local done=$(( $(wc -l < "${TIMING_FILE}") - 1 ))
-        if [ "${done}" -lt 0 ]; then done=0; fi
+        local success=0
+        local failure=0
+        if [ -f "${STATUS_FILE}" ]; then
+            success=$(awk -F, '$2=="success"{c++} END{print c+0}' "${STATUS_FILE}")
+            failure=$(awk -F, '$2=="failure"{c++} END{print c+0}' "${STATUS_FILE}")
+        fi
+        local done=$((success + failure))
         local percent=0
         if [ "${total}" -gt 0 ]; then
             percent=$(( 100 * done / total ))
         fi
-        printf "\r[progress] %d/%d episodes ( %d%% )" "${done}" "${total}" "${percent}"
+        printf "\r[progress] %d/%d (%d%%) | success: %d/%d | failures: %d/%d | workers: %d (per GPU: %d; GPUs: %s)" \
+            "${done}" "${total}" "${percent}" \
+            "${success}" "${total}" \
+            "${failure}" "${total}" \
+            "${TOTAL_WORKERS}" "${WORKERS_PER_GPU}" "${GPU_LIST_STR}"
         sleep "${interval}"
     done
 }
@@ -353,6 +387,7 @@ echo "============================================================"
 
 start_progress_monitor
 
+set +e
 # Use GNU parallel if available (better load balancing), otherwise fallback to xargs
 if command -v parallel &> /dev/null; then
     echo "Using GNU parallel for optimal load balancing..."
@@ -386,6 +421,8 @@ else
     
     cat "${EPISODES_FILE}" | xargs -P "${TOTAL_WORKERS}" -I {} bash -c 'process_episode_with_counter "$@"' _ {}
 fi
+PIPELINE_EXIT_CODE=$?
+set -e
 
 stop_progress_monitor
 
@@ -397,6 +434,19 @@ echo ""
 echo "============================================================"
 echo "PIPELINE COMPLETE"
 echo "============================================================"
+SUCCESS_COUNT=0
+FAILURE_COUNT=0
+if [ -f "${STATUS_FILE}" ]; then
+    SUCCESS_COUNT=$(awk -F, '$2=="success"{c++} END{print c+0}' "${STATUS_FILE}")
+    FAILURE_COUNT=$(awk -F, '$2=="failure"{c++} END{print c+0}' "${STATUS_FILE}")
+fi
+echo "Successes: ${SUCCESS_COUNT}/${EPISODE_COUNT}"
+echo "Failures : ${FAILURE_COUNT}/${EPISODE_COUNT}"
+if [ -s "${ERROR_LOG}" ]; then
+    echo "Failure details: ${ERROR_LOG}"
+fi
+
+exit "${PIPELINE_EXIT_CODE}"
 
 PROCESSED_COUNT=$(wc -l < "${TIMING_FILE}")
 # Adjust for header line

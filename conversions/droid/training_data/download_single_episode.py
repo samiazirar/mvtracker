@@ -13,6 +13,11 @@ import sys
 from datetime import datetime
 
 
+def format_timestamp_folder(dt: datetime) -> str:
+    """Format timestamp folder to match DROID GCS layout (space-padded day)."""
+    return dt.strftime("%a_%b_%e_%H:%M:%S_%Y").replace(" ", "_")
+
+
 def parse_episode_id(episode_id: str) -> dict:
     """Parse episode ID into components."""
     parts = episode_id.split('+')
@@ -31,10 +36,9 @@ def parse_episode_id(episode_id: str) -> dict:
     hour = match.group(2)
     minute = match.group(3)
     second = match.group(4)
-    
     dt = datetime.strptime(f"{date} {hour}:{minute}:{second}", "%Y-%m-%d %H:%M:%S")
-    timestamp_folder = dt.strftime("%a_%b_%d_%H:%M:%S_%Y")
-    
+    timestamp_folder = format_timestamp_folder(dt)
+
     return {
         'lab': lab,
         'hash': episode_hash,
