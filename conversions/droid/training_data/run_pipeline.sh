@@ -173,7 +173,7 @@ echo "Log dir: ${LOG_DIR}"
 echo ""
 
 # Initialize timing CSV
-echo "episode_id,gpu_id,download_time_sec,rgb_depth_time_sec,tracks_time_sec,total_time_sec" > "${TIMING_FILE}"
+echo "episode_id,gpu_id,prep_time_sec,download_time_sec,rgb_depth_time_sec,tracks_time_sec,sync_time_sec,cleanup_time_sec,total_time_sec" > "${TIMING_FILE}"
 
 # ============================================================================
 # WORKER FUNCTION (Multi-GPU Parallel Execution)
@@ -183,6 +183,8 @@ process_episode_worker() {
     local EPISODE_ID=$1
     local WORKER_NUM=$2          # Worker number (0 to TOTAL_WORKERS-1)
     local WORKER_ID=$BASHPID     # Unique Process ID for isolation
+    local PIPELINE_START=$(date +%s)
+    local EPISODE_LOG_DIR="${LOG_DIR}/${EPISODE_ID}"
     
     # Determine which GPU this worker should use
     # Workers are distributed round-robin across GPUs
@@ -199,6 +201,11 @@ process_episode_worker() {
     local JOB_OUTPUT="${JOB_DIR}/output"
     local JOB_LOGS="${JOB_DIR}/logs"
     local TEMP_CONFIG="${JOB_DIR}/config.yaml"
+    local persist_job_logs
+    persist_job_logs() {
+        mkdir -p "${EPISODE_LOG_DIR}"
+        rsync -a "${JOB_LOGS}/" "${EPISODE_LOG_DIR}/" 2>/dev/null || true
+    }
     
     mkdir -p "${JOB_DATA}" "${JOB_OUTPUT}" "${JOB_LOGS}"
 
@@ -212,7 +219,8 @@ process_episode_worker() {
     echo "output_root: \"${JOB_OUTPUT}\"" >> "${TEMP_CONFIG}"
     echo "log_dir: \"${LOG_DIR}/${EPISODE_ID}\"" >> "${TEMP_CONFIG}"
     echo "cam2base_extrinsics_path: \"${CAM2BASE_PATH}\"" >> "${TEMP_CONFIG}"
-    local EPISODE_START=$(date +%s)
+    local PREP_END=$(date +%s)
+    local PREP_TIME=$((PREP_END - PIPELINE_START))
     
     echo "[Worker ${WORKER_NUM} | GPU ${ASSIGNED_GPU} | PID ${WORKER_ID}] Starting: ${EPISODE_ID}"
 
@@ -227,6 +235,7 @@ process_episode_worker() {
         --output_dir "${JOB_DATA}" \
         --gcs_bucket "${GCS_BUCKET}" \
         > "${JOB_LOGS}/download.log" 2>&1 || {
+            persist_job_logs
             echo "[ERROR] Download failed for ${EPISODE_ID} (See ${JOB_LOGS}/download.log)"
             rm -rf "${JOB_DIR}"
             return 1
@@ -245,6 +254,7 @@ process_episode_worker() {
         --episode_id "${EPISODE_ID}" \
         --config "${TEMP_CONFIG}" \
         > "${JOB_LOGS}/rgb_depth.log" 2>&1 || {
+            persist_job_logs
             echo "[ERROR] Extraction failed for ${EPISODE_ID} (See ${JOB_LOGS}/rgb_depth.log)"
             rm -rf "${JOB_DIR}"
             return 1
@@ -262,6 +272,7 @@ process_episode_worker() {
         --episode_id "${EPISODE_ID}" \
         --config "${TEMP_CONFIG}" \
         > "${JOB_LOGS}/tracks.log" 2>&1 || {
+            persist_job_logs
             echo "[ERROR] Tracking failed for ${EPISODE_ID} (See ${JOB_LOGS}/tracks.log)"
             rm -rf "${JOB_DIR}"
             return 1
@@ -275,19 +286,27 @@ process_episode_worker() {
     # ------------------------------------------------------------------------
     # Sync the generated output folder structure to permanent storage
     # rsync is safer than cp for merging directory trees
+    local SYNC_START=$(date +%s)
     rsync -a "${JOB_OUTPUT}/" "${PERMANENT_STORAGE_DIR}/"
+    local SYNC_END=$(date +%s)
+    local SYNC_TIME=$((SYNC_END - SYNC_START))
+
+    persist_job_logs
     
     # Cleanup local scratch
+    local CLEANUP_START=$(date +%s)
     rm -rf "${JOB_DIR}"
+    local CLEANUP_END=$(date +%s)
+    local CLEANUP_TIME=$((CLEANUP_END - CLEANUP_START))
     
     # ------------------------------------------------------------------------
     # Record Timing
     # ------------------------------------------------------------------------
     local EPISODE_END=$(date +%s)
-    local TOTAL_TIME=$((EPISODE_END - EPISODE_START))
+    local TOTAL_TIME=$((EPISODE_END - PIPELINE_START))
     
     # Atomic append to CSV (with GPU info)
-    echo "${EPISODE_ID},${ASSIGNED_GPU},${DOWNLOAD_TIME},${RGB_DEPTH_TIME},${TRACKS_TIME},${TOTAL_TIME}" >> "${TIMING_FILE}"
+    echo "${EPISODE_ID},${ASSIGNED_GPU},${PREP_TIME},${DOWNLOAD_TIME},${RGB_DEPTH_TIME},${TRACKS_TIME},${SYNC_TIME},${CLEANUP_TIME},${TOTAL_TIME}" >> "${TIMING_FILE}"
     
     echo "[Worker ${WORKER_NUM} | GPU ${ASSIGNED_GPU}] Finished: ${EPISODE_ID} (Total: ${TOTAL_TIME}s)"
 }
@@ -410,14 +429,17 @@ echo "Output dir: ${PERMANENT_STORAGE_DIR}"
 if [ "${PROCESSED_COUNT}" -gt 0 ]; then
     # Calculate averages and per-GPU statistics using awk from the CSV
     awk -F',' 'NR>1 {
-        sum_dl+=$3; sum_rgb+=$4; sum_tracks+=$5; sum_total+=$6; count++;
-        gpu_count[$2]++; gpu_time[$2]+=$6
+        sum_prep+=$3; sum_dl+=$4; sum_rgb+=$5; sum_tracks+=$6; sum_sync+=$7; sum_cleanup+=$8; sum_total+=$9; count++;
+        gpu_count[$2]++; gpu_time[$2]+=$9
     } END {
         if (count > 0) {
             print "\nFinal Averages:";
+            printf "  Prep:       %.1fs\n", sum_prep/count;
             printf "  Download:   %.1fs\n", sum_dl/count;
             printf "  RGB/Depth:  %.1fs\n", sum_rgb/count;
             printf "  Tracks:     %.1fs\n", sum_tracks/count;
+            printf "  Sync:       %.1fs\n", sum_sync/count;
+            printf "  Cleanup:    %.1fs\n", sum_cleanup/count;
             printf "  Total:      %.1fs\n", sum_total/count;
             
             print "\nPer-GPU Statistics:";
