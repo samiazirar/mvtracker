@@ -14,12 +14,6 @@ import json
 import os
 import sys
 from collections import defaultdict
-from datetime import datetime
-
-
-def format_timestamp_folder(dt: datetime) -> str:
-    """Format timestamp folder to match DROID GCS layout (space-padded day)."""
-    return dt.strftime("%a_%b_%e_%H:%M:%S_%Y").replace(" ", "_")
 
 
 def load_cam2base(cam2base_path: str) -> dict:
@@ -117,6 +111,8 @@ def get_relative_path_for_episode(episode_id: str, cam2base_data: dict) -> str:
     Returns path like: AUTOLab/success/2023-08-18/Fri_Aug_18_12:01:10_2023
     """
     import re
+    from datetime import datetime
+    
     parts = episode_id.split('+')
     if len(parts) != 3:
         return None
@@ -136,7 +132,7 @@ def get_relative_path_for_episode(episode_id: str, cam2base_data: dict) -> str:
     
     # Reconstruct timestamp folder
     dt = datetime.strptime(f"{date} {hour}:{minute}:{second}", "%Y-%m-%d %H:%M:%S")
-    timestamp_folder = format_timestamp_folder(dt)
+    timestamp_folder = dt.strftime("%a_%b_%d_%H:%M:%S_%Y")
     
     # We don't know success/failure from just the ID, use success as default
     # The actual scripts will search for both
