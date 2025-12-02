@@ -164,4 +164,13 @@ rm -rf nvidia_driver.run extract_dir
 echo "=== VERIFICATION ==="
 python3 -c "import pyzed.sl; print('SUCCESS: ZED SDK Imported!')"
 
+
+echo "[Download] Robotiq Gripper if missing..."
+
+if [ ! -d "/data/third_party/robotiq_arg85_description" ]; then
+    echo "loading the model for the gripper..."
+    cd /data/
+    git clone https://github.com/a-price/robotiq_arg85_description.git 
+fi
+
 echo "[post-create] Done."

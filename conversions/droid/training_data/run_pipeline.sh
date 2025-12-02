@@ -41,6 +41,8 @@ FAST_LOCAL_DIR="droid_processed"
 PERMANENT_STORAGE_DIR="droid_processed" # Final destination for processed data
 # ----------------------------------------------------------------------------
 
+## Finger mesh, no need to set on mashine
+# DEFAULT_INNER_FINGER_MESH="/workspace/third_party/robotiq_arg85_description/meshes/inner_finger_fine.STL"
 
 
 # ----------------------------------------------------------------------------
@@ -208,8 +210,8 @@ process_episode_worker() {
     echo "droid_root: \"${JOB_DATA}\"" >> "${TEMP_CONFIG}"
     echo "download_dir: \"${JOB_DATA}\"" >> "${TEMP_CONFIG}"
     echo "output_root: \"${JOB_OUTPUT}\"" >> "${TEMP_CONFIG}"
-
-    # Start Timing
+    echo "log_dir: \"${LOG_DIR}/${EPISODE_ID}\"" >> "${TEMP_CONFIG}"
+    echo "cam2base_extrinsics_path: \"${CAM2BASE_PATH}\"" >> "${TEMP_CONFIG}"
     local EPISODE_START=$(date +%s)
     
     echo "[Worker ${WORKER_NUM} | GPU ${ASSIGNED_GPU} | PID ${WORKER_ID}] Starting: ${EPISODE_ID}"

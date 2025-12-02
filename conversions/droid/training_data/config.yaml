@@ -5,6 +5,7 @@
 droid_root: "/data/droid/data/droid_raw/1.0.1"
 cam2base_extrinsics_path: "/data/droid/calib_and_annot/droid/cam2base_extrinsic_superset.json"
 
+finger_mesh_path: "/data/third_party/robotiq_arg85_description/meshes/inner_finger_fine.STL"
 # Download directory (for episodes downloaded from GCS)
 download_dir: "./droid_downloads"
 

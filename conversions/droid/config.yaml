@@ -31,6 +31,7 @@ icp_num_frames: 10     # Number of frames to sample for ICP optimization
 icp_max_correspondence_distance: 0.05  # Max point correspondence distance (meters)
 icp_voxel_size: 0.01   # Voxel size for downsampling (meters)
 
+
 # Object detection parameters (for mask version)
 debug_object_text: "Black Lid" # If set, skips VLM and uses this text for Grounding DINO
 vlm_model: "gpt-5"

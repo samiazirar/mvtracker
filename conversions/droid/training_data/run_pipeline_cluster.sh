@@ -31,6 +31,7 @@ SCRIPT_DIR="conversions/droid/training_data"
 LOG_DIR="logs/pipeline_$(date +%Y%m%d_%H%M%S)"
 EPISODES_FILE="${LOG_DIR}/episodes.txt"
 TIMING_FILE="${LOG_DIR}/timing.csv"
+DEFAULT_INNER_FINGER_MESH="/data/robotiq_arg85_description/meshes/inner_finger_fine.STL"
 
 # GCS bucket for downloads
 GCS_BUCKET="gs://gresearch/robotics/droid_raw/1.0.1"
@@ -150,7 +151,7 @@ fi
 GPU_LIST_STR=$(IFS=,; echo "${GPU_LIST[*]}")
 
 # Export variables for parallel workers
-export CAM2BASE_PATH CONFIG_PATH SCRIPT_DIR GCS_BUCKET FAST_LOCAL_DIR PERMANENT_STORAGE_DIR TIMING_FILE
+export CAM2BASE_PATH CONFIG_PATH SCRIPT_DIR GCS_BUCKET FAST_LOCAL_DIR PERMANENT_STORAGE_DIR TIMING_FILE DEFAULT_INNER_FINGER_MESH
 export NUM_GPUS WORKERS_PER_GPU GPU_LIST_STR
 
 # ============================================================================
@@ -209,7 +210,9 @@ process_episode_worker() {
     echo "droid_root: \"${JOB_DATA}\"" >> "${TEMP_CONFIG}"
     echo "download_dir: \"${JOB_DATA}\"" >> "${TEMP_CONFIG}"
     echo "output_root: \"${JOB_OUTPUT}\"" >> "${TEMP_CONFIG}"
-
+    echo "log_dir: \"${LOG_DIR}/${EPISODE_ID}\"" >> "${TEMP_CONFIG}"
+    echo "cam2base_extrinsics_path: \"${CAM2BASE_PATH}\"" >> "${TEMP_CONFIG}"
+    echo "finger_mesh_path: \"${DEFAULT_INNER_FINGER_MESH}\"" >> "${TEMP_CONFIG}"
     # Start Timing
     local EPISODE_START=$(date +%s)
     

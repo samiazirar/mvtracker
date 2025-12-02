@@ -31,12 +31,12 @@ EPISODES_FILE="${LOG_DIR}/episodes.txt"
 FAST_LOCAL_DIR="/data/droid_debug_scratch"
 PERMANENT_STORAGE_DIR="./droid_processed"
 GCS_BUCKET="gs://gresearch/robotics/droid_raw/1.0.1"
-
+DEFAULT_INNER_FINGER_MESH="/data/robotiq_arg85_description/meshes/inner_finger_fine.STL"
 mkdir -p "${LOG_DIR}"
 mkdir -p "${FAST_LOCAL_DIR}"
 mkdir -p "${PERMANENT_STORAGE_DIR}"
 
-export CAM2BASE_PATH CONFIG_PATH SCRIPT_DIR GCS_BUCKET FAST_LOCAL_DIR PERMANENT_STORAGE_DIR
+export CAM2BASE_PATH CONFIG_PATH SCRIPT_DIR GCS_BUCKET FAST_LOCAL_DIR PERMANENT_STORAGE_DIR DEFAULT_INNER_FINGER_MESH
 
 # ============================================================================
 # PRE-FLIGHT: DOWNLOAD EXTRINSICS
@@ -97,6 +97,7 @@ while read -r EPISODE_ID; do
         echo "output_root: \"${JOB_OUTPUT}\""
         echo "log_dir: \"${LOG_DIR}/${EPISODE_ID}\""
         echo "cam2base_extrinsics_path: \"${CAM2BASE_PATH}\""
+        echo "finger_mesh_path: \"${DEFAULT_INNER_FINGER_MESH}\""
     } >> "${TEMP_CONFIG}"
 
     # --- BLOCK 1: DOWNLOAD ---

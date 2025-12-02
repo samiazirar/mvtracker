@@ -156,7 +156,7 @@ def load_cam2base_for_episode(cam2base_path: str, episode_info: dict) -> dict:
     raise KeyError(f"No calibration found for episode: {episode_info['full_id']}")
 
 
-def generate_tracks(h5_path: str, num_track_points: int, max_frames: int = None) -> dict:
+def generate_tracks(h5_path: str, num_track_points: int, max_frames: int = None, mesh_path: str = "/workspace/third_party/robotiq_arg85_description/meshes/inner_finger_fine.STL") -> dict:
     """Generate gripper contact surface tracks.
     
     Returns:
@@ -174,7 +174,7 @@ def generate_tracks(h5_path: str, num_track_points: int, max_frames: int = None)
         actual_frames = num_frames
     
     # Initialize contact tracker
-    contact_tracker = ContactSurfaceTracker(num_track_points=num_track_points)
+    contact_tracker = ContactSurfaceTracker(num_track_points=num_track_points,mesh_path=mesh_path)
     num_contact_pts = len(contact_tracker.contact_points_local) if contact_tracker.contact_points_local is not None else 0
     total_track_pts = num_contact_pts * 2  # Both fingers
     
@@ -334,6 +334,7 @@ def main():
         episode_paths['h5_path'],
         num_track_points=config.get('num_track_points', 480),
         max_frames=config.get('max_frames'),
+        mesh_path=config.get('finger_mesh_path', "/workspace/third_party/robotiq_arg85_description/meshes/inner_finger_fine.STL"),
     )
     
     tracks_path = os.path.join(output_dir, 'tracks.npz')
