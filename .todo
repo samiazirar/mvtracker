@@ -1,10 +1,22 @@
 - [ ] Create large scale data processing script for droid 
     - [ ] Do not use the low callibrated cameras for now
-
+- [ ] Why do so many downloads fail?
 - [ ] FIX time alignment.. Save how often it happens..
 - [ ] Train a model to recoginize the gripper and contact flow first
 - [ ] Get mask only for Gripper
+- [ ] Filter the bad camera
 
+
+
+
+
+Training:
+- [ ] Select object to start with
+- [ ] Start with language annotations and maybe even object segementation
+
+
+
+Later:
 
 
 - [ ] Calibrate the wrist camera z direction with ICP  -> postponed!

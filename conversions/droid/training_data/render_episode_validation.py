@@ -336,6 +336,13 @@ def render_episode(
         actual_frames = min(actual_frames, max_frames_config)
     
     print(f"[INFO] Rendering {actual_frames} frames...")
+    print(f"[INFO] Track points per frame: {total_track_pts}")
+    
+    # Debug: Check track validity on first frame
+    if total_track_pts > 0 and actual_frames > 0:
+        sample_tracks = tracks_3d[0]
+        valid_tracks = np.isfinite(sample_tracks).all(axis=1)
+        print(f"[DEBUG] Frame 0 tracks: {valid_tracks.sum()}/{total_track_pts} valid, range: {sample_tracks.min():.3f} to {sample_tracks.max():.3f}")
     
     # Main render loop
     for frame_idx in range(actual_frames):
@@ -432,8 +439,10 @@ def render_episode(
             )
             
             # Generate and log point cloud from depth
+            xyz_world = None
+            cloud_colors = None
             if depth is not None:
-                xyz_cam, colors = depth_to_pointcloud(
+                xyz_cam, cloud_colors = depth_to_pointcloud(
                     depth, rgb_for_cloud, cam['K'],
                     max_depth=max_d, min_depth=min_d
                 )
@@ -446,36 +455,44 @@ def render_episode(
                     points_path = "world/points/wrist_cam" if is_wrist else f"world/points/external_cams/{serial}"
                     rr.log(
                         points_path,
-                        rr.Points3D(xyz_world, colors=colors, radii=radii_size)
+                        rr.Points3D(xyz_world, colors=cloud_colors, radii=radii_size)
                     )
             
-            # Create video overlay with tracks
+            # Create video overlay
             frame_overlay = rgb.copy()
             
-            if depth is not None and len(xyz_cam) > 0:
+            # Draw point cloud on video (optional, can be skipped for cleaner track visualization)
+            if xyz_world is not None and len(xyz_world) > 0:
                 # Project point cloud onto image
                 uv_cloud, cols_cloud = project_points_to_image(
                     xyz_world, cam['K'], T_world_cam, cam['width'], cam['height'],
-                    colors=colors, min_depth=min_d
+                    colors=cloud_colors, min_depth=min_d
                 )
                 frame_overlay = draw_points_on_image_fast(frame_overlay, uv_cloud, colors=cols_cloud)
             
-            # Project tracks onto image
-            if track_points_world is not None:
+            # Project tracks onto image - use very small min_depth to ensure tracks are visible
+            # Tracks are at the gripper which may be very close to cameras
+            track_min_depth = 0.001  # 1mm - tracks should always be visible
+            if track_points_world is not None and len(track_points_world) > 0:
                 uv_tracks, cols_tracks = project_points_to_image(
                     track_points_world, cam['K'], T_world_cam, cam['width'], cam['height'],
-                    colors=track_colors_rgb, min_depth=min_d
+                    colors=track_colors_rgb, min_depth=track_min_depth
                 )
+                # Debug: log projection results on first frame
+                if frame_idx == 0:
+                    print(f"[DEBUG] Camera {serial}: projected {len(uv_tracks)}/{len(track_points_world)} track points")
+                
+                # Draw tracks with larger radius for visibility
                 frame_overlay = draw_points_on_image(
                     frame_overlay, uv_tracks, colors=cols_tracks,
-                    radius=3, default_color=(0, 0, 255)
+                    radius=5, default_color=(0, 0, 255)
                 )
             
             # Draw track trails
-            if tracks_window is not None:
+            if tracks_window is not None and len(tracks_window) > 0:
                 frame_overlay = draw_track_trails_on_image(
                     frame_overlay, tracks_window, cam['K'], T_world_cam,
-                    cam['width'], cam['height'], track_colors_rgb, min_depth=min_d
+                    cam['width'], cam['height'], track_colors_rgb, min_depth=track_min_depth
                 )
             
             # Write video frame

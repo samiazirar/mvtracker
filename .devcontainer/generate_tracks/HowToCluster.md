@@ -25,3 +25,11 @@ bash .devcontainer/generate_tracks/post-create.sh
 
 
 enroot export --output ~/depth_tracks_generator_final.sqsh depth_tracks_generator
+
+
+
+finally run with
+
+
+enroot create --force --name depth_tracks_generator_final ~/depth_tracks_generator_final.sqsh
+enroot start -r -w depth_tracks_generator_final
