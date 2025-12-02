@@ -173,4 +173,6 @@ if [ ! -d "/data/third_party/robotiq_arg85_description" ]; then
     git clone https://github.com/a-price/robotiq_arg85_description.git 
 fi
 
+apt update && apt install -y rsync
+
 echo "[post-create] Done."
