@@ -1,18 +1,26 @@
 #!/bin/bash
-# DROID Debug Pipeline (Serial, Single GPU, Verbose)
-set -e  # Exit immediately if a command exits with a non-zero status
+# DROID Debug Pipeline (Sequential, Fault Tolerant, Unbuffered)
+# - Runs episodes one by one
+# - Prints directly to screen (no log files)
+# - If an episode fails, it prints the error and moves to the next one
+
+# Force Python to flush print statements immediately
+export PYTHONUNBUFFERED=1
+
+# Stop script if setup fails (variables, basic paths)
+set -e
 
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
 
-LIMIT=${1:-1} # Default to just 1 episode for testing
+LIMIT=${1:-10} # Default to 10 episodes
 echo "Running Debug Pipeline for ${LIMIT} episode(s)..."
 
-# Hardcoded GPU 0 for debugging
+# Hardcoded GPU 0
 export CUDA_VISIBLE_DEVICES=0
 
-# Paths (Kept same as original)
+# Paths
 CAM2BASE_PATH="/data/cam2base_extrinsic_superset.json"
 CONFIG_PATH="conversions/droid/training_data/config.yaml"
 SCRIPT_DIR="conversions/droid/training_data"
@@ -28,7 +36,6 @@ mkdir -p "${LOG_DIR}"
 mkdir -p "${FAST_LOCAL_DIR}"
 mkdir -p "${PERMANENT_STORAGE_DIR}"
 
-# Export vars needed by python scripts
 export CAM2BASE_PATH CONFIG_PATH SCRIPT_DIR GCS_BUCKET FAST_LOCAL_DIR PERMANENT_STORAGE_DIR
 
 # ============================================================================
@@ -60,8 +67,11 @@ echo "List generated. Starting Processing Loop..."
 echo "----------------------------------------------------------------"
 
 # ============================================================================
-# STEP 2: PROCESSING LOOP (SERIAL)
+# STEP 2: PROCESSING LOOP (SEQUENTIAL & FAULT TOLERANT)
 # ============================================================================
+
+# Disable exit-on-error so the loop continues even if python fails
+set +e 
 
 while read -r EPISODE_ID; do
     echo ""
@@ -87,27 +97,42 @@ while read -r EPISODE_ID; do
         echo "output_root: \"${JOB_OUTPUT}\""
     } >> "${TEMP_CONFIG}"
 
-    # 1. DOWNLOAD
+    # --- BLOCK 1: DOWNLOAD ---
     echo ">>> Step 1: Downloading..."
-    python "${SCRIPT_DIR}/download_single_episode.py" \
+    if ! python "${SCRIPT_DIR}/download_single_episode.py" \
         --episode_id "${EPISODE_ID}" \
         --cam2base "${CAM2BASE_PATH}" \
         --output_dir "${JOB_DATA}" \
-        --gcs_bucket "${GCS_BUCKET}"
+        --gcs_bucket "${GCS_BUCKET}"; then
+        
+        echo "!!!! [ERROR] Download Failed for ${EPISODE_ID}. Skipping..."
+        rm -rf "${JOB_DIR}"
+        continue
+    fi
 
-    # 2. EXTRACT (GPU)
-    echo ">>> Step 2: Extracting RGB/Depth (Using GPU)..."
-    python "${SCRIPT_DIR}/extract_rgb_depth.py" \
+    # --- BLOCK 2: EXTRACT ---
+    echo ">>> Step 2: Extracting RGB/Depth..."
+    if ! python "${SCRIPT_DIR}/extract_rgb_depth.py" \
         --episode_id "${EPISODE_ID}" \
-        --config "${TEMP_CONFIG}"
+        --config "${TEMP_CONFIG}"; then
+        
+        echo "!!!! [ERROR] Extraction Failed for ${EPISODE_ID}. Skipping..."
+        rm -rf "${JOB_DIR}"
+        continue
+    fi
 
-    # 3. TRACKS (CPU)
+    # --- BLOCK 3: TRACKS ---
     echo ">>> Step 3: Generating Tracks..."
-    python "${SCRIPT_DIR}/generate_tracks_and_metadata.py" \
+    if ! python "${SCRIPT_DIR}/generate_tracks_and_metadata.py" \
         --episode_id "${EPISODE_ID}" \
-        --config "${TEMP_CONFIG}"
+        --config "${TEMP_CONFIG}"; then
+        
+        echo "!!!! [ERROR] Tracking Failed for ${EPISODE_ID}. Skipping..."
+        rm -rf "${JOB_DIR}"
+        continue
+    fi
 
-    # 4. FINALIZE
+    # --- BLOCK 4: FINALIZE ---
     echo ">>> Step 4: Moving data to permanent storage..."
     rsync -a "${JOB_OUTPUT}/" "${PERMANENT_STORAGE_DIR}/"
     
