@@ -14,9 +14,19 @@ This script processes DROID episodes and extracts frames to:
             │       └── ...
             └── ...
 
+Compressed mode (--compressed):
+    Skips RGB extraction entirely and stores depth as FFV1 lossless video:
+    {output_root}/{lab}/success/{date}/{timestamp}/
+        └── recordings/
+            ├── {camera_serial}/
+            │   └── depth.mkv       (FFV1 lossless, 16-bit depth in mm)
+            │   └── depth_meta.json (scale factor and metadata for decoding)
+            └── ...
+
 Usage:
     python extract_rgb_depth.py --episode_id "AUTOLab+84bd5053+2023-08-18-12h-01m-10s"
     python extract_rgb_depth.py --episode_id "AUTOLab+84bd5053+2023-08-18-12h-01m-10s" --config custom_config.yaml
+    python extract_rgb_depth.py --episode_id "..." --compressed  # Skip RGB, FFV1 depth
 
 Requirements:
     - GPU with CUDA support (for ZED depth computation)
@@ -182,11 +192,114 @@ def save_frame_png(
     return rgb_path, depth_path
 
 
+# =============================================================================
+# COMPRESSED MODE: FFV1 depth video encoding
+# =============================================================================
+# Depth scale: meters -> millimeters (uint16)
+# Range: 0-65535mm = 0-65.535m (sufficient for indoor robotics)
+DEPTH_SCALE_MM = 1000.0  # meters to millimeters
+DEPTH_MAX_MM = 65535     # uint16 max
+
+
+class FFV1DepthVideoWriter:
+    """Write depth frames to FFV1 lossless video in 16-bit format."""
+    
+    def __init__(self, output_path: str, width: int, height: int, fps: float = 30.0):
+        self.output_path = output_path
+        self.width = width
+        self.height = height
+        self.fps = fps
+        self.frame_count = 0
+        self.writer = None
+        self._init_writer()
+    
+    def _init_writer(self):
+        """Initialize FFV1 video writer."""
+        # FFV1 codec for lossless compression
+        fourcc = cv2.VideoWriter_fourcc(*'FFV1')
+        
+        # Use grayscale 16-bit mode by writing as 2-channel 8-bit
+        # OpenCV doesn't directly support 16-bit grayscale video,
+        # so we split uint16 into two uint8 channels (low, high bytes)
+        self.writer = cv2.VideoWriter(
+            self.output_path,
+            fourcc,
+            self.fps,
+            (self.width, self.height),
+            isColor=True  # We'll use 3-channel BGR to store 16-bit data
+        )
+        
+        if not self.writer.isOpened():
+            raise RuntimeError(f"Failed to open FFV1 video writer: {self.output_path}")
+    
+    def write_frame(self, depth_meters: np.ndarray):
+        """Write a depth frame (float32 meters) to video.
+        
+        Converts to uint16 millimeters and encodes in BGR channels.
+        Channel layout: B=low byte, G=high byte, R=0 (for future use/validation)
+        """
+        # Convert to millimeters and clip to uint16 range
+        depth_mm = depth_meters * DEPTH_SCALE_MM
+        depth_mm = np.nan_to_num(depth_mm, nan=0.0, posinf=0.0, neginf=0.0)
+        depth_mm = np.clip(depth_mm, 0, DEPTH_MAX_MM)
+        depth_uint16 = depth_mm.astype(np.uint16)
+        
+        # Split into low and high bytes
+        low_byte = (depth_uint16 & 0xFF).astype(np.uint8)
+        high_byte = (depth_uint16 >> 8).astype(np.uint8)
+        
+        # Pack into BGR image (B=low, G=high, R=0)
+        bgr_frame = np.stack([low_byte, high_byte, np.zeros_like(low_byte)], axis=-1)
+        
+        self.writer.write(bgr_frame)
+        self.frame_count += 1
+    
+    def close(self):
+        """Close the video writer."""
+        if self.writer is not None:
+            self.writer.release()
+            self.writer = None
+    
+    def get_metadata(self) -> dict:
+        """Get metadata for decoding the depth video."""
+        return {
+            'format': 'ffv1_depth_z16',
+            'encoding': 'bgr_split_uint16',
+            'channel_layout': {'B': 'low_byte', 'G': 'high_byte', 'R': 'unused'},
+            'depth_scale': DEPTH_SCALE_MM,
+            'depth_unit': 'millimeters',
+            'depth_max_mm': DEPTH_MAX_MM,
+            'width': self.width,
+            'height': self.height,
+            'fps': self.fps,
+            'frame_count': self.frame_count,
+            'decode_formula': 'depth_meters = ((G << 8) | B) / 1000.0',
+        }
+
+
+def decode_ffv1_depth_frame(bgr_frame: np.ndarray) -> np.ndarray:
+    """Decode a single BGR frame back to depth in meters.
+    
+    Args:
+        bgr_frame: BGR image from FFV1 video (H, W, 3) uint8
+        
+    Returns:
+        Depth map in meters (H, W) float32
+    """
+    low_byte = bgr_frame[:, :, 0].astype(np.uint16)
+    high_byte = bgr_frame[:, :, 1].astype(np.uint16)
+    depth_uint16 = (high_byte << 8) | low_byte
+    depth_meters = depth_uint16.astype(np.float32) / DEPTH_SCALE_MM
+    return depth_meters
+
+
 def process_camera(
     svo_path: str,
     camera_serial: str,
     output_base_dir: str,
     max_frames: Optional[int] = None,
+    compressed: bool = False,
+    fps: float = 30.0,
 ) -> dict:
     """Process a single camera SVO file and extract frames.
     
@@ -195,18 +308,25 @@ def process_camera(
         camera_serial: Camera serial number for output folder
         output_base_dir: Base output directory
         max_frames: Maximum frames to process (None = all)
+        compressed: If True, skip RGB and save depth as FFV1 video
+        fps: Frame rate for video output (used in compressed mode)
     
     Returns:
         dict with processing statistics
     """
-    print(f"  Processing camera: {camera_serial}")
+    mode_str = "COMPRESSED (FFV1 depth only)" if compressed else "STANDARD (RGB PNG + depth NPY)"
+    print(f"  Processing camera: {camera_serial} [{mode_str}]")
     
     # Create output directories
     cam_dir = os.path.join(output_base_dir, 'recordings', camera_serial)
-    rgb_dir = os.path.join(cam_dir, 'rgb')
-    depth_dir = os.path.join(cam_dir, 'depth')
-    os.makedirs(rgb_dir, exist_ok=True)
-    os.makedirs(depth_dir, exist_ok=True)
+    os.makedirs(cam_dir, exist_ok=True)
+    
+    if not compressed:
+        # Standard mode: create rgb and depth directories
+        rgb_dir = os.path.join(cam_dir, 'rgb')
+        depth_dir = os.path.join(cam_dir, 'depth')
+        os.makedirs(rgb_dir, exist_ok=True)
+        os.makedirs(depth_dir, exist_ok=True)
     
     # Initialize ZED camera
     zed = sl.Camera()
@@ -240,6 +360,13 @@ def process_camera(
     mat_rgb = sl.Mat()
     mat_depth = sl.Mat()
     
+    # Initialize FFV1 writer for compressed mode
+    depth_video_writer = None
+    if compressed:
+        depth_video_path = os.path.join(cam_dir, 'depth.mkv')
+        depth_video_writer = FFV1DepthVideoWriter(depth_video_path, width, height, fps)
+        print(f"    Output: {depth_video_path}")
+    
     # Process frames
     frames_saved = 0
     for frame_idx in range(process_frames):
@@ -251,22 +378,37 @@ def process_camera(
             print(f"    [WARN] Failed to grab frame {frame_idx}: {err}")
             continue
         
-        # Retrieve RGB image
-        zed.retrieve_image(mat_rgb, sl.VIEW.LEFT)
-        rgb_data = mat_rgb.get_data()
-        # ZED returns BGRA, convert to RGB
-        rgb = cv2.cvtColor(rgb_data, cv2.COLOR_BGRA2RGB)
-        
-        # Retrieve depth map
+        # Retrieve depth map (always needed)
         zed.retrieve_measure(mat_depth, sl.MEASURE.DEPTH)
         depth = mat_depth.get_data().copy()  # float32, meters
         
-        # Save frames
-        save_frame_png(
-            rgb, depth, frame_idx,
-            rgb_dir, depth_dir,
-        )
+        if compressed:
+            # Compressed mode: write depth to FFV1 video (skip RGB)
+            depth_video_writer.write_frame(depth)
+        else:
+            # Standard mode: save RGB PNG and depth NPY
+            zed.retrieve_image(mat_rgb, sl.VIEW.LEFT)
+            rgb_data = mat_rgb.get_data()
+            # ZED returns BGRA, convert to RGB
+            rgb = cv2.cvtColor(rgb_data, cv2.COLOR_BGRA2RGB)
+            
+            save_frame_png(
+                rgb, depth, frame_idx,
+                rgb_dir, depth_dir,
+            )
+        
         frames_saved += 1
+    
+    # Close FFV1 writer and save metadata
+    if compressed and depth_video_writer is not None:
+        depth_video_writer.close()
+        
+        # Save depth video metadata
+        depth_meta = depth_video_writer.get_metadata()
+        depth_meta_path = os.path.join(cam_dir, 'depth_meta.json')
+        with open(depth_meta_path, 'w') as f:
+            json.dump(depth_meta, f, indent=2)
+        print(f"    Saved depth metadata: {depth_meta_path}")
     
     # Get intrinsics and save
     calib = cam_info.camera_configuration.calibration_parameters.left_cam
@@ -290,14 +432,20 @@ def process_camera(
     
     zed.close()
     
-    return {
+    result = {
         'serial': camera_serial,
         'status': 'success',
         'frames_saved': frames_saved,
         'total_frames': total_frames,
         'width': width,
         'height': height,
+        'mode': 'compressed' if compressed else 'standard',
     }
+    
+    if compressed:
+        result['depth_video'] = os.path.join(cam_dir, 'depth.mkv')
+    
+    return result
 
 
 def main():
@@ -319,13 +467,19 @@ def main():
         nargs="*",
         help="Specific camera serials to process (default: all)",
     )
+    parser.add_argument(
+        "--compressed",
+        action="store_true",
+        help="Compressed mode: skip RGB, store depth as FFV1 lossless video (z16)",
+    )
     args = parser.parse_args()
     
     # Load config
     with open(args.config, 'r') as f:
         config = yaml.safe_load(f)
     
-    print(f"=== Extracting RGB and Depth Frames ===")
+    mode_str = "COMPRESSED (depth FFV1 only)" if args.compressed else "STANDARD (RGB PNG + depth NPY)"
+    print(f"=== Extracting Frames [{mode_str}] ===")
     print(f"Episode: {args.episode_id}")
     
     # Parse episode ID
@@ -359,12 +513,15 @@ def main():
     
     # Process each camera
     results = []
+    fps = config.get('fps', 30.0)
     for serial, svo_path in svo_files.items():
         result = process_camera(
             svo_path=svo_path,
             camera_serial=serial,
             output_base_dir=output_dir,
             max_frames=config.get('max_frames'),
+            compressed=args.compressed,
+            fps=fps,
         )
         results.append(result)
     
@@ -372,6 +529,8 @@ def main():
     metadata = {
         'episode_id': args.episode_id,
         'source_path': episode_paths['relative_path'],
+        'mode': 'compressed' if args.compressed else 'standard',
+        'compressed': args.compressed,
         'cameras': results,
     }
     
@@ -381,10 +540,11 @@ def main():
         json.dump(metadata, f, indent=2)
     
     # Summary
-    print("\n=== Extraction Summary ===")
+    print(f"\n=== Extraction Summary [{mode_str}] ===")
     for result in results:
         if result['status'] == 'success':
-            print(f"  {result['serial']}: {result['frames_saved']} frames saved")
+            mode_info = f" [{result.get('mode', 'standard')}]"
+            print(f"  {result['serial']}: {result['frames_saved']} frames saved{mode_info}")
         else:
             print(f"  {result['serial']}: FAILED - {result.get('error', 'unknown')}")
     
