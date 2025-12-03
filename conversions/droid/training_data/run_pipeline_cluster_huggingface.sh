@@ -1,6 +1,9 @@
 #!/bin/bash
 # DROID Training Data Processing Pipeline (Multi-GPU Parallel Optimized)
-# Downloads, extracts RGB/depth, and generates tracks for episodes
+# NPZ COMPRESSED MODE: RGB + depth stored as lossless .npz archives
+#
+# Downloads, extracts RGB/depth (as compressed .npz), and generates tracks for episodes
+# Output format: rgb.npz (uint8 RGB frames), depth.npz (uint16 depth in mm)
 #
 # Usage:
 #   ./run_pipeline.sh                    # Process 10 episodes, auto-detect GPUs, 3 workers/GPU
@@ -256,7 +259,7 @@ mkdir -p "${LOG_DIR}"
 mkdir -p "${FAST_LOCAL_DIR}"
 mkdir -p "${STAGING_DIR}"
 
-echo "=== DROID Training Data Pipeline (Multi-GPU Parallel + HuggingFace Upload) ==="
+echo "=== DROID Training Data Pipeline (NPZ Compressed + HuggingFace Upload) ==="
 echo "Limit: ${LIMIT}"
 echo "GPUs: ${NUM_GPUS} (${GPU_LIST_STR})"
 echo "Workers/GPU: ${WORKERS_PER_GPU}"
@@ -337,14 +340,17 @@ process_episode_worker() {
     local DOWNLOAD_TIME=$((DOWNLOAD_END - DOWNLOAD_START))
     
     # ------------------------------------------------------------------------
-    # STEP B: Extract RGB and Depth (GPU Step)
+    # STEP B: Extract RGB and Depth (GPU Step) - NPZ COMPRESSED MODE
+    # Stores RGB and depth as lossless compressed .npz archives
     # ------------------------------------------------------------------------
     local RGB_DEPTH_START=$(date +%s)
     
     # Uses TEMP_CONFIG which points input/output to local scratch
+    # --npz: save RGB + depth as compressed numpy archives (lossless)
     python "${SCRIPT_DIR}/extract_rgb_depth.py" \
         --episode_id "${EPISODE_ID}" \
         --config "${TEMP_CONFIG}" \
+        --npz \
         > "${JOB_LOGS}/rgb_depth.log" 2>&1 || {
             cp -a "${JOB_LOGS}/." "${DEST_LOG_DIR}/" 2>/dev/null || true
             record_error "${EPISODE_ID}" "extract" "Extraction failed (see ${DEST_LOG_DIR}/rgb_depth.log)"

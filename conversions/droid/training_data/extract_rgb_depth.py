@@ -23,10 +23,21 @@ Compressed mode (--compressed):
             │   └── depth_meta.json (scale factor and metadata for decoding)
             └── ...
 
+NPZ mode (--npz):
+    Stores RGB and depth as compressed numpy archives (all frames together):
+    {output_root}/{lab}/success/{date}/{timestamp}/
+        └── recordings/
+            ├── {camera_serial}/
+            │   ├── rgb.npz         (lossless compressed, uint8 RGB frames)
+            │   ├── depth.npz       (lossless compressed, uint16 depth in mm)
+            │   └── meta.json       (metadata for decoding)
+            └── ...
+
 Usage:
     python extract_rgb_depth.py --episode_id "AUTOLab+84bd5053+2023-08-18-12h-01m-10s"
     python extract_rgb_depth.py --episode_id "AUTOLab+84bd5053+2023-08-18-12h-01m-10s" --config custom_config.yaml
     python extract_rgb_depth.py --episode_id "..." --compressed  # Skip RGB, FFV1 depth
+    python extract_rgb_depth.py --episode_id "..." --npz         # RGB + depth as .npz
 
 Requirements:
     - GPU with CUDA support (for ZED depth computation)
@@ -293,12 +304,172 @@ def decode_ffv1_depth_frame(bgr_frame: np.ndarray) -> np.ndarray:
     return depth_meters
 
 
+# =============================================================================
+# NPZ MODE: Compressed numpy archives (all frames together)
+# =============================================================================
+
+class NPZFrameAccumulator:
+    """Accumulate frames and save as compressed .npz archives."""
+    
+    def __init__(self, output_dir: str, width: int, height: int, expected_frames: int = 0):
+        self.output_dir = output_dir
+        self.width = width
+        self.height = height
+        self.expected_frames = expected_frames
+        
+        # Pre-allocate if we know the frame count, otherwise use lists
+        if expected_frames > 0:
+            self.rgb_frames = np.zeros((expected_frames, height, width, 3), dtype=np.uint8)
+            self.depth_frames = np.zeros((expected_frames, height, width), dtype=np.uint16)
+            self.use_preallocated = True
+        else:
+            self.rgb_frames_list = []
+            self.depth_frames_list = []
+            self.use_preallocated = False
+        
+        self.frame_count = 0
+    
+    def add_frame(self, rgb: np.ndarray, depth_meters: np.ndarray):
+        """Add a frame pair (RGB uint8, depth float32 meters)."""
+        # Convert depth to uint16 millimeters for storage
+        depth_mm = depth_meters * DEPTH_SCALE_MM
+        depth_mm = np.nan_to_num(depth_mm, nan=0.0, posinf=0.0, neginf=0.0)
+        depth_mm = np.clip(depth_mm, 0, DEPTH_MAX_MM)
+        depth_uint16 = depth_mm.astype(np.uint16)
+        
+        if self.use_preallocated:
+            if self.frame_count < self.expected_frames:
+                self.rgb_frames[self.frame_count] = rgb
+                self.depth_frames[self.frame_count] = depth_uint16
+        else:
+            self.rgb_frames_list.append(rgb.copy())
+            self.depth_frames_list.append(depth_uint16)
+        
+        self.frame_count += 1
+    
+    def add_depth_only(self, depth_meters: np.ndarray):
+        """Add a depth-only frame (for modes that skip RGB)."""
+        depth_mm = depth_meters * DEPTH_SCALE_MM
+        depth_mm = np.nan_to_num(depth_mm, nan=0.0, posinf=0.0, neginf=0.0)
+        depth_mm = np.clip(depth_mm, 0, DEPTH_MAX_MM)
+        depth_uint16 = depth_mm.astype(np.uint16)
+        
+        if self.use_preallocated:
+            if self.frame_count < self.expected_frames:
+                self.depth_frames[self.frame_count] = depth_uint16
+        else:
+            self.depth_frames_list.append(depth_uint16)
+        
+        self.frame_count += 1
+    
+    def save(self, include_rgb: bool = True) -> dict:
+        """Save accumulated frames to compressed .npz files.
+        
+        Returns:
+            dict with file paths and metadata
+        """
+        os.makedirs(self.output_dir, exist_ok=True)
+        
+        # Finalize arrays
+        if self.use_preallocated:
+            # Trim to actual frame count if fewer frames than expected
+            depth_array = self.depth_frames[:self.frame_count]
+            if include_rgb:
+                rgb_array = self.rgb_frames[:self.frame_count]
+        else:
+            depth_array = np.stack(self.depth_frames_list, axis=0) if self.depth_frames_list else np.array([])
+            if include_rgb:
+                rgb_array = np.stack(self.rgb_frames_list, axis=0) if self.rgb_frames_list else np.array([])
+        
+        result = {
+            'frame_count': self.frame_count,
+            'width': self.width,
+            'height': self.height,
+        }
+        
+        # Save depth (always)
+        depth_path = os.path.join(self.output_dir, 'depth.npz')
+        np.savez_compressed(depth_path, depth=depth_array)
+        result['depth_path'] = depth_path
+        result['depth_shape'] = depth_array.shape
+        result['depth_dtype'] = 'uint16'
+        result['depth_unit'] = 'millimeters'
+        result['depth_scale'] = DEPTH_SCALE_MM
+        
+        # Save RGB if included
+        if include_rgb:
+            rgb_path = os.path.join(self.output_dir, 'rgb.npz')
+            np.savez_compressed(rgb_path, rgb=rgb_array)
+            result['rgb_path'] = rgb_path
+            result['rgb_shape'] = rgb_array.shape
+            result['rgb_dtype'] = 'uint8'
+        
+        return result
+    
+    def get_metadata(self, include_rgb: bool = True) -> dict:
+        """Get metadata for the saved archives."""
+        meta = {
+            'format': 'npz_compressed',
+            'compression': 'zlib',
+            'frame_count': self.frame_count,
+            'width': self.width,
+            'height': self.height,
+            'depth': {
+                'file': 'depth.npz',
+                'array_key': 'depth',
+                'dtype': 'uint16',
+                'unit': 'millimeters',
+                'scale': DEPTH_SCALE_MM,
+                'decode_formula': 'depth_meters = depth_mm / 1000.0',
+            },
+        }
+        if include_rgb:
+            meta['rgb'] = {
+                'file': 'rgb.npz',
+                'array_key': 'rgb',
+                'dtype': 'uint8',
+                'channels': 'RGB',
+            }
+        return meta
+
+
+def load_npz_frames(npz_dir: str) -> Tuple[Optional[np.ndarray], np.ndarray, dict]:
+    """Load frames from NPZ archives.
+    
+    Args:
+        npz_dir: Directory containing rgb.npz and/or depth.npz
+        
+    Returns:
+        Tuple of (rgb_frames, depth_meters, metadata)
+        rgb_frames may be None if only depth was saved
+    """
+    meta_path = os.path.join(npz_dir, 'meta.json')
+    with open(meta_path, 'r') as f:
+        meta = json.load(f)
+    
+    # Load depth
+    depth_path = os.path.join(npz_dir, 'depth.npz')
+    with np.load(depth_path) as data:
+        depth_mm = data['depth']
+    depth_meters = depth_mm.astype(np.float32) / meta['depth']['scale']
+    
+    # Load RGB if available
+    rgb_frames = None
+    rgb_path = os.path.join(npz_dir, 'rgb.npz')
+    if os.path.exists(rgb_path):
+        with np.load(rgb_path) as data:
+            rgb_frames = data['rgb']
+    
+    return rgb_frames, depth_meters, meta
+
+
 def process_camera(
     svo_path: str,
     camera_serial: str,
     output_base_dir: str,
     max_frames: Optional[int] = None,
     compressed: bool = False,
+    npz: bool = False,
     fps: float = 30.0,
 ) -> dict:
     """Process a single camera SVO file and extract frames.
@@ -309,19 +480,25 @@ def process_camera(
         output_base_dir: Base output directory
         max_frames: Maximum frames to process (None = all)
         compressed: If True, skip RGB and save depth as FFV1 video
+        npz: If True, save RGB and depth as compressed .npz archives
         fps: Frame rate for video output (used in compressed mode)
     
     Returns:
         dict with processing statistics
     """
-    mode_str = "COMPRESSED (FFV1 depth only)" if compressed else "STANDARD (RGB PNG + depth NPY)"
+    if npz:
+        mode_str = "NPZ (RGB + depth compressed archives)"
+    elif compressed:
+        mode_str = "COMPRESSED (FFV1 depth only)"
+    else:
+        mode_str = "STANDARD (RGB PNG + depth NPY)"
     print(f"  Processing camera: {camera_serial} [{mode_str}]")
     
     # Create output directories
     cam_dir = os.path.join(output_base_dir, 'recordings', camera_serial)
     os.makedirs(cam_dir, exist_ok=True)
     
-    if not compressed:
+    if not compressed and not npz:
         # Standard mode: create rgb and depth directories
         rgb_dir = os.path.join(cam_dir, 'rgb')
         depth_dir = os.path.join(cam_dir, 'depth')
@@ -360,12 +537,17 @@ def process_camera(
     mat_rgb = sl.Mat()
     mat_depth = sl.Mat()
     
-    # Initialize FFV1 writer for compressed mode
+    # Initialize writers based on mode
     depth_video_writer = None
+    npz_accumulator = None
+    
     if compressed:
         depth_video_path = os.path.join(cam_dir, 'depth.mkv')
         depth_video_writer = FFV1DepthVideoWriter(depth_video_path, width, height, fps)
         print(f"    Output: {depth_video_path}")
+    elif npz:
+        npz_accumulator = NPZFrameAccumulator(cam_dir, width, height, process_frames)
+        print(f"    Output: {cam_dir}/rgb.npz, {cam_dir}/depth.npz")
     
     # Process frames
     frames_saved = 0
@@ -385,6 +567,12 @@ def process_camera(
         if compressed:
             # Compressed mode: write depth to FFV1 video (skip RGB)
             depth_video_writer.write_frame(depth)
+        elif npz:
+            # NPZ mode: accumulate RGB and depth frames
+            zed.retrieve_image(mat_rgb, sl.VIEW.LEFT)
+            rgb_data = mat_rgb.get_data()
+            rgb = cv2.cvtColor(rgb_data, cv2.COLOR_BGRA2RGB)
+            npz_accumulator.add_frame(rgb, depth)
         else:
             # Standard mode: save RGB PNG and depth NPY
             zed.retrieve_image(mat_rgb, sl.VIEW.LEFT)
@@ -399,7 +587,7 @@ def process_camera(
         
         frames_saved += 1
     
-    # Close FFV1 writer and save metadata
+    # Finalize based on mode
     if compressed and depth_video_writer is not None:
         depth_video_writer.close()
         
@@ -409,6 +597,17 @@ def process_camera(
         with open(depth_meta_path, 'w') as f:
             json.dump(depth_meta, f, indent=2)
         print(f"    Saved depth metadata: {depth_meta_path}")
+    
+    elif npz and npz_accumulator is not None:
+        print(f"    Saving compressed archives...")
+        save_result = npz_accumulator.save(include_rgb=True)
+        
+        # Save metadata
+        meta = npz_accumulator.get_metadata(include_rgb=True)
+        meta_path = os.path.join(cam_dir, 'meta.json')
+        with open(meta_path, 'w') as f:
+            json.dump(meta, f, indent=2)
+        print(f"    Saved: rgb.npz ({save_result['rgb_shape']}), depth.npz ({save_result['depth_shape']})")
     
     # Get intrinsics and save
     calib = cam_info.camera_configuration.calibration_parameters.left_cam
@@ -432,6 +631,14 @@ def process_camera(
     
     zed.close()
     
+    # Determine mode string for result
+    if npz:
+        mode = 'npz'
+    elif compressed:
+        mode = 'compressed'
+    else:
+        mode = 'standard'
+    
     result = {
         'serial': camera_serial,
         'status': 'success',
@@ -439,11 +646,14 @@ def process_camera(
         'total_frames': total_frames,
         'width': width,
         'height': height,
-        'mode': 'compressed' if compressed else 'standard',
+        'mode': mode,
     }
     
     if compressed:
         result['depth_video'] = os.path.join(cam_dir, 'depth.mkv')
+    elif npz:
+        result['rgb_archive'] = os.path.join(cam_dir, 'rgb.npz')
+        result['depth_archive'] = os.path.join(cam_dir, 'depth.npz')
     
     return result
 
@@ -472,13 +682,28 @@ def main():
         action="store_true",
         help="Compressed mode: skip RGB, store depth as FFV1 lossless video (z16)",
     )
+    parser.add_argument(
+        "--npz",
+        action="store_true",
+        help="NPZ mode: store RGB and depth as lossless compressed .npz archives",
+    )
     args = parser.parse_args()
+    
+    # Validate mutually exclusive modes
+    if args.compressed and args.npz:
+        print("[ERROR] Cannot use both --compressed and --npz. Choose one.")
+        sys.exit(1)
     
     # Load config
     with open(args.config, 'r') as f:
         config = yaml.safe_load(f)
     
-    mode_str = "COMPRESSED (depth FFV1 only)" if args.compressed else "STANDARD (RGB PNG + depth NPY)"
+    if args.npz:
+        mode_str = "NPZ (RGB + depth compressed archives)"
+    elif args.compressed:
+        mode_str = "COMPRESSED (depth FFV1 only)"
+    else:
+        mode_str = "STANDARD (RGB PNG + depth NPY)"
     print(f"=== Extracting Frames [{mode_str}] ===")
     print(f"Episode: {args.episode_id}")
     
@@ -521,16 +746,26 @@ def main():
             output_base_dir=output_dir,
             max_frames=config.get('max_frames'),
             compressed=args.compressed,
+            npz=args.npz,
             fps=fps,
         )
         results.append(result)
+    
+    # Determine mode for metadata
+    if args.npz:
+        extraction_mode = 'npz'
+    elif args.compressed:
+        extraction_mode = 'compressed'
+    else:
+        extraction_mode = 'standard'
     
     # Save extraction metadata
     metadata = {
         'episode_id': args.episode_id,
         'source_path': episode_paths['relative_path'],
-        'mode': 'compressed' if args.compressed else 'standard',
+        'mode': extraction_mode,
         'compressed': args.compressed,
+        'npz': args.npz,
         'cameras': results,
     }
     
