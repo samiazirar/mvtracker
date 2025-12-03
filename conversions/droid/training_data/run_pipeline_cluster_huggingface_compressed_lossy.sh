@@ -636,16 +636,25 @@ do_batch_upload() {
             echo "[$(date +'%Y-%m-%d %H:%M:%S')] Skipping: another upload in progress" >> "${BATCH_UPLOAD_LOG}"
             return 0
         }
-        
+
         # Check if there's anything to upload
         local file_count=$(find "${BATCH_UPLOAD_DIR}" -type f 2>/dev/null | wc -l)
+        local total_bytes=$(du -sb "${BATCH_UPLOAD_DIR}" 2>/dev/null | awk '{print $1}')
+        local human_size="0B"
+        if command -v numfmt >/dev/null 2>&1 && [ -n "${total_bytes}" ]; then
+            human_size=$(numfmt --to=iec --suffix=B --format "%.2f" ${total_bytes})
+        else
+            human_size="${total_bytes:-0}B"
+        fi
+
         if [ "${file_count}" -eq 0 ]; then
-            echo "[$(date +'%Y-%m-%d %H:%M:%S')] No files to upload" >> "${BATCH_UPLOAD_LOG}"
+            echo "[$(date +'%Y-%m-%d %H:%M:%S')] No files to upload" | tee -a "${BATCH_UPLOAD_LOG}"
             return 0
         fi
-        
-        echo "[$(date +'%Y-%m-%d %H:%M:%S')] Starting batch upload of ${file_count} files..." >> "${BATCH_UPLOAD_LOG}"
-        
+
+        echo "[$(date +'%Y-%m-%d %H:%M:%S')] Starting batch upload of ${file_count} files (${human_size})..." | tee -a "${BATCH_UPLOAD_LOG}"
+        local upload_start=$(date +%s)
+
         # Upload the batch
         python3 -c "
 import os
@@ -669,18 +678,20 @@ except Exception as e:
     print(f'[HF] Batch upload failed: {e}', file=sys.stderr)
     sys.exit(1)
 " >> "${BATCH_UPLOAD_LOG}" 2>&1
-        
+
         local upload_status=$?
+        local upload_end=$(date +%s)
+        local upload_time=$((upload_end - upload_start))
         if [ ${upload_status} -eq 0 ]; then
             # Success: clear the batch upload directory
-            echo "[$(date +'%Y-%m-%d %H:%M:%S')] Upload successful, clearing batch directory" >> "${BATCH_UPLOAD_LOG}"
+            echo "[$(date +'%Y-%m-%d %H:%M:%S')] Upload successful in ${upload_time}s, clearing batch directory" | tee -a "${BATCH_UPLOAD_LOG}"
             find "${BATCH_UPLOAD_DIR}" -mindepth 1 -delete 2>/dev/null || true
-            
+
             # Increment upload counter
             local count=$(cat "${BATCH_UPLOAD_COUNT_FILE}")
             echo $((count + 1)) > "${BATCH_UPLOAD_COUNT_FILE}"
         else
-            echo "[$(date +'%Y-%m-%d %H:%M:%S')] Upload failed, will retry next interval" >> "${BATCH_UPLOAD_LOG}"
+            echo "[$(date +'%Y-%m-%d %H:%M:%S')] Upload failed after ${upload_time}s, will retry next interval" | tee -a "${BATCH_UPLOAD_LOG}"
         fi
     ) 200>"${BATCH_UPLOAD_LOCK}"
 }
