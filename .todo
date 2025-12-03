@@ -6,7 +6,7 @@
 - [ ] Get mask only for Gripper
 - [ ] Filter the bad camera
 
-
+- [ ] Save only depth (more efficienty) and directly use the provided mp4
 
 
 

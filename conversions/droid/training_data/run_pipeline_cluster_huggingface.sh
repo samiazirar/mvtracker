@@ -13,6 +13,7 @@
 #   CUDA_VISIBLE_DEVICES    Override which GPUs to use (e.g., "0,1,2,3")
 #   DROID_WORKERS_PER_GPU   Workers per GPU (default: 3)
 #   DROID_NUM_GPUS          Number of GPUs to use (default: auto-detect)
+#   SKIP_HF_CHECK=1         Skip checking HuggingFace for existing episodes (fast mode)
 
 set -e
 
@@ -23,6 +24,7 @@ set -e
 LIMIT=${1:-10}
 WORKERS_PER_GPU=${2:-${DROID_WORKERS_PER_GPU:-3}}
 NUM_GPUS=${3:-${DROID_NUM_GPUS:-0}}      # 0 = auto-detect
+SKIP_HF_CHECK=${SKIP_HF_CHECK:-0}        # Set to 1 to skip HuggingFace existence checks (fast mode)
 
 # Paths (all on fast /data storage)
 CAM2BASE_PATH="/data/cam2base_extrinsic_superset.json"
@@ -33,6 +35,8 @@ EPISODES_FILE="${LOG_DIR}/episodes.txt"
 TIMING_FILE="${LOG_DIR}/timing.csv"
 STATUS_FILE="${LOG_DIR}/status.log"
 ERROR_LOG="${LOG_DIR}/errors.log"
+FAILED_EPISODES_FILE="${LOG_DIR}/failed_episodes.txt"
+ERROR_COUNTS_FILE="${LOG_DIR}/error_counts.txt"
 DEFAULT_INNER_FINGER_MESH="/data/robotiq_arg85_description/meshes/inner_finger_fine.STL"
 
 # GCS bucket for downloads
@@ -217,7 +221,7 @@ GPU_LIST_STR=$(IFS=,; echo "${GPU_LIST[*]}")
 # Export variables for parallel workers
 export CAM2BASE_PATH CONFIG_PATH SCRIPT_DIR GCS_BUCKET FAST_LOCAL_DIR STAGING_DIR TIMING_FILE DEFAULT_INNER_FINGER_MESH
 export NUM_GPUS WORKERS_PER_GPU GPU_LIST_STR
-export STATUS_FILE ERROR_LOG
+export STATUS_FILE ERROR_LOG FAILED_EPISODES_FILE ERROR_COUNTS_FILE
 export HF_TOKEN HF_REPO_ID HF_REPO_TYPE
 
 record_status() {
@@ -237,6 +241,8 @@ record_error() {
     (
         flock -x 201
         printf "[%s] %s | %s | %s\n" "$(date +'%Y-%m-%d %H:%M:%S')" "${episode}" "${stage}" "${message}" >> "${ERROR_LOG}"
+        # Also record to failed episodes file for easy listing
+        printf "%s,%s\n" "${episode}" "${stage}" >> "${FAILED_EPISODES_FILE}"
     ) 201>"${ERROR_LOG}.lock"
 }
 
@@ -434,9 +440,14 @@ python "${SCRIPT_DIR}/get_episodes_by_quality.py" \
     --limit "${LIMIT}" \
     --output "${EPISODES_FILE}"
 
-echo "[1.5/2] Skipping episodes already uploaded to HuggingFace..."
-SKIP_START=$(date +%s)
-python3 << 'PYTHON_SCRIPT'
+if [ "${SKIP_HF_CHECK}" -eq 1 ]; then
+    echo "[1.5/2] SKIP_HF_CHECK=1: Skipping HuggingFace existence checks (fast mode)"
+    echo "[HF] Processing all episodes without checking HuggingFace"
+else
+    echo "[1.5/2] Loading ALL processed episodes from HuggingFace (one-time bulk fetch)..."
+    echo "        (Set SKIP_HF_CHECK=1 to skip this entirely)"
+    SKIP_START=$(date +%s)
+    python3 << 'PYTHON_SCRIPT'
 import os
 import re
 from datetime import datetime
@@ -450,6 +461,7 @@ token = os.environ.get("HF_TOKEN")
 api = HfApi(token=token)
 
 def parse_episode_id(episode_id: str):
+    """Convert episode_id to the path format used in HuggingFace."""
     parts = episode_id.split("+")
     if len(parts) != 3:
         return None
@@ -466,19 +478,47 @@ def parse_episode_id(episode_id: str):
         "timestamp_folder": timestamp_folder,
     }
 
-def path_exists(prefix: str) -> bool:
-    try:
-        entries = api.list_repo_tree(
-            repo_id=repo_id,
-            repo_type=repo_type,
-            path=prefix,
-            recursive=False,
-        )
-    except Exception:
-        # If we can't check, assume missing so we still process.
-        return False
-    return len(entries) > 0
+# ============================================================================
+# STEP 1: Bulk fetch ALL paths from HuggingFace (ONE API call with pagination)
+# ============================================================================
+print("[HF] Fetching all existing paths from HuggingFace repo (this may take a moment)...")
 
+existing_paths = set()
+try:
+    # list_repo_tree with recursive=True gets everything
+    # We collect all directory paths that look like: lab/outcome/date/timestamp
+    for item in api.list_repo_tree(
+        repo_id=repo_id,
+        repo_type=repo_type,
+        recursive=True,
+    ):
+        # item.path gives us the full path
+        existing_paths.add(item.path)
+except Exception as e:
+    print(f"[WARN] Could not fetch HuggingFace repo tree: {e}")
+    print("[WARN] Will process all episodes (no skip)")
+    existing_paths = set()
+
+print(f"[HF] Found {len(existing_paths)} paths in HuggingFace repo")
+
+# Build a set of processed episode signatures for fast lookup
+# We look for paths like: lab/success/date/timestamp or lab/failure/date/timestamp
+processed_signatures = set()
+for path in existing_paths:
+    parts = path.split("/")
+    # Match pattern: lab/outcome/date/timestamp/...
+    if len(parts) >= 4:
+        lab, outcome, date, timestamp = parts[0], parts[1], parts[2], parts[3]
+        if outcome in ("success", "failure"):
+            # Create a signature: lab+date+timestamp
+            sig = f"{lab}+{date}+{timestamp}"
+            processed_signatures.add(sig)
+
+print(f"[HF] Found {len(processed_signatures)} unique processed episodes")
+
+# ============================================================================
+# STEP 2: Filter episodes locally (fast set lookup)
+# ============================================================================
 keep = []
 skipped = []
 with open(episodes_file, "r") as f:
@@ -490,16 +530,11 @@ with open(episodes_file, "r") as f:
         if parsed is None:
             keep.append(ep)
             continue
-        base = parsed["lab"]
-        date = parsed["date"]
-        ts = parsed["timestamp_folder"]
-        already = False
-        for outcome in ("success", "failure"):
-            prefix = f"{base}/{outcome}/{date}/{ts}"
-            if path_exists(prefix):
-                already = True
-                break
-        if already:
+        
+        # Create signature to check against processed set
+        sig = f"{parsed['lab']}+{parsed['date']}+{parsed['timestamp_folder']}"
+        
+        if sig in processed_signatures:
             skipped.append(ep)
         else:
             keep.append(ep)
@@ -508,13 +543,16 @@ with open(episodes_file, "w") as f:
     if keep:
         f.write("\n".join(keep) + "\n")
 
-print(f"[HF] Skipped {len(skipped)} episodes already present in {repo_id}; remaining: {len(keep)}")
-if skipped:
-    print(f"[HF] Example skipped episode: {skipped[0]}")
+print(f"[HF] Skipped {len(skipped)} episodes already processed; remaining: {len(keep)}")
+if skipped and len(skipped) <= 5:
+    print(f"[HF] Skipped episodes: {skipped}")
+elif skipped:
+    print(f"[HF] Example skipped: {skipped[0]}")
 PYTHON_SCRIPT
-SKIP_END=$(date +%s)
-SKIP_TIME=$((SKIP_END - SKIP_START))
-echo "[HF] Skip check time: ${SKIP_TIME}s"
+    SKIP_END=$(date +%s)
+    SKIP_TIME=$((SKIP_END - SKIP_START))
+    echo "[HF] Bulk fetch + filter time: ${SKIP_TIME}s"
+fi
 
 EPISODE_COUNT=$(wc -l < "${EPISODES_FILE}")
 if [ "${EPISODE_COUNT}" -le 0 ]; then
@@ -611,7 +649,6 @@ else
     cat "${EPISODES_FILE}" | xargs -P "${TOTAL_WORKERS}" -I {} bash -c 'process_episode_with_counter "$@"' _ {}
 fi
 PIPELINE_EXIT_CODE=$?
-set -e
 
 stop_progress_monitor
 
@@ -629,18 +666,52 @@ if [ -f "${STATUS_FILE}" ]; then
     SUCCESS_COUNT=$(awk -F, '$2=="success"{c++} END{print c+0}' "${STATUS_FILE}")
     FAILURE_COUNT=$(awk -F, '$2=="failure"{c++} END{print c+0}' "${STATUS_FILE}")
 fi
+echo ""
+echo "=== SUCCESS / FAILURE ==="
 echo "Successes: ${SUCCESS_COUNT}/${EPISODE_COUNT}"
 echo "Failures : ${FAILURE_COUNT}/${EPISODE_COUNT}"
-if [ -s "${ERROR_LOG}" ]; then
-    echo "Failure details: ${ERROR_LOG}"
+echo ""
+
+# Show error breakdown by step
+if [ -f "${FAILED_EPISODES_FILE}" ] && [ -s "${FAILED_EPISODES_FILE}" ]; then
+    echo "=== ERRORS BY STEP ==="
+    # Count errors by step
+    DOWNLOAD_ERRORS=$(awk -F, '$2=="download"{c++} END{print c+0}' "${FAILED_EPISODES_FILE}")
+    EXTRACT_ERRORS=$(awk -F, '$2=="extract"{c++} END{print c+0}' "${FAILED_EPISODES_FILE}")
+    TRACKS_ERRORS=$(awk -F, '$2=="tracks"{c++} END{print c+0}' "${FAILED_EPISODES_FILE}")
+    HF_UPLOAD_ERRORS=$(awk -F, '$2=="hf_upload"{c++} END{print c+0}' "${FAILED_EPISODES_FILE}")
+    
+    echo "  download:  ${DOWNLOAD_ERRORS}"
+    echo "  extract:   ${EXTRACT_ERRORS}"
+    echo "  tracks:    ${TRACKS_ERRORS}"
+    echo "  hf_upload: ${HF_UPLOAD_ERRORS}"
+    echo ""
+    
+    echo "=== FAILED RUNS ==="
+    echo "(episode_id, failed_step)"
+    echo "------------------------------------------------------------"
+    cat "${FAILED_EPISODES_FILE}"
+    echo "------------------------------------------------------------"
+    echo ""
+    echo "Failed episodes file: ${FAILED_EPISODES_FILE}"
 fi
 
-exit "${PIPELINE_EXIT_CODE}"
+if [ -s "${ERROR_LOG}" ]; then
+    echo ""
+    echo "=== DETAILED ERROR LOG ==="
+    echo "Full error log: ${ERROR_LOG}"
+    echo ""
+    echo "Last 10 errors:"
+    tail -n 10 "${ERROR_LOG}"
+fi
 
+# Show timing statistics
 PROCESSED_COUNT=$(wc -l < "${TIMING_FILE}")
 # Adjust for header line
 PROCESSED_COUNT=$((PROCESSED_COUNT - 1))
 
+echo ""
+echo "=== TIMING STATISTICS ==="
 echo "Processed: ${PROCESSED_COUNT} episodes"
 echo "GPUs used: ${NUM_GPUS} (${GPU_LIST_STR})"
 echo "Workers per GPU: ${WORKERS_PER_GPU}"
@@ -671,3 +742,5 @@ if [ "${PROCESSED_COUNT}" -gt 0 ]; then
         }
     }' "${TIMING_FILE}"
 fi
+
+exit "${PIPELINE_EXIT_CODE}"

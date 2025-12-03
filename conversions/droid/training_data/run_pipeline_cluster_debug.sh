@@ -406,7 +406,6 @@ else
     cat "${EPISODES_FILE}" | xargs -P "${TOTAL_WORKERS}" -I {} bash -c 'process_episode_with_counter "$@"' _ {}
 fi
 PIPELINE_EXIT_CODE=$?
-set -e
 
 stop_progress_monitor
 
