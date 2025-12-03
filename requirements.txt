@@ -44,3 +44,4 @@ python-dotenv
 conversions
 pytest
 gsutil
+huggingface_hub
