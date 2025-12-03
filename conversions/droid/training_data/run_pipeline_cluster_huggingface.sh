@@ -426,6 +426,7 @@ export -f process_episode_worker
 # ============================================================================
 # GET EPISODES
 # ============================================================================
+export EPISODES_FILE
 
 echo "[1/2] Getting episodes sorted by quality..."
 python "${SCRIPT_DIR}/get_episodes_by_quality.py" \
@@ -433,7 +434,89 @@ python "${SCRIPT_DIR}/get_episodes_by_quality.py" \
     --limit "${LIMIT}" \
     --output "${EPISODES_FILE}"
 
+echo "[1.5/2] Skipping episodes already uploaded to HuggingFace..."
+python3 << 'PYTHON_SCRIPT'
+import os
+import re
+from datetime import datetime
+from huggingface_hub import HfApi
+
+episodes_file = os.environ["EPISODES_FILE"]
+repo_id = os.environ.get("HF_REPO_ID")
+repo_type = os.environ.get("HF_REPO_TYPE", "dataset")
+token = os.environ.get("HF_TOKEN")
+
+api = HfApi(token=token)
+
+def parse_episode_id(episode_id: str):
+    parts = episode_id.split("+")
+    if len(parts) != 3:
+        return None
+    m = re.match(r"(\d{4}-\d{2}-\d{2})-(\d+)h-(\d+)m-(\d+)s", parts[2])
+    if not m:
+        return None
+    date = m.group(1)
+    hour, minute, second = m.group(2), m.group(3), m.group(4)
+    dt = datetime.strptime(f"{date} {hour}:{minute}:{second}", "%Y-%m-%d %H:%M:%S")
+    timestamp_folder = dt.strftime("%a_%b_%e_%H:%M:%S_%Y")
+    return {
+        "lab": parts[0],
+        "date": date,
+        "timestamp_folder": timestamp_folder,
+    }
+
+def path_exists(prefix: str) -> bool:
+    try:
+        entries = api.list_repo_tree(
+            repo_id=repo_id,
+            repo_type=repo_type,
+            path=prefix,
+            recursive=False,
+        )
+    except Exception:
+        # If we can't check, assume missing so we still process.
+        return False
+    return len(entries) > 0
+
+keep = []
+skipped = []
+with open(episodes_file, "r") as f:
+    for line in f:
+        ep = line.strip()
+        if not ep:
+            continue
+        parsed = parse_episode_id(ep)
+        if parsed is None:
+            keep.append(ep)
+            continue
+        base = parsed["lab"]
+        date = parsed["date"]
+        ts = parsed["timestamp_folder"]
+        already = False
+        for outcome in ("success", "failure"):
+            prefix = f"{base}/{outcome}/{date}/{ts}"
+            if path_exists(prefix):
+                already = True
+                break
+        if already:
+            skipped.append(ep)
+        else:
+            keep.append(ep)
+
+with open(episodes_file, "w") as f:
+    if keep:
+        f.write("\n".join(keep) + "\n")
+
+print(f"[HF] Skipped {len(skipped)} episodes already present in {repo_id}; remaining: {len(keep)}")
+if skipped:
+    print(f"[HF] Example skipped episode: {skipped[0]}")
+PYTHON_SCRIPT
+
 EPISODE_COUNT=$(wc -l < "${EPISODES_FILE}")
+if [ "${EPISODE_COUNT}" -le 0 ]; then
+    echo "[INFO] No episodes to process after skipping existing ones. Exiting."
+    exit 0
+fi
 echo "Found ${EPISODE_COUNT} episodes to process"
 echo ""
 
