@@ -5,6 +5,9 @@
 # Downloads, extracts RGB/depth (as compressed .npz), and generates tracks for episodes
 # Output format: rgb.npz (uint8 RGB frames), depth.npz (uint16 depth in mm)
 #
+# BATCH UPLOAD MODE: Episodes are staged locally and uploaded to HuggingFace
+# every 10 minutes (configurable via BATCH_UPLOAD_INTERVAL) to avoid rate limits.
+#
 # Usage:
 #   ./run_pipeline.sh                    # Process 10 episodes, auto-detect GPUs, 3 workers/GPU
 #   ./run_pipeline.sh 100                # Process 100 episodes (workers/GPU=3, auto GPUs)
@@ -17,6 +20,7 @@
 #   DROID_WORKERS_PER_GPU   Workers per GPU (default: 3)
 #   DROID_NUM_GPUS          Number of GPUs to use (default: auto-detect)
 #   SKIP_HF_CHECK=1         Skip checking HuggingFace for existing episodes (fast mode)
+#   BATCH_UPLOAD_INTERVAL   Seconds between batch uploads (default: 600 = 10 min)
 
 set -e
 
@@ -49,6 +53,12 @@ GCS_BUCKET="gs://gresearch/robotics/droid_raw/1.0.1"
 # ----------------------------------------------------------------------------
 FAST_LOCAL_DIR="/data/droid_scratch"      # Node-local fast storage (NVMe)
 STAGING_DIR="/data/droid_staging"          # Staging area before HF upload
+BATCH_UPLOAD_DIR="/data/droid_batch_upload" # Completed episodes waiting for batch upload
+# ----------------------------------------------------------------------------
+
+# Batch Upload Configuration
+# ----------------------------------------------------------------------------
+BATCH_UPLOAD_INTERVAL=${BATCH_UPLOAD_INTERVAL:-600}  # Upload every 10 minutes (600 seconds)
 # ----------------------------------------------------------------------------
 
 # Hugging Face Configuration
@@ -222,10 +232,10 @@ fi
 GPU_LIST_STR=$(IFS=,; echo "${GPU_LIST[*]}")
 
 # Export variables for parallel workers
-export CAM2BASE_PATH CONFIG_PATH SCRIPT_DIR GCS_BUCKET FAST_LOCAL_DIR STAGING_DIR TIMING_FILE DEFAULT_INNER_FINGER_MESH
+export CAM2BASE_PATH CONFIG_PATH SCRIPT_DIR GCS_BUCKET FAST_LOCAL_DIR STAGING_DIR BATCH_UPLOAD_DIR TIMING_FILE DEFAULT_INNER_FINGER_MESH
 export NUM_GPUS WORKERS_PER_GPU GPU_LIST_STR
 export STATUS_FILE ERROR_LOG FAILED_EPISODES_FILE ERROR_COUNTS_FILE
-export HF_TOKEN HF_REPO_ID HF_REPO_TYPE
+export HF_TOKEN HF_REPO_ID HF_REPO_TYPE BATCH_UPLOAD_INTERVAL
 
 record_status() {
     local status=$1
@@ -258,6 +268,7 @@ export -f record_status record_error
 mkdir -p "${LOG_DIR}"
 mkdir -p "${FAST_LOCAL_DIR}"
 mkdir -p "${STAGING_DIR}"
+mkdir -p "${BATCH_UPLOAD_DIR}"
 
 echo "=== DROID Training Data Pipeline (NPZ Compressed + HuggingFace Upload) ==="
 echo "Limit: ${LIMIT}"
@@ -266,6 +277,8 @@ echo "Workers/GPU: ${WORKERS_PER_GPU}"
 echo "Total Workers: ${TOTAL_WORKERS}"
 echo "Local Scratch: ${FAST_LOCAL_DIR}"
 echo "Staging Dir: ${STAGING_DIR}"
+echo "Batch Upload Dir: ${BATCH_UPLOAD_DIR}"
+echo "Batch Upload Interval: ${BATCH_UPLOAD_INTERVAL}s (every $((BATCH_UPLOAD_INTERVAL / 60)) min)"
 echo "HuggingFace Repo: ${HF_REPO_ID}"
 echo "Log dir: ${LOG_DIR}"
 echo ""
@@ -382,40 +395,27 @@ process_episode_worker() {
     local TRACKS_TIME=$((TRACKS_END - TRACKS_START))
     
     # ------------------------------------------------------------------------
-    # STEP D: Upload to HuggingFace & Cleanup
+    # STEP D: Move to Batch Upload Directory & Cleanup
     # ------------------------------------------------------------------------
-    # Upload directly to HuggingFace instead of local permanent storage
+    # Move to batch upload directory instead of uploading directly
+    # A background process will batch upload every BATCH_UPLOAD_INTERVAL seconds
     local SYNC_START=$(date +%s)
     
-    # Use huggingface_hub CLI to upload the episode folder
-    # The folder structure will be preserved in the dataset repo
-    python -c "
-import os
-from huggingface_hub import HfApi
-
-api = HfApi(token=os.environ['HF_TOKEN'])
-
-# Upload the entire output folder for this episode
-api.upload_folder(
-    folder_path='${JOB_OUTPUT}',
-    repo_id='${HF_REPO_ID}',
-    repo_type='${HF_REPO_TYPE}',
-    commit_message='Add episode ${EPISODE_ID}',
-    run_as_future=False,
-)
-print('[HF] Uploaded ${EPISODE_ID} to ${HF_REPO_ID}')
-" > "${JOB_LOGS}/hf_upload.log" 2>&1 || {
+    # Move output to batch upload directory (atomic via rename within same filesystem)
+    # Use rsync to merge into the batch upload directory (preserves existing content)
+    rsync -a --remove-source-files "${JOB_OUTPUT}/" "${BATCH_UPLOAD_DIR}/" 2>"${JOB_LOGS}/sync.log" || {
         cp -a "${JOB_LOGS}/." "${DEST_LOG_DIR}/" 2>/dev/null || true
-        record_error "${EPISODE_ID}" "hf_upload" "HuggingFace upload failed (see ${DEST_LOG_DIR}/hf_upload.log)"
-        record_status "failure" "${EPISODE_ID}" "hf_upload"
+        record_error "${EPISODE_ID}" "sync" "Failed to move to batch upload dir (see ${DEST_LOG_DIR}/sync.log)"
+        record_status "failure" "${EPISODE_ID}" "sync"
         rm -rf "${JOB_DIR}"
         return 1
     }
+    echo "[BATCH] Staged ${EPISODE_ID} for batch upload" >> "${JOB_LOGS}/sync.log"
     
     local SYNC_END=$(date +%s)
     local SYNC_TIME=$((SYNC_END - SYNC_START))
     
-    # Cleanup local scratch (no permanent local storage needed)
+    # Cleanup local scratch
     local CLEANUP_START=$(date +%s)
     cp -a "${JOB_LOGS}/." "${DEST_LOG_DIR}/" 2>/dev/null || true
     rm -rf "${JOB_DIR}"
@@ -593,7 +593,117 @@ stop_progress_monitor() {
     fi
 }
 
-trap stop_progress_monitor EXIT
+cleanup_on_exit() {
+    stop_progress_monitor
+    stop_batch_uploader
+}
+trap cleanup_on_exit EXIT
+
+# ============================================================================
+# BATCH UPLOADER (Background Process)
+# ============================================================================
+
+BATCH_UPLOAD_LOG="${LOG_DIR}/batch_upload.log"
+BATCH_UPLOAD_LOCK="${BATCH_UPLOAD_DIR}/.upload.lock"
+BATCH_UPLOAD_COUNT_FILE="${LOG_DIR}/batch_upload_count.txt"
+echo "0" > "${BATCH_UPLOAD_COUNT_FILE}"
+export BATCH_UPLOAD_LOG BATCH_UPLOAD_LOCK BATCH_UPLOAD_COUNT_FILE
+
+do_batch_upload() {
+    # Acquire lock to prevent concurrent uploads
+    (
+        flock -n 200 || {
+            echo "[$(date +'%Y-%m-%d %H:%M:%S')] Skipping: another upload in progress" >> "${BATCH_UPLOAD_LOG}"
+            return 0
+        }
+        
+        # Check if there's anything to upload
+        local file_count=$(find "${BATCH_UPLOAD_DIR}" -type f 2>/dev/null | wc -l)
+        if [ "${file_count}" -eq 0 ]; then
+            echo "[$(date +'%Y-%m-%d %H:%M:%S')] No files to upload" >> "${BATCH_UPLOAD_LOG}"
+            return 0
+        fi
+        
+        echo "[$(date +'%Y-%m-%d %H:%M:%S')] Starting batch upload of ${file_count} files..." >> "${BATCH_UPLOAD_LOG}"
+        
+        # Upload the batch
+        python3 -c "
+import os
+import sys
+from huggingface_hub import HfApi
+from datetime import datetime
+
+batch_dir = '${BATCH_UPLOAD_DIR}'
+api = HfApi(token=os.environ['HF_TOKEN'])
+
+try:
+    api.upload_folder(
+        folder_path=batch_dir,
+        repo_id='${HF_REPO_ID}',
+        repo_type='${HF_REPO_TYPE}',
+        commit_message=f'Batch upload {datetime.now().strftime(\"%Y-%m-%d %H:%M:%S\")}',
+        run_as_future=False,
+    )
+    print(f'[HF] Batch upload successful')
+except Exception as e:
+    print(f'[HF] Batch upload failed: {e}', file=sys.stderr)
+    sys.exit(1)
+" >> "${BATCH_UPLOAD_LOG}" 2>&1
+        
+        local upload_status=$?
+        if [ ${upload_status} -eq 0 ]; then
+            # Success: clear the batch upload directory
+            echo "[$(date +'%Y-%m-%d %H:%M:%S')] Upload successful, clearing batch directory" >> "${BATCH_UPLOAD_LOG}"
+            find "${BATCH_UPLOAD_DIR}" -mindepth 1 -delete 2>/dev/null || true
+            
+            # Increment upload counter
+            local count=$(cat "${BATCH_UPLOAD_COUNT_FILE}")
+            echo $((count + 1)) > "${BATCH_UPLOAD_COUNT_FILE}"
+        else
+            echo "[$(date +'%Y-%m-%d %H:%M:%S')] Upload failed, will retry next interval" >> "${BATCH_UPLOAD_LOG}"
+        fi
+    ) 200>"${BATCH_UPLOAD_LOCK}"
+}
+export -f do_batch_upload
+
+batch_upload_loop() {
+    local interval=$1
+    echo "[$(date +'%Y-%m-%d %H:%M:%S')] Batch uploader started (interval: ${interval}s)" >> "${BATCH_UPLOAD_LOG}"
+    while true; do
+        sleep "${interval}"
+        do_batch_upload
+    done
+}
+
+BATCH_UPLOAD_PID=""
+start_batch_uploader() {
+    batch_upload_loop "${BATCH_UPLOAD_INTERVAL}" &
+    BATCH_UPLOAD_PID=$!
+    echo "[INFO] Started batch uploader (PID: ${BATCH_UPLOAD_PID}, interval: ${BATCH_UPLOAD_INTERVAL}s)"
+}
+
+stop_batch_uploader() {
+    if [ -n "${BATCH_UPLOAD_PID}" ] && kill -0 "${BATCH_UPLOAD_PID}" 2>/dev/null; then
+        kill "${BATCH_UPLOAD_PID}" 2>/dev/null || true
+        wait "${BATCH_UPLOAD_PID}" 2>/dev/null || true
+        echo "[INFO] Stopped batch uploader"
+    fi
+}
+
+final_batch_upload() {
+    echo ""
+    echo "[INFO] Performing final batch upload..."
+    do_batch_upload
+    
+    # Check if anything remains
+    local remaining=$(find "${BATCH_UPLOAD_DIR}" -type f 2>/dev/null | wc -l)
+    if [ "${remaining}" -gt 0 ]; then
+        echo "[WARN] ${remaining} files still pending upload in ${BATCH_UPLOAD_DIR}"
+        echo "[WARN] You may need to run the upload manually or retry"
+    else
+        echo "[INFO] All files uploaded successfully"
+    fi
+}
 
 # ============================================================================
 # EXECUTE MULTI-GPU PARALLEL PIPELINE
@@ -602,9 +712,11 @@ trap stop_progress_monitor EXIT
 echo "[2/2] Launching ${TOTAL_WORKERS} workers across ${NUM_GPUS} GPUs..."
 echo "      Workers per GPU: ${WORKERS_PER_GPU}"
 echo "      GPU IDs: ${GPU_LIST_STR}"
+echo "      Batch upload interval: ${BATCH_UPLOAD_INTERVAL}s"
 echo "      Monitoring output in ${TIMING_FILE}"
 echo "============================================================"
 
+start_batch_uploader
 start_progress_monitor
 
 set +e
@@ -644,6 +756,10 @@ fi
 PIPELINE_EXIT_CODE=$?
 
 stop_progress_monitor
+stop_batch_uploader
+
+# Perform final batch upload for any remaining files
+final_batch_upload
 
 # ============================================================================
 # SUMMARY
@@ -672,12 +788,12 @@ if [ -f "${FAILED_EPISODES_FILE}" ] && [ -s "${FAILED_EPISODES_FILE}" ]; then
     DOWNLOAD_ERRORS=$(awk -F, '$2=="download"{c++} END{print c+0}' "${FAILED_EPISODES_FILE}")
     EXTRACT_ERRORS=$(awk -F, '$2=="extract"{c++} END{print c+0}' "${FAILED_EPISODES_FILE}")
     TRACKS_ERRORS=$(awk -F, '$2=="tracks"{c++} END{print c+0}' "${FAILED_EPISODES_FILE}")
-    HF_UPLOAD_ERRORS=$(awk -F, '$2=="hf_upload"{c++} END{print c+0}' "${FAILED_EPISODES_FILE}")
+    SYNC_ERRORS=$(awk -F, '$2=="sync"{c++} END{print c+0}' "${FAILED_EPISODES_FILE}")
     
     echo "  download:  ${DOWNLOAD_ERRORS}"
     echo "  extract:   ${EXTRACT_ERRORS}"
     echo "  tracks:    ${TRACKS_ERRORS}"
-    echo "  hf_upload: ${HF_UPLOAD_ERRORS}"
+    echo "  sync:      ${SYNC_ERRORS}"
     echo ""
     
     echo "=== FAILED RUNS ==="
@@ -711,6 +827,11 @@ echo "Workers per GPU: ${WORKERS_PER_GPU}"
 echo "Total workers: ${TOTAL_WORKERS}"
 echo "Timing log: ${TIMING_FILE}"
 echo "HuggingFace Repo: ${HF_REPO_ID}"
+
+# Show batch upload statistics
+BATCH_UPLOAD_COUNT=$(cat "${BATCH_UPLOAD_COUNT_FILE}" 2>/dev/null || echo "0")
+echo "Batch uploads completed: ${BATCH_UPLOAD_COUNT}"
+echo "Batch upload log: ${BATCH_UPLOAD_LOG}"
 
 if [ "${PROCESSED_COUNT}" -gt 0 ]; then
     # Calculate averages and per-GPU statistics using awk from the CSV
