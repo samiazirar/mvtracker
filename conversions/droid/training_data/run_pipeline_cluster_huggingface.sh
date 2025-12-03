@@ -435,6 +435,7 @@ python "${SCRIPT_DIR}/get_episodes_by_quality.py" \
     --output "${EPISODES_FILE}"
 
 echo "[1.5/2] Skipping episodes already uploaded to HuggingFace..."
+SKIP_START=$(date +%s)
 python3 << 'PYTHON_SCRIPT'
 import os
 import re
@@ -511,6 +512,9 @@ print(f"[HF] Skipped {len(skipped)} episodes already present in {repo_id}; remai
 if skipped:
     print(f"[HF] Example skipped episode: {skipped[0]}")
 PYTHON_SCRIPT
+SKIP_END=$(date +%s)
+SKIP_TIME=$((SKIP_END - SKIP_START))
+echo "[HF] Skip check time: ${SKIP_TIME}s"
 
 EPISODE_COUNT=$(wc -l < "${EPISODES_FILE}")
 if [ "${EPISODE_COUNT}" -le 0 ]; then
