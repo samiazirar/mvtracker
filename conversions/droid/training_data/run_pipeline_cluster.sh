@@ -339,11 +339,10 @@ export -f process_episode_worker
 # GET EPISODES
 # ============================================================================
 
-echo "[1/2] Getting episodes (balanced success/failure per lab)..."
+echo "[1/2] Getting episodes sorted by quality..."
 python "${SCRIPT_DIR}/get_episodes_by_quality.py" \
     --cam2base "${CAM2BASE_PATH}" \
     --limit "${LIMIT}" \
-    --gcs_bucket "${GCS_BUCKET}" \
     --output "${EPISODES_FILE}"
 
 EPISODE_COUNT=$(wc -l < "${EPISODES_FILE}")
