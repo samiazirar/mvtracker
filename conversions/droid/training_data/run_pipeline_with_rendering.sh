@@ -373,7 +373,6 @@ echo "[1/2] Getting episodes (balanced success/failure per lab)..."
 python "${SCRIPT_DIR}/get_episodes_by_quality.py" \
     --cam2base "${CAM2BASE_PATH}" \
     --limit "${LIMIT}" \
-    --balanced \
     --gcs_bucket "${GCS_BUCKET}" \
     --output "${EPISODES_FILE}"
 
