@@ -66,16 +66,30 @@ def check_local_path(local_root: str, episode_info: dict) -> Optional[str]:
     """Check if episode exists in local data root.
     
     Returns the full path if found, None otherwise.
+    Handles case-insensitive lab name matching (e.g., 'tri' -> 'TRI').
     """
     lab = episode_info['lab']
     date = episode_info['date']
     timestamp = episode_info['timestamp_folder']
     
-    for outcome in ['success', 'failure']:
-        path = os.path.join(local_root, lab, outcome, date, timestamp)
-        h5_path = os.path.join(path, 'trajectory.h5')
-        if os.path.exists(h5_path):
-            return path
+    # Build list of lab name variants to try (original, upper, title case)
+    lab_variants = [lab, lab.upper(), lab.lower(), lab.title()]
+    # Also check actual directories for case-insensitive match
+    if os.path.isdir(local_root):
+        for existing_lab in os.listdir(local_root):
+            if existing_lab.lower() == lab.lower():
+                lab_variants.append(existing_lab)
+    
+    # Remove duplicates while preserving order
+    seen = set()
+    lab_variants = [x for x in lab_variants if not (x in seen or seen.add(x))]
+    
+    for lab_name in lab_variants:
+        for outcome in ['success', 'failure']:
+            path = os.path.join(local_root, lab_name, outcome, date, timestamp)
+            h5_path = os.path.join(path, 'trajectory.h5')
+            if os.path.exists(h5_path):
+                return path
     
     return None
 
