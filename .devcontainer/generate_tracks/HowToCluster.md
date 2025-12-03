@@ -29,10 +29,18 @@ enroot export --output ~/depth_tracks_generator_final.sqsh depth_tracks_generato
 
 
 finally run with
+First copy to /data
 
 
-enroot create --force --name depth_tracks_generator_final ~/depth_tracks_generator_final.sqsh
-enroot start -r -w depth_tracks_generator_final
+rsync -ah --progress ~/depth_tracks_generator_final.sqsh /data/
+
+then create with 
+
+enroot create --force --name depth_tracks_generator_final /data/depth_tracks_generator_final.sqsh
+
+and start with
+
+enroot start  --mount /data:/data -r -w depth_tracks_generator_final
 
 
 
