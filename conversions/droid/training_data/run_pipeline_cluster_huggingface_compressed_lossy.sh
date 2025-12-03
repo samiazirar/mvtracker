@@ -53,7 +53,7 @@ STAGING_DIR="/data/droid_staging"          # Staging area before HF upload
 
 # Hugging Face Configuration
 # ----------------------------------------------------------------------------
-HF_REPO_ID="sazirarrwth99/trajectory_data"     # Your HF dataset repo
+HF_REPO_ID="sazirarrwth99/lossy_comr_traj"     # Your HF dataset repo
 HF_REPO_TYPE="dataset"                      # Type: dataset, model, or space
 # ----------------------------------------------------------------------------
 
@@ -84,7 +84,7 @@ from huggingface_hub import HfApi, create_repo
 from huggingface_hub.utils import RepositoryNotFoundError
 
 token = os.environ['HF_TOKEN']
-repo_id = os.environ.get('HF_REPO_ID', 'sazirarrwth99/trajectory_data')
+repo_id = os.environ.get('HF_REPO_ID', 'sazirarrwth99/lossy_comr_traj')
 repo_type = os.environ.get('HF_REPO_TYPE', 'dataset')
 
 api = HfApi(token=token)
