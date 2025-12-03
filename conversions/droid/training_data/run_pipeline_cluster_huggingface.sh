@@ -440,118 +440,103 @@ python "${SCRIPT_DIR}/get_episodes_by_quality.py" \
     --limit "${LIMIT}" \
     --output "${EPISODES_FILE}"
 
+EXISTING_LIST_FILE="${LOG_DIR}/hf_file_list.txt"
+ALREADY_PROCESSED_FILE="${LOG_DIR}/already_processed.txt"
+REMAINING_FILE="${LOG_DIR}/remaining_to_process.txt"
+
 if [ "${SKIP_HF_CHECK}" -eq 1 ]; then
     echo "[1.5/2] SKIP_HF_CHECK=1: Skipping HuggingFace existence checks (fast mode)"
     echo "[HF] Processing all episodes without checking HuggingFace"
 else
-    echo "[1.5/2] Loading ALL processed episodes from HuggingFace (one-time bulk fetch)..."
+    echo "[1.5/2] Loading processed episodes from HuggingFace via git (fast skip check)..."
     echo "        (Set SKIP_HF_CHECK=1 to skip this entirely)"
     SKIP_START=$(date +%s)
-    python3 << 'PYTHON_SCRIPT'
+    TEMP_GIT_DIR=$(mktemp -d)
+
+    if git clone --depth 1 --filter=blob:none --no-checkout \
+        "https://oauth2:${HF_TOKEN}@huggingface.co/datasets/${HF_REPO_ID}" \
+        "${TEMP_GIT_DIR}" > /dev/null 2>&1; then
+        pushd "${TEMP_GIT_DIR}" > /dev/null
+        git ls-tree -r --name-only HEAD > "${EXISTING_LIST_FILE}"
+        popd > /dev/null
+        rm -rf "${TEMP_GIT_DIR}"
+
+        FILE_COUNT=$(wc -l < "${EXISTING_LIST_FILE}")
+        echo "      [SUCCESS] Retrieved list of ${FILE_COUNT} files."
+
+        export EPISODES_FILE EXISTING_LIST_FILE ALREADY_PROCESSED_FILE REMAINING_FILE
+        python3 << 'PYTHON_SCRIPT'
 import os
 import re
 from datetime import datetime
-from huggingface_hub import HfApi
 
 episodes_file = os.environ["EPISODES_FILE"]
-repo_id = os.environ.get("HF_REPO_ID")
-repo_type = os.environ.get("HF_REPO_TYPE", "dataset")
-token = os.environ.get("HF_TOKEN")
+existing_list_file = os.environ["EXISTING_LIST_FILE"]
+processed_file = os.environ["ALREADY_PROCESSED_FILE"]
+remaining_file = os.environ["REMAINING_FILE"]
 
-api = HfApi(token=token)
+print("[HF] Building lookup table from git file list...")
+processed_signatures = set()
+with open(existing_list_file, "r") as f:
+    for path in f:
+        path = path.strip()
+        parts = path.split("/")
+        if len(parts) >= 4:
+            lab, outcome, date, timestamp = parts[0], parts[1], parts[2], parts[3]
+            if outcome in ("success", "failure"):
+                processed_signatures.add(f"{lab}+{date}+{timestamp}")
 
-def parse_episode_id(episode_id: str):
-    """Convert episode_id to the path format used in HuggingFace."""
+def parse_episode_id(episode_id):
     parts = episode_id.split("+")
     if len(parts) != 3:
         return None
     m = re.match(r"(\d{4}-\d{2}-\d{2})-(\d+)h-(\d+)m-(\d+)s", parts[2])
     if not m:
         return None
-    date = m.group(1)
-    hour, minute, second = m.group(2), m.group(3), m.group(4)
-    dt = datetime.strptime(f"{date} {hour}:{minute}:{second}", "%Y-%m-%d %H:%M:%S")
-    timestamp_folder = dt.strftime("%a_%b_%e_%H:%M:%S_%Y")
+    dt = datetime.strptime(
+        f"{m.group(1)} {m.group(2)}:{m.group(3)}:{m.group(4)}",
+        "%Y-%m-%d %H:%M:%S",
+    )
     return {
         "lab": parts[0],
-        "date": date,
-        "timestamp_folder": timestamp_folder,
+        "date": m.group(1),
+        "timestamp_folder": dt.strftime("%a_%b_%e_%H:%M:%S_%Y"),
     }
 
-# ============================================================================
-# STEP 1: Bulk fetch ALL paths from HuggingFace (ONE API call with pagination)
-# ============================================================================
-print("[HF] Fetching all existing paths from HuggingFace repo (this may take a moment)...")
-
-existing_paths = set()
-try:
-    # list_repo_tree with recursive=True gets everything
-    # We collect all directory paths that look like: lab/outcome/date/timestamp
-    for item in api.list_repo_tree(
-        repo_id=repo_id,
-        repo_type=repo_type,
-        recursive=True,
-    ):
-        # item.path gives us the full path
-        existing_paths.add(item.path)
-except Exception as e:
-    print(f"[WARN] Could not fetch HuggingFace repo tree: {e}")
-    print("[WARN] Will process all episodes (no skip)")
-    existing_paths = set()
-
-print(f"[HF] Found {len(existing_paths)} paths in HuggingFace repo")
-
-# Build a set of processed episode signatures for fast lookup
-# We look for paths like: lab/success/date/timestamp or lab/failure/date/timestamp
-processed_signatures = set()
-for path in existing_paths:
-    parts = path.split("/")
-    # Match pattern: lab/outcome/date/timestamp/...
-    if len(parts) >= 4:
-        lab, outcome, date, timestamp = parts[0], parts[1], parts[2], parts[3]
-        if outcome in ("success", "failure"):
-            # Create a signature: lab+date+timestamp
-            sig = f"{lab}+{date}+{timestamp}"
-            processed_signatures.add(sig)
-
-print(f"[HF] Found {len(processed_signatures)} unique processed episodes")
-
-# ============================================================================
-# STEP 2: Filter episodes locally (fast set lookup)
-# ============================================================================
-keep = []
-skipped = []
+already_processed = []
+remaining = []
 with open(episodes_file, "r") as f:
     for line in f:
         ep = line.strip()
         if not ep:
             continue
         parsed = parse_episode_id(ep)
-        if parsed is None:
-            keep.append(ep)
-            continue
-        
-        # Create signature to check against processed set
-        sig = f"{parsed['lab']}+{parsed['date']}+{parsed['timestamp_folder']}"
-        
-        if sig in processed_signatures:
-            skipped.append(ep)
+        if parsed:
+            sig = f"{parsed['lab']}+{parsed['date']}+{parsed['timestamp_folder']}"
+            (already_processed if sig in processed_signatures else remaining).append(ep)
         else:
-            keep.append(ep)
+            remaining.append(ep)
 
-with open(episodes_file, "w") as f:
-    if keep:
-        f.write("\n".join(keep) + "\n")
+with open(processed_file, "w") as f:
+    f.write("\n".join(already_processed) + "\n")
+with open(remaining_file, "w") as f:
+    f.write("\n".join(remaining) + "\n")
 
-print(f"[HF] Skipped {len(skipped)} episodes already processed; remaining: {len(keep)}")
-if skipped and len(skipped) <= 5:
-    print(f"[HF] Skipped episodes: {skipped}")
-elif skipped:
-    print(f"[HF] Example skipped: {skipped[0]}")
+print(f"[HF] Matched:   {len(already_processed)} (Already on HF)")
+print(f"[HF] Remaining: {len(remaining)} (Need processing)")
 PYTHON_SCRIPT
+
+        cp "${REMAINING_FILE}" "${EPISODES_FILE}"
+        PROCESSED_COUNT=$(wc -l < "${ALREADY_PROCESSED_FILE}")
+        REMAINING_COUNT=$(wc -l < "${EPISODES_FILE}")
+        echo "[HF] Skipped ${PROCESSED_COUNT} episodes already processed; remaining: ${REMAINING_COUNT}"
+    else
+        echo "[WARN] Could not fetch HuggingFace file list via git; processing all episodes"
+        rm -rf "${TEMP_GIT_DIR}"
+    fi
     SKIP_END=$(date +%s)
     SKIP_TIME=$((SKIP_END - SKIP_START))
-    echo "[HF] Bulk fetch + filter time: ${SKIP_TIME}s"
+    echo "[HF] Git fetch + filter time: ${SKIP_TIME}s"
 fi
 
 EPISODE_COUNT=$(wc -l < "${EPISODES_FILE}")
