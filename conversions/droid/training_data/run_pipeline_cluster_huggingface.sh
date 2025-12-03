@@ -28,7 +28,7 @@ NUM_GPUS=${3:-${DROID_NUM_GPUS:-0}}      # 0 = auto-detect
 CAM2BASE_PATH="/data/cam2base_extrinsic_superset.json"
 CONFIG_PATH="conversions/droid/training_data/config.yaml"
 SCRIPT_DIR="conversions/droid/training_data"
-LOG_DIR="/data/logs/pipeline_hugginface_$(date +%Y%m%d_%H%M%S)"
+LOG_DIR="/data/logs/pipeline_huggingface_$(date +%Y%m%d_%H%M%S)"
 EPISODES_FILE="${LOG_DIR}/episodes.txt"
 TIMING_FILE="${LOG_DIR}/timing.csv"
 STATUS_FILE="${LOG_DIR}/status.log"
