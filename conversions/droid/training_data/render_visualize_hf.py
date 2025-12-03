@@ -68,7 +68,7 @@ def parse_episode_id(episode_id: str) -> dict:
     date = match.group(1)
     hour, minute, second = match.group(2), match.group(3), match.group(4)
     dt = datetime.strptime(f"{date} {hour}:{minute}:{second}", "%Y-%m-%d %H:%M:%S")
-    timestamp_folder = dt.strftime("%a_%b_%e_%H:%M:%S_%Y")
+    timestamp_folder = dt.strftime("%a_%b_%e_%H:%M:%S_%Y").replace(" ", "_")
 
     return {
         "lab": lab,

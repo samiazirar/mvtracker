@@ -75,7 +75,7 @@ def parse_episode_id(episode_id: str) -> dict:
     # Reconstruct DROID timestamp folder format: "Fri_Aug_18_11:58:51_2023"
     from datetime import datetime
     dt = datetime.strptime(f"{date} {hour}:{minute}:{second}", "%Y-%m-%d %H:%M:%S")
-    timestamp_folder = dt.strftime("%a_%b_%d_%H:%M:%S_%Y")
+    timestamp_folder = dt.strftime("%a_%b_%e_%H:%M:%S_%Y").replace(" ", "_")
     
     return {
         'lab': lab,

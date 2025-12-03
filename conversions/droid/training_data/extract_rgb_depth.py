@@ -98,9 +98,11 @@ def parse_episode_id(episode_id: str) -> dict:
     time_str = f"{hour}:{minute}:{second}"
     
     # Reconstruct DROID timestamp folder format: "Fri_Aug_18_11:58:51_2023"
+    # Note: Uses %e (space-padded day) then replaces space with underscore
+    # e.g., for Oct 8 → "Sun_Oct__8_17:30:34_2023" (double underscore)
     from datetime import datetime
     dt = datetime.strptime(f"{date} {hour}:{minute}:{second}", "%Y-%m-%d %H:%M:%S")
-    timestamp_folder = dt.strftime("%a_%b_%d_%H:%M:%S_%Y")
+    timestamp_folder = dt.strftime("%a_%b_%e_%H:%M:%S_%Y").replace(" ", "_")
     
     return {
         'lab': lab,

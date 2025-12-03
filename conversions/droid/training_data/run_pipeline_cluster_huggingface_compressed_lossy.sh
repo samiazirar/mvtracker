@@ -506,7 +506,7 @@ def parse_episode_id(episode_id):
     return {
         "lab": parts[0],
         "date": m.group(1),
-        "timestamp_folder": dt.strftime("%a_%b_%e_%H:%M:%S_%Y"),
+        "timestamp_folder": dt.strftime("%a_%b_%e_%H:%M:%S_%Y").replace(" ", "_"),
     }
 
 already_processed = []
