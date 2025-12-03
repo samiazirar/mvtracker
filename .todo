@@ -5,8 +5,10 @@
 - [ ] Train a model to recoginize the gripper and contact flow first
 - [ ] Get mask only for Gripper
 - [ ] Filter the bad camera
+- [ ] Give code to load mp4 and depth as well
 
-- [ ] Save only depth (more efficienty) and directly use the provided mp4
+- [ ] STORE THE REPROJECTIONS!
+- [x] Save only depth (more efficienty) and directly use the provided mp4
 
 
 

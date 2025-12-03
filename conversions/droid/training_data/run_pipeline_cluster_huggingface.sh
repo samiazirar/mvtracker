@@ -46,8 +46,14 @@ FAILED_EPISODES_FILE="${LOG_DIR}/failed_episodes.txt"
 ERROR_COUNTS_FILE="${LOG_DIR}/error_counts.txt"
 DEFAULT_INNER_FINGER_MESH="/data/robotiq_arg85_description/meshes/inner_finger_fine.STL"
 
-# GCS bucket for downloads
+# Data source configuration
+# ----------------------------------------------------------------------------
+# Local DROID data (preferred - no download needed)
+LOCAL_DROID_SOURCE="/data/droid/data/droid_raw/1.0.1"
+# GCS bucket (fallback if local not available)
 GCS_BUCKET="gs://gresearch/robotics/droid_raw/1.0.1"
+USE_GCS=${USE_GCS:-0}  # Set to 1 to force GCS downloads
+# ----------------------------------------------------------------------------
 
 # Storage Configuration - ALL ON FAST /data SSD
 # ----------------------------------------------------------------------------
@@ -232,7 +238,7 @@ fi
 GPU_LIST_STR=$(IFS=,; echo "${GPU_LIST[*]}")
 
 # Export variables for parallel workers
-export CAM2BASE_PATH CONFIG_PATH SCRIPT_DIR GCS_BUCKET FAST_LOCAL_DIR STAGING_DIR BATCH_UPLOAD_DIR TIMING_FILE DEFAULT_INNER_FINGER_MESH
+export CAM2BASE_PATH CONFIG_PATH SCRIPT_DIR GCS_BUCKET LOCAL_DROID_SOURCE USE_GCS FAST_LOCAL_DIR STAGING_DIR BATCH_UPLOAD_DIR TIMING_FILE DEFAULT_INNER_FINGER_MESH
 export NUM_GPUS WORKERS_PER_GPU GPU_LIST_STR LOG_DIR
 export STATUS_FILE ERROR_LOG FAILED_EPISODES_FILE ERROR_COUNTS_FILE
 export HF_TOKEN HF_REPO_ID HF_REPO_TYPE BATCH_UPLOAD_INTERVAL
@@ -332,22 +338,38 @@ process_episode_worker() {
     local PREP_TIME=$((PREP_END - PIPELINE_START))
 
     # ------------------------------------------------------------------------
-    # STEP A: Download Episode (To Fast Local /data)
+    # STEP A: Link/Copy Episode from Local Source (or download from GCS)
     # ------------------------------------------------------------------------
     local DOWNLOAD_START=$(date +%s)
     
-    python "${SCRIPT_DIR}/download_single_episode.py" \
-        --episode_id "${EPISODE_ID}" \
-        --cam2base "${CAM2BASE_PATH}" \
-        --output_dir "${JOB_DATA}" \
-        --gcs_bucket "${GCS_BUCKET}" \
-        > "${JOB_LOGS}/download.log" 2>&1 || {
-            cp -a "${JOB_LOGS}/." "${DEST_LOG_DIR}/" 2>/dev/null || true
-            record_error "${EPISODE_ID}" "download" "Download failed (see ${DEST_LOG_DIR}/download.log)"
-            record_status "failure" "${EPISODE_ID}" "download"
-            rm -rf "${JOB_DIR}"
-            return 1
-        }
+    if [ "${USE_GCS}" -eq 1 ]; then
+        # GCS download mode
+        python "${SCRIPT_DIR}/download_single_episode.py" \
+            --episode_id "${EPISODE_ID}" \
+            --output_dir "${JOB_DATA}" \
+            --use_gcs \
+            --gcs_bucket "${GCS_BUCKET}" \
+            > "${JOB_LOGS}/download.log" 2>&1 || {
+                cp -a "${JOB_LOGS}/." "${DEST_LOG_DIR}/" 2>/dev/null || true
+                record_error "${EPISODE_ID}" "download" "GCS download failed (see ${DEST_LOG_DIR}/download.log)"
+                record_status "failure" "${EPISODE_ID}" "download"
+                rm -rf "${JOB_DIR}"
+                return 1
+            }
+    else
+        # Local symlink mode (faster, no network)
+        python "${SCRIPT_DIR}/download_single_episode.py" \
+            --episode_id "${EPISODE_ID}" \
+            --output_dir "${JOB_DATA}" \
+            --local_source "${LOCAL_DROID_SOURCE}" \
+            > "${JOB_LOGS}/download.log" 2>&1 || {
+                cp -a "${JOB_LOGS}/." "${DEST_LOG_DIR}/" 2>/dev/null || true
+                record_error "${EPISODE_ID}" "download" "Local source not found (see ${DEST_LOG_DIR}/download.log)"
+                record_status "failure" "${EPISODE_ID}" "download"
+                rm -rf "${JOB_DIR}"
+                return 1
+            }
+    fi
     
     local DOWNLOAD_END=$(date +%s)
     local DOWNLOAD_TIME=$((DOWNLOAD_END - DOWNLOAD_START))
