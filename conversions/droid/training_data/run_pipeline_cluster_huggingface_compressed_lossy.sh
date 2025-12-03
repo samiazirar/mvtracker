@@ -63,7 +63,7 @@ BATCH_UPLOAD_INTERVAL=${BATCH_UPLOAD_INTERVAL:-600}  # Upload every 10 minutes (
 
 # Hugging Face Configuration
 # ----------------------------------------------------------------------------
-HF_REPO_ID="sazirarrwth99/lossy_comr_traj"     # Your HF dataset repo
+HF_REPO_ID="sazirarrwth99/lossy_comr_traject"     # Your HF dataset repo
 HF_REPO_TYPE="dataset"                      # Type: dataset, model, or space
 # ----------------------------------------------------------------------------
 
@@ -94,7 +94,7 @@ from huggingface_hub import HfApi, create_repo
 from huggingface_hub.utils import RepositoryNotFoundError
 
 token = os.environ['HF_TOKEN']
-repo_id = os.environ.get('HF_REPO_ID', 'sazirarrwth99/lossy_comr_traj')
+repo_id = os.environ.get('HF_REPO_ID', 'sazirarrwth99/lossy_comr_traject')
 repo_type = os.environ.get('HF_REPO_TYPE', 'dataset')
 
 api = HfApi(token=token)
@@ -233,7 +233,7 @@ GPU_LIST_STR=$(IFS=,; echo "${GPU_LIST[*]}")
 
 # Export variables for parallel workers
 export CAM2BASE_PATH CONFIG_PATH SCRIPT_DIR GCS_BUCKET FAST_LOCAL_DIR STAGING_DIR BATCH_UPLOAD_DIR TIMING_FILE DEFAULT_INNER_FINGER_MESH
-export NUM_GPUS WORKERS_PER_GPU GPU_LIST_STR
+export NUM_GPUS WORKERS_PER_GPU GPU_LIST_STR LOG_DIR
 export STATUS_FILE ERROR_LOG FAILED_EPISODES_FILE ERROR_COUNTS_FILE
 export HF_TOKEN HF_REPO_ID HF_REPO_TYPE BATCH_UPLOAD_INTERVAL
 
