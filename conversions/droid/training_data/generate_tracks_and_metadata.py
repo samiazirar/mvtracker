@@ -1,9 +1,23 @@
 """Generate tracks.npz, extrinsics.npz, and quality.json for DROID training data.
 
 This script processes DROID episodes and generates:
-1. tracks.npz - Gripper contact surface tracks in world coordinates
+1. tracks.npz - Gripper contact surface tracks in world coordinates + 2D projections per camera
 2. extrinsics.npz - Camera extrinsics (fixed external cams + per-frame wrist cam)
 3. quality.json - Copy of cam2base calibration snippet + metadata
+
+tracks.npz contents:
+    - tracks_3d: [T, N, 3] float32 - 3D track points in world frame
+    - tracks_2d_{camera_serial}: [T, N, 2] float32 - 2D projections per camera (NaN for invalid)
+    - intrinsics_{camera_serial}: [3, 3] float64 - Camera intrinsic matrix
+    - image_size_{camera_serial}: [2] int - Image dimensions [width, height]
+    - cameras_with_2d_tracks: list of camera serials that have 2D tracks
+    - contact_points_local: Local coordinates of contact points on gripper
+    - gripper_poses: [T, 4, 4] float32 - End-effector poses
+    - gripper_positions: [T] float32 - Gripper aperture values
+    - cartesian_positions: [T, 6] float32 - Robot cartesian state
+    - num_frames: int - Number of frames
+    - num_points_per_finger: int - Number of track points per finger
+    - fps: float - Frame rate
 
 Usage:
     python generate_tracks_and_metadata.py --episode_id "AUTOLab+84bd5053+2023-08-18-12h-01m-10s"
@@ -14,6 +28,9 @@ The output maintains DROID folder structure:
         ├── tracks.npz
         ├── extrinsics.npz
         └── quality.json
+
+Note: For 2D tracks to be generated, extract_rgb_depth.py must be run first to save
+camera intrinsics.json files in the recordings directory.
 """
 
 import argparse
@@ -40,6 +57,7 @@ from transforms import (  # type: ignore
     compute_wrist_cam_offset,
     precompute_wrist_trajectory,
     external_cam_to_world,
+    project_tracks_to_2d,
 )
 from tracking import ContactSurfaceTracker, compute_finger_transforms  # type: ignore
 
@@ -154,6 +172,107 @@ def load_cam2base_for_episode(cam2base_path: str, episode_info: dict) -> dict:
                 return {key: all_calibs[key]}
     
     raise KeyError(f"No calibration found for episode: {episode_info['full_id']}")
+
+
+def load_camera_intrinsics(recordings_dir: str) -> dict:
+    """Load camera intrinsics from recordings output directory.
+    
+    Looks for intrinsics.json files in each camera subdirectory.
+    
+    Args:
+        recordings_dir: Path to recordings directory containing camera folders
+        
+    Returns:
+        dict mapping camera_serial to {'K': 3x3 matrix, 'width': int, 'height': int}
+    """
+    intrinsics = {}
+    
+    if not os.path.exists(recordings_dir):
+        return intrinsics
+    
+    # Look for camera subdirectories
+    for entry in os.listdir(recordings_dir):
+        cam_dir = os.path.join(recordings_dir, entry)
+        if not os.path.isdir(cam_dir):
+            continue
+        
+        intrinsics_path = os.path.join(cam_dir, 'intrinsics.json')
+        if os.path.exists(intrinsics_path):
+            with open(intrinsics_path, 'r') as f:
+                data = json.load(f)
+            
+            # Build 3x3 intrinsic matrix
+            K = np.array([
+                [data['fx'], 0, data['cx']],
+                [0, data['fy'], data['cy']],
+                [0, 0, 1]
+            ], dtype=np.float64)
+            
+            intrinsics[entry] = {
+                'K': K,
+                'width': data['width'],
+                'height': data['height'],
+            }
+    
+    return intrinsics
+
+
+def compute_2d_tracks(
+    tracks_3d: np.ndarray,
+    camera_intrinsics: dict,
+    extrinsics_data: dict,
+    min_depth: float = 0.01,
+) -> dict:
+    """Compute 2D track projections for all cameras.
+    
+    Args:
+        tracks_3d: [T, N, 3] array of 3D track points
+        camera_intrinsics: dict from load_camera_intrinsics()
+        extrinsics_data: dict from compute_extrinsics()
+        min_depth: Minimum depth for valid projection
+        
+    Returns:
+        dict mapping camera_serial to [T, N, 2] array of 2D projections
+    """
+    tracks_2d = {}
+    
+    # Process external cameras (static extrinsics)
+    for cam_id, T_world_cam in extrinsics_data['external_extrinsics'].items():
+        if cam_id not in camera_intrinsics:
+            print(f"  [WARN] No intrinsics for external camera {cam_id}, skipping 2D projection")
+            continue
+        
+        cam_info = camera_intrinsics[cam_id]
+        tracks_2d[cam_id] = project_tracks_to_2d(
+            tracks_3d,
+            cam_info['K'],
+            T_world_cam,  # Static extrinsics
+            cam_info['width'],
+            cam_info['height'],
+            min_depth=min_depth,
+            clip_to_bounds=False,  # Keep all projections, even outside image
+        )
+    
+    # Process wrist camera (per-frame extrinsics)
+    wrist_serial = extrinsics_data.get('wrist_serial')
+    wrist_extrinsics = extrinsics_data.get('wrist_extrinsics')
+    
+    if wrist_serial and wrist_extrinsics is not None:
+        if wrist_serial not in camera_intrinsics:
+            print(f"  [WARN] No intrinsics for wrist camera {wrist_serial}, skipping 2D projection")
+        else:
+            cam_info = camera_intrinsics[wrist_serial]
+            tracks_2d[wrist_serial] = project_tracks_to_2d(
+                tracks_3d,
+                cam_info['K'],
+                wrist_extrinsics,  # Per-frame extrinsics [T, 4, 4]
+                cam_info['width'],
+                cam_info['height'],
+                min_depth=min_depth,
+                clip_to_bounds=False,
+            )
+    
+    return tracks_2d
 
 
 def generate_tracks(h5_path: str, num_track_points: int, max_frames: int = None, mesh_path: str = "/workspace/third_party/robotiq_arg85_description/meshes/inner_finger_fine.STL") -> dict:
@@ -329,7 +448,7 @@ def main():
     print(f"  Output: {output_dir}")
     
     # --- Generate Tracks ---
-    print("\n[1/3] Generating gripper tracks...")
+    print("\n[1/4] Generating gripper tracks...")
     tracks_data = generate_tracks(
         episode_paths['h5_path'],
         num_track_points=config.get('num_track_points', 480),
@@ -337,22 +456,8 @@ def main():
         mesh_path=config.get('finger_mesh_path', "/workspace/third_party/robotiq_arg85_description/meshes/inner_finger_fine.STL"),
     )
     
-    tracks_path = os.path.join(output_dir, 'tracks.npz')
-    np.savez(
-        tracks_path,
-        tracks_3d=tracks_data['tracks_3d'],
-        contact_points_local=tracks_data['contact_points_local'],
-        gripper_poses=tracks_data['gripper_poses'],
-        gripper_positions=tracks_data['gripper_positions'],
-        cartesian_positions=tracks_data['cartesian_positions'],
-        num_frames=tracks_data['num_frames'],
-        num_points_per_finger=tracks_data['num_points_per_finger'],
-        fps=config.get('fps', 30.0),
-    )
-    print(f"  Saved: {tracks_path}")
-    
     # --- Compute Extrinsics ---
-    print("\n[2/3] Computing camera extrinsics...")
+    print("\n[2/4] Computing camera extrinsics...")
     extrinsics_data = compute_extrinsics(
         episode_paths['h5_path'],
         episode_paths['metadata_path'],
@@ -380,8 +485,70 @@ def main():
     print(f"  External cams: {list(extrinsics_data['external_extrinsics'].keys())}")
     print(f"  Wrist cam: {extrinsics_data['wrist_serial']}")
     
+    # --- Load Camera Intrinsics and Compute 2D Tracks ---
+    print("\n[3/4] Computing 2D track projections for each camera...")
+    
+    # Load intrinsics from the output recordings directory (saved by extract_rgb_depth.py)
+    output_recordings_dir = os.path.join(output_dir, 'recordings')
+    camera_intrinsics = load_camera_intrinsics(output_recordings_dir)
+    
+    tracks_2d_data = {}
+    cameras_with_2d_tracks = []
+    
+    if camera_intrinsics:
+        print(f"  Found intrinsics for cameras: {list(camera_intrinsics.keys())}")
+        
+        # Compute 2D projections for all cameras
+        tracks_2d_data = compute_2d_tracks(
+            tracks_data['tracks_3d'],
+            camera_intrinsics,
+            extrinsics_data,
+            min_depth=config.get('min_depth', 0.01),
+        )
+        
+        cameras_with_2d_tracks = list(tracks_2d_data.keys())
+        for cam_id, tracks_2d in tracks_2d_data.items():
+            # Count valid projections (non-NaN)
+            valid_count = np.sum(~np.isnan(tracks_2d[:, :, 0]))
+            total_count = tracks_2d.shape[0] * tracks_2d.shape[1]
+            print(f"    {cam_id}: {tracks_2d.shape} ({valid_count}/{total_count} valid projections)")
+    else:
+        print("  [WARN] No camera intrinsics found - skipping 2D track projections")
+        print("         (Run extract_rgb_depth.py first to generate intrinsics.json files)")
+    
+    # --- Save tracks.npz with both 3D and 2D tracks ---
+    tracks_path = os.path.join(output_dir, 'tracks.npz')
+    tracks_save_dict = {
+        'tracks_3d': tracks_data['tracks_3d'],
+        'contact_points_local': tracks_data['contact_points_local'],
+        'gripper_poses': tracks_data['gripper_poses'],
+        'gripper_positions': tracks_data['gripper_positions'],
+        'cartesian_positions': tracks_data['cartesian_positions'],
+        'num_frames': tracks_data['num_frames'],
+        'num_points_per_finger': tracks_data['num_points_per_finger'],
+        'fps': config.get('fps', 30.0),
+        # List of cameras with 2D tracks (for easy discovery)
+        'cameras_with_2d_tracks': np.array(cameras_with_2d_tracks, dtype=object),
+    }
+    
+    # Add 2D tracks for each camera
+    for cam_id, tracks_2d in tracks_2d_data.items():
+        tracks_save_dict[f'tracks_2d_{cam_id}'] = tracks_2d
+        # Also save camera intrinsics for convenience
+        if cam_id in camera_intrinsics:
+            tracks_save_dict[f'intrinsics_{cam_id}'] = camera_intrinsics[cam_id]['K']
+            tracks_save_dict[f'image_size_{cam_id}'] = np.array([
+                camera_intrinsics[cam_id]['width'],
+                camera_intrinsics[cam_id]['height']
+            ])
+    
+    np.savez(tracks_path, **tracks_save_dict)
+    print(f"  Saved: {tracks_path}")
+    if cameras_with_2d_tracks:
+        print(f"  2D tracks included for: {cameras_with_2d_tracks}")
+    
     # --- Save Quality JSON ---
-    print("\n[3/3] Saving quality.json...")
+    print("\n[4/4] Saving quality.json...")
     quality_data = {
         'episode_id': args.episode_id,
         'source_path': episode_paths['relative_path'],
@@ -390,6 +557,7 @@ def main():
         'num_track_points': tracks_data['num_points_per_finger'] * 2,
         'external_cameras': list(extrinsics_data['external_extrinsics'].keys()),
         'wrist_camera': extrinsics_data['wrist_serial'],
+        'cameras_with_2d_tracks': cameras_with_2d_tracks,
         'cam2base_calibration': cam2base_snippet,
     }
     

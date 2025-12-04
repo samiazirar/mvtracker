@@ -200,3 +200,123 @@ def precompute_wrist_trajectory(cartesian_positions, T_ee_cam):
     for pos in cartesian_positions:
         transforms.append(wrist_cam_to_world(pos, T_ee_cam))
     return transforms
+
+
+# =============================================================================
+# 2D Projection Utilities for Tracks
+# =============================================================================
+
+def project_points_to_2d(
+    points_world: np.ndarray,
+    K: np.ndarray,
+    world_T_cam: np.ndarray,
+    width: int,
+    height: int,
+    min_depth: float = 0.01,
+    clip_to_bounds: bool = False,
+) -> np.ndarray:
+    """
+    Project 3D world points to 2D image coordinates.
+    
+    Unlike filtering-based projections, this preserves all point indices and
+    returns NaN for invalid projections (behind camera or out of bounds if clip_to_bounds=True).
+    
+    Args:
+        points_world: Nx3 array of 3D points in world frame
+        K: 3x3 camera intrinsic matrix
+        world_T_cam: 4x4 transformation from camera to world (camera pose)
+        width: Image width
+        height: Image height
+        min_depth: Minimum depth for valid projection (default: 1cm)
+        clip_to_bounds: If True, mark out-of-bounds points as NaN
+        
+    Returns:
+        Nx2 array of 2D pixel coordinates (u, v). Invalid projections are NaN.
+    """
+    n_points = points_world.shape[0]
+    if n_points == 0:
+        return np.empty((0, 2), dtype=np.float32)
+    
+    # Transform points from world to camera frame
+    cam_T_world = invert_transform(world_T_cam)
+    points_cam = transform_points(points_world, cam_T_world)
+    
+    # Initialize output with NaN
+    uv = np.full((n_points, 2), np.nan, dtype=np.float32)
+    
+    # Find valid points (in front of camera)
+    z = points_cam[:, 2]
+    valid_depth = z > min_depth
+    
+    if not np.any(valid_depth):
+        return uv
+    
+    # Project valid points to 2D
+    x = points_cam[valid_depth, 0]
+    y = points_cam[valid_depth, 1]
+    z_valid = z[valid_depth]
+    
+    fx, fy = K[0, 0], K[1, 1]
+    cx, cy = K[0, 2], K[1, 2]
+    
+    u = (x * fx / z_valid) + cx
+    v = (y * fy / z_valid) + cy
+    
+    if clip_to_bounds:
+        # Mark out-of-bounds points as NaN
+        in_bounds = (u >= 0) & (u < width) & (v >= 0) & (v < height)
+        uv_valid = np.stack([u, v], axis=-1)
+        uv_valid[~in_bounds] = np.nan
+        uv[valid_depth] = uv_valid
+    else:
+        # Keep all projections (may be outside image bounds)
+        uv[valid_depth, 0] = u
+        uv[valid_depth, 1] = v
+    
+    return uv
+
+
+def project_tracks_to_2d(
+    tracks_3d: np.ndarray,
+    K: np.ndarray,
+    extrinsics: np.ndarray,
+    width: int,
+    height: int,
+    min_depth: float = 0.01,
+    clip_to_bounds: bool = False,
+) -> np.ndarray:
+    """
+    Project 3D tracks to 2D for all frames.
+    
+    Args:
+        tracks_3d: [T, N, 3] array of 3D track points in world frame
+        K: 3x3 camera intrinsic matrix  
+        extrinsics: [T, 4, 4] array of camera poses (world_T_cam) per frame,
+                   or [4, 4] for static camera
+        width: Image width
+        height: Image height
+        min_depth: Minimum depth for valid projection
+        clip_to_bounds: If True, mark out-of-bounds points as NaN
+        
+    Returns:
+        [T, N, 2] array of 2D pixel coordinates. Invalid projections are NaN.
+    """
+    T, N, _ = tracks_3d.shape
+    tracks_2d = np.full((T, N, 2), np.nan, dtype=np.float32)
+    
+    # Check if extrinsics are static (single matrix) or per-frame
+    is_static = extrinsics.ndim == 2
+    
+    for t in range(T):
+        world_T_cam = extrinsics if is_static else extrinsics[t]
+        tracks_2d[t] = project_points_to_2d(
+            tracks_3d[t],
+            K,
+            world_T_cam,
+            width,
+            height,
+            min_depth=min_depth,
+            clip_to_bounds=clip_to_bounds,
+        )
+    
+    return tracks_2d
