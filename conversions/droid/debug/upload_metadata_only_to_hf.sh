@@ -18,6 +18,7 @@
 #   COMMIT_MESSAGE       Optional commit message for the upload
 #   CLEAR_STAGING        If set to 1, delete staging dir contents after successful upload
 #   DRY_RUN              If set to 1, only show what would be uploaded without actually uploading
+#   BATCH_SIZE           Max files per commit (default: 20000, HF limit is 25k)
 
 set -euo pipefail
 
@@ -66,7 +67,8 @@ HF_REPO_TYPE=${HF_REPO_TYPE:-dataset}
 COMMIT_MESSAGE=${COMMIT_MESSAGE:-"Metadata upload $(date +%Y-%m-%d_%H:%M:%S)"}
 CLEAR_STAGING=${CLEAR_STAGING:-0}
 DRY_RUN=${DRY_RUN:-0}
-export SOURCE_DIR STAGING_DIR HF_REPO_ID HF_REPO_TYPE COMMIT_MESSAGE DRY_RUN
+BATCH_SIZE=${BATCH_SIZE:-20000}  # HF limit is 25k files per commit, stay safely under
+export SOURCE_DIR STAGING_DIR HF_REPO_ID HF_REPO_TYPE COMMIT_MESSAGE DRY_RUN BATCH_SIZE
 
 echo "[INFO] Target repo: ${HF_REPO_ID}"
 echo "[INFO] Files to include: tracks.npz, extrinsics.npz, quality.json"
@@ -136,12 +138,16 @@ done
 echo ""
 
 # ----------------------------------------------------------------------------
-# STEP 3: Upload to HuggingFace (or dry run)
+# STEP 3: Upload to HuggingFace (or dry run) - BATCHED
 # ----------------------------------------------------------------------------
+NUM_BATCHES=$(( (TOTAL_FILES + BATCH_SIZE - 1) / BATCH_SIZE ))
+
 if [ "${DRY_RUN}" -eq 1 ]; then
     echo "[DRY RUN] Would upload ${TOTAL_FILES} files to ${HF_REPO_ID}"
+    echo "[DRY RUN] Batch size: ${BATCH_SIZE} files/commit"
+    echo "[DRY RUN] Number of commits: ${NUM_BATCHES}"
     echo "[DRY RUN] Staging directory: ${STAGING_DIR}"
-    echo "[DRY RUN] Files:"
+    echo "[DRY RUN] Sample files:"
     find "${STAGING_DIR}" -type f | head -20
     STAGING_COUNT=$(find "${STAGING_DIR}" -type f | wc -l)
     if [ "${STAGING_COUNT}" -gt 20 ]; then
@@ -151,10 +157,15 @@ if [ "${DRY_RUN}" -eq 1 ]; then
 fi
 
 echo "[INFO] Preparing to upload ${TOTAL_FILES} files to ${HF_REPO_ID} (${HF_REPO_TYPE})"
+echo "[INFO] Batch size: ${BATCH_SIZE} files/commit"
+echo "[INFO] Number of commits needed: ${NUM_BATCHES}"
+echo ""
 
 python3 <<'PYTHON'
 import os
 import sys
+import tempfile
+import shutil
 from datetime import datetime
 from pathlib import Path
 from huggingface_hub import HfApi, create_repo
@@ -163,7 +174,8 @@ from huggingface_hub.utils import RepositoryNotFoundError
 staging_dir = Path(os.environ['STAGING_DIR'])
 repo_id = os.environ['HF_REPO_ID']
 repo_type = os.environ['HF_REPO_TYPE']
-commit_message = os.environ['COMMIT_MESSAGE']
+commit_message_base = os.environ['COMMIT_MESSAGE']
+batch_size = int(os.environ['BATCH_SIZE'])
 
 api = HfApi(token=os.environ['HF_TOKEN'])
 
@@ -190,29 +202,77 @@ except RepositoryNotFoundError:
     )
     print(f"[SUCCESS] Created repo: https://huggingface.co/datasets/{repo_id}")
 
-total_bytes = sum(f.stat().st_size for f in staging_dir.rglob('*') if f.is_file())
-file_count = sum(1 for f in staging_dir.rglob('*') if f.is_file())
-print(f"[INFO] Total size: {human_readable_size(total_bytes)} ({file_count} files)")
-print(f"[INFO] Starting upload at {datetime.now().isoformat(timespec='seconds')} ...")
+# Get all files
+all_files = sorted([f for f in staging_dir.rglob('*') if f.is_file()])
+total_files = len(all_files)
+total_bytes = sum(f.stat().st_size for f in all_files)
 
-try:
-    api.upload_folder(
-        folder_path=str(staging_dir),
-        repo_id=repo_id,
-        repo_type=repo_type,
-        commit_message=commit_message,
-        run_as_future=False,
-    )
-    print(f"[SUCCESS] Upload complete at {datetime.now().isoformat(timespec='seconds')}")
-except Exception as exc:  # noqa: BLE001
-    print(f"[ERROR] Upload failed: {exc}", file=sys.stderr)
+print(f"[INFO] Total size: {human_readable_size(total_bytes)} ({total_files} files)")
+print(f"[INFO] Batch size: {batch_size} files per commit")
+
+# Calculate number of batches
+num_batches = (total_files + batch_size - 1) // batch_size
+print(f"[INFO] Will upload in {num_batches} batch(es)")
+print(f"[INFO] Starting upload at {datetime.now().isoformat(timespec='seconds')} ...")
+print("")
+
+failed_batches = []
+
+for batch_idx in range(num_batches):
+    start_idx = batch_idx * batch_size
+    end_idx = min(start_idx + batch_size, total_files)
+    batch_files = all_files[start_idx:end_idx]
+    
+    batch_bytes = sum(f.stat().st_size for f in batch_files)
+    commit_message = f"{commit_message_base} (batch {batch_idx + 1}/{num_batches})"
+    
+    print(f"[BATCH {batch_idx + 1}/{num_batches}] Uploading {len(batch_files)} files ({human_readable_size(batch_bytes)})...")
+    
+    # Create a temporary directory for this batch
+    batch_temp_dir = Path(tempfile.mkdtemp(prefix=f"hf_batch_{batch_idx}_"))
+    
+    try:
+        # Copy files to temp directory preserving structure
+        for src_file in batch_files:
+            rel_path = src_file.relative_to(staging_dir)
+            dest_file = batch_temp_dir / rel_path
+            dest_file.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src_file, dest_file)
+        
+        # Upload this batch
+        api.upload_folder(
+            folder_path=str(batch_temp_dir),
+            repo_id=repo_id,
+            repo_type=repo_type,
+            commit_message=commit_message,
+            run_as_future=False,
+        )
+        print(f"[BATCH {batch_idx + 1}/{num_batches}] SUCCESS - {len(batch_files)} files uploaded")
+        
+    except Exception as exc:
+        print(f"[BATCH {batch_idx + 1}/{num_batches}] FAILED: {exc}", file=sys.stderr)
+        failed_batches.append((batch_idx + 1, str(exc)))
+        
+    finally:
+        # Clean up temp directory
+        shutil.rmtree(batch_temp_dir, ignore_errors=True)
+
+print("")
+print(f"[INFO] Upload finished at {datetime.now().isoformat(timespec='seconds')}")
+
+if failed_batches:
+    print(f"[WARNING] {len(failed_batches)} batch(es) failed:")
+    for batch_num, error in failed_batches:
+        print(f"  - Batch {batch_num}: {error}")
     sys.exit(1)
+else:
+    print(f"[SUCCESS] All {num_batches} batch(es) uploaded successfully!")
 PYTHON
 
 UPLOAD_STATUS=$?
 
 if [ "${UPLOAD_STATUS}" -ne 0 ]; then
-    echo "[ERROR] Upload failed. Staging directory preserved at: ${STAGING_DIR}"
+    echo "[ERROR] Some uploads failed. Staging directory preserved at: ${STAGING_DIR}"
     exit 1
 fi
 
