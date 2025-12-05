@@ -20,7 +20,13 @@ Usage:
         --episode_id "AUTOLab+84bd5053+2023-08-18-12h-01m-10s" \
         --metadata_repo "sazirarrwth99/droid_metadata_only" \
         --video_source "/data/droid/data/droid_raw/1.0.1"
-    
+
+    # Using MP4 videos from GCS (recommended)
+    python render_tracks_from_mp4.py \
+        --episode_id "AUTOLab+84bd5053+2023-08-18-12h-01m-10s" \
+        --metadata_repo "sazirarrwth99/droid_metadata_only" \
+        --gcs_bucket "gs://gresearch/robotics/droid_raw/1.0.1"
+
     # Using MP4 videos from HuggingFace
     python render_tracks_from_mp4.py \
         --episode_id "AUTOLab+84bd5053+2023-08-18-12h-01m-10s" \
@@ -36,6 +42,7 @@ import glob
 import json
 import os
 import re
+import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -221,6 +228,120 @@ def download_videos_from_hf(
                 videos[serial] = mp4_file
         if videos:
             break
+
+    return videos
+
+
+def run_gsutil(command: str, check: bool = True) -> bool:
+    """Run gsutil command."""
+    try:
+        result = subprocess.run(
+            command,
+            shell=True,
+            check=check,
+            capture_output=True,
+            text=True
+        )
+        return result.returncode == 0
+    except subprocess.CalledProcessError as e:
+        print(f"[WARN] gsutil error: {e.stderr}", file=sys.stderr)
+        return False
+
+
+def download_videos_from_gcs(
+    gcs_bucket: str,
+    episode_info: dict,
+    cache_dir: str,
+) -> Dict[str, str]:
+    """Download MP4 videos from GCS bucket.
+
+    Args:
+        gcs_bucket: GCS bucket path (e.g., gs://gresearch/robotics/droid_raw/1.0.1)
+        episode_info: Parsed episode info dict
+        cache_dir: Local cache directory for downloads
+
+    Returns:
+        Dict mapping camera serial to local MP4 path
+    """
+    timestamp_folder = episode_info["timestamp_folder"]
+    base = episode_info["lab"]
+    date = episode_info["date"]
+
+    videos = {}
+
+    # Try both success and failure paths
+    for outcome in ["success", "failure"]:
+        rel_path = f"{base}/{outcome}/{date}/{timestamp_folder}"
+        gcs_path = f"{gcs_bucket}/{rel_path}"
+        local_path = os.path.join(cache_dir, rel_path)
+
+        # Check if trajectory.h5 exists at this path (to confirm episode location)
+        check_cmd = f'gsutil -q stat "{gcs_path}/trajectory.h5"'
+        if not run_gsutil(check_cmd, check=False):
+            continue
+
+        print(f"[INFO] Found episode at GCS: {rel_path}")
+
+        # Create local directories
+        mp4_local = os.path.join(local_path, "recordings", "MP4")
+        os.makedirs(mp4_local, exist_ok=True)
+
+        # Download MP4 files
+        gcs_mp4_path = f"{gcs_path}/recordings/MP4"
+        print(f"[INFO] Downloading MP4 videos from {gcs_mp4_path}...")
+
+        # First list the MP4 files
+        list_cmd = f'gsutil ls "{gcs_mp4_path}/*.mp4" 2>/dev/null'
+        try:
+            result = subprocess.run(
+                list_cmd,
+                shell=True,
+                capture_output=True,
+                text=True
+            )
+            mp4_files = [f.strip() for f in result.stdout.strip().split('\n') if f.strip().endswith('.mp4')]
+        except Exception:
+            mp4_files = []
+
+        if not mp4_files:
+            # Try lowercase mp4 folder
+            gcs_mp4_path = f"{gcs_path}/recordings/mp4"
+            list_cmd = f'gsutil ls "{gcs_mp4_path}/*.mp4" 2>/dev/null'
+            try:
+                result = subprocess.run(
+                    list_cmd,
+                    shell=True,
+                    capture_output=True,
+                    text=True
+                )
+                mp4_files = [f.strip() for f in result.stdout.strip().split('\n') if f.strip().endswith('.mp4')]
+            except Exception:
+                mp4_files = []
+
+        if not mp4_files:
+            print(f"[WARN] No MP4 files found at {gcs_mp4_path}")
+            continue
+
+        # Download each MP4 file
+        for gcs_file in mp4_files:
+            filename = os.path.basename(gcs_file)
+            local_file = os.path.join(mp4_local, filename)
+
+            if not os.path.exists(local_file):
+                print(f"  Downloading {filename}...")
+                cmd = f'gsutil cp "{gcs_file}" "{local_file}"'
+                run_gsutil(cmd)
+            else:
+                print(f"  {filename} already cached")
+
+            if os.path.exists(local_file):
+                # Extract camera serial from filename
+                serial = filename.replace(".mp4", "").replace("SN", "").replace("sn", "")
+                videos[serial] = local_file
+
+        if videos:
+            print(f"[INFO] Downloaded {len(videos)} MP4 videos")
+            return videos
 
     return videos
 
@@ -468,6 +589,10 @@ def main():
         help="HuggingFace repo containing MP4 videos (alternative to --video_source)",
     )
     parser.add_argument(
+        "--gcs_bucket",
+        help="GCS bucket path for MP4 videos (e.g., gs://gresearch/robotics/droid_raw/1.0.1)",
+    )
+    parser.add_argument(
         "--cache_dir",
         default=os.path.join(os.getcwd(), "hf_render_cache"),
         help="Local cache directory for downloaded data.",
@@ -498,8 +623,8 @@ def main():
     args = parser.parse_args()
 
     # Validate inputs
-    if not args.video_source and not args.video_repo:
-        raise ValueError("Must provide either --video_source (local path) or --video_repo (HuggingFace repo)")
+    if not args.video_source and not args.video_repo and not args.gcs_bucket:
+        raise ValueError("Must provide one of: --video_source (local path), --video_repo (HuggingFace repo), or --gcs_bucket (GCS path)")
 
     # Parse episode ID
     episode_info = parse_episode_id(args.episode_id)
@@ -540,6 +665,13 @@ def main():
     if args.video_source:
         print(f"[INFO] Looking for MP4 videos in: {args.video_source}")
         video_paths = find_local_mp4_videos(args.video_source, episode_info)
+    elif args.gcs_bucket:
+        print(f"[INFO] Downloading MP4 videos from GCS: {args.gcs_bucket}")
+        video_paths = download_videos_from_gcs(
+            args.gcs_bucket,
+            episode_info,
+            cache_dir=os.path.join(args.cache_dir, "videos"),
+        )
     else:
         video_paths = download_videos_from_hf(
             args.video_repo,
@@ -575,7 +707,7 @@ def main():
 
     print(f"\n[DONE] Episode: {episode_info['full_id']}")
     print(f"  Metadata from: {args.metadata_repo}")
-    print(f"  Videos from: {args.video_source or args.video_repo}")
+    print(f"  Videos from: {args.video_source or args.gcs_bucket or args.video_repo}")
     print(f"  Output: {output_dir}")
 
 
