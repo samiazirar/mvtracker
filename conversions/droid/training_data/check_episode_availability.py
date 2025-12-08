@@ -2,21 +2,29 @@
 """Check episode availability in local data and GCS (no downloading).
 
 This script diagnoses why episodes fail to process by checking:
-1. If episode exists in local pre-downloaded data (/data/droid/data/droid_raw/1.0.1/)
+1. If episode exists in local pre-downloaded data
 2. If episode exists in GCS bucket (optional, requires gsutil)
+
+Paths are configured via:
+1. Command line arguments (--local_roots, --cam2base)
+2. config.yaml in the same directory
+3. Environment variables (DROID_ROOT, CAM2BASE_PATH)
 
 Usage:
     # Check a single episode
     python check_episode_availability.py --episode_id "ILIAD+7ae1bcff+2023-06-03-19h-32m-29s"
-    
+
     # Check episodes from a file
     python check_episode_availability.py --episodes_file failed_episodes.txt
-    
+
     # Check all episodes from cam2base and output availability report
-    python check_episode_availability.py --cam2base /data/cam2base_extrinsic_superset.json --limit 100
-    
+    python check_episode_availability.py --cam2base /path/to/cam2base_extrinsic_superset.json --limit 100
+
     # Skip GCS check (faster, local-only)
     python check_episode_availability.py --episodes_file episodes.txt --skip_gcs
+
+    # Use custom config
+    python check_episode_availability.py --config /path/to/config.yaml --episode_id "..."
 """
 
 import argparse
@@ -28,6 +36,51 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+
+import yaml
+
+# Default config file location (same directory as this script)
+DEFAULT_CONFIG_PATH = Path(__file__).parent / "config.yaml"
+
+
+def load_config(config_path: Optional[str] = None) -> dict:
+    """Load configuration from YAML file.
+
+    Priority:
+    1. Explicit config_path argument
+    2. Default config.yaml in same directory
+    3. Empty dict (use defaults)
+    """
+    if config_path:
+        path = Path(config_path)
+    else:
+        path = DEFAULT_CONFIG_PATH
+
+    if path.exists():
+        with open(path, 'r') as f:
+            return yaml.safe_load(f) or {}
+    return {}
+
+
+def get_default_paths(config: dict) -> tuple:
+    """Get default paths from config, environment, or fallbacks.
+
+    Returns (local_roots, cam2base_path, gcs_bucket)
+    """
+    # Local roots - from config, env, or None
+    droid_root = config.get('droid_root') or os.environ.get('DROID_ROOT')
+    if droid_root:
+        local_roots = [droid_root]
+    else:
+        local_roots = []
+
+    # Cam2base path - from config, env, or None
+    cam2base_path = config.get('cam2base_extrinsics_path') or os.environ.get('CAM2BASE_PATH')
+
+    # GCS bucket
+    gcs_bucket = config.get('gcs_bucket', "gs://gresearch/robotics/droid_raw/1.0.1")
+
+    return local_roots, cam2base_path, gcs_bucket
 
 
 def parse_episode_id(episode_id: str) -> dict:
@@ -207,17 +260,29 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-    # Check single episode
+    # Check single episode (uses config.yaml for paths)
     python check_episode_availability.py --episode_id "ILIAD+7ae1bcff+2023-06-03-19h-32m-29s"
-    
+
     # Check from failed episodes file
-    python check_episode_availability.py --episodes_file /data/logs/pipeline_xxx/failed_episodes.txt
-    
-    # Check all from cam2base (first 100)
-    python check_episode_availability.py --cam2base /data/cam2base_extrinsic_superset.json --limit 100
+    python check_episode_availability.py --episodes_file failed_episodes.txt
+
+    # Check all from cam2base (uses path from config.yaml)
+    python check_episode_availability.py --cam2base --limit 100
+
+    # Use custom config
+    python check_episode_availability.py --config /path/to/config.yaml --episode_id "..."
+
+    # Override local roots
+    python check_episode_availability.py --local_roots /my/data/path --episode_id "..."
         """
     )
-    
+
+    # Config file
+    parser.add_argument(
+        "--config",
+        help="Path to config YAML file (default: config.yaml in script directory)"
+    )
+
     # Input sources (mutually exclusive)
     input_group = parser.add_mutually_exclusive_group(required=True)
     input_group.add_argument(
@@ -230,9 +295,12 @@ Examples:
     )
     input_group.add_argument(
         "--cam2base",
-        help="Path to cam2base JSON to get all episode IDs"
+        nargs='?',
+        const=True,
+        default=None,
+        help="Path to cam2base JSON, or use path from config if no value given"
     )
-    
+
     # Options
     parser.add_argument(
         "--limit",
@@ -243,13 +311,13 @@ Examples:
     parser.add_argument(
         "--local_roots",
         nargs='+',
-        default=["/data/droid/data/droid_raw/1.0.1"],
-        help="Local data roots to search (default: /data/droid/data/droid_raw/1.0.1)"
+        default=None,
+        help="Local data roots to search (default: from config.yaml or DROID_ROOT env)"
     )
     parser.add_argument(
         "--gcs_bucket",
-        default="gs://gresearch/robotics/droid_raw/1.0.1",
-        help="GCS bucket path"
+        default=None,
+        help="GCS bucket path (default: from config or gs://gresearch/robotics/droid_raw/1.0.1)"
     )
     parser.add_argument(
         "--skip_gcs",
@@ -269,12 +337,27 @@ Examples:
         action="store_true",
         help="Verbose output"
     )
-    
+
     args = parser.parse_args()
-    
+
+    # Load config
+    config = load_config(args.config)
+    default_local_roots, default_cam2base, default_gcs_bucket = get_default_paths(config)
+
+    # Resolve paths (CLI > config > env > empty)
+    local_roots = args.local_roots if args.local_roots else default_local_roots
+    gcs_bucket = args.gcs_bucket if args.gcs_bucket else default_gcs_bucket
+
+    # Filter to only existing local roots (no error if missing)
+    existing_local_roots = [r for r in local_roots if os.path.isdir(r)]
+    if local_roots and not existing_local_roots:
+        print(f"[WARN] None of the local roots exist: {local_roots}")
+        print("       Episodes will be checked in GCS only (unless --skip_gcs)")
+        print()
+
     # Collect episodes to check
     episodes = []
-    
+
     if args.episode_id:
         episodes = [args.episode_id]
     elif args.episodes_file:
@@ -290,13 +373,25 @@ Examples:
                     episode_id = line
                 if episode_id:
                     episodes.append(episode_id)
-    elif args.cam2base:
-        episodes = load_episodes_from_cam2base(args.cam2base, args.limit)
-    
+    elif args.cam2base is not None:
+        # --cam2base can be a path or True (meaning use config)
+        if args.cam2base is True:
+            cam2base_path = default_cam2base
+            if not cam2base_path:
+                print("ERROR: --cam2base used without path, but no cam2base path in config or DROID_CAM2BASE env")
+                return 1
+        else:
+            cam2base_path = args.cam2base
+
+        if not os.path.exists(cam2base_path):
+            print(f"ERROR: cam2base file not found: {cam2base_path}")
+            return 1
+        episodes = load_episodes_from_cam2base(cam2base_path, args.limit)
+
     print(f"Checking {len(episodes)} episodes...")
-    print(f"Local roots: {args.local_roots}")
+    print(f"Local roots: {existing_local_roots if existing_local_roots else '(none available)'}")
     if not args.skip_gcs:
-        print(f"GCS bucket: {args.gcs_bucket}")
+        print(f"GCS bucket: {gcs_bucket}")
     else:
         print("GCS check: SKIPPED")
     print()
@@ -308,8 +403,8 @@ Examples:
     for i, episode_id in enumerate(episodes):
         result = check_episode(
             episode_id,
-            args.local_roots,
-            args.gcs_bucket if not args.skip_gcs else None,
+            existing_local_roots,
+            gcs_bucket if not args.skip_gcs else None,
             args.skip_gcs
         )
         results.append(result)
