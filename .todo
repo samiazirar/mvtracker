@@ -9,7 +9,7 @@
 - [ ] Filter the bad camera
 - [ ] Give code to load mp4 and depth as well
 
-
+- [ ] go to Sven for the WestAI stuff 
 
 - [ ] STORE THE REPROJECTIONS!
 - [x] Save only depth (more efficienty) and directly use the provided mp4

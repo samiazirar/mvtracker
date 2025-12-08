@@ -104,14 +104,17 @@ def extract_intrinsics_from_svo(svo_path: str, output_dir: str, camera_serial: s
     Returns:
         dict with status and intrinsics info
     """
-    # Initialize ZED camera with SVO
+    # Initialize ZED camera with SVO in CPU mode
     zed = sl.Camera()
     init_params = sl.InitParameters()
     init_params.set_from_svo_file(svo_path)
     init_params.svo_real_time_mode = False
     init_params.coordinate_units = sl.UNIT.METER
+    # CRITICAL: Enable CPU mode to avoid GPU requirement for just reading intrinsics
+    init_params.sdk_gpu_id = -1  # Use CPU-only mode
+    init_params.depth_mode = sl.DEPTH_MODE.NONE  # Disable depth computation
     
-    # Open camera (no GPU needed for intrinsics)
+    # Open camera (CPU mode - no GPU needed for intrinsics)
     status = zed.open(init_params)
     if status != sl.ERROR_CODE.SUCCESS:
         return {

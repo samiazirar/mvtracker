@@ -36,8 +36,8 @@ SKIP_HF_CHECK=${SKIP_HF_CHECK:-0}        # Set to 1 to skip HuggingFace existenc
 
 # Paths (all on fast /data storage)
 CAM2BASE_PATH="/data/cam2base_extrinsic_superset.json"
-CONFIG_PATH="conversions/droid/training_data/config.yaml"
-SCRIPT_DIR="conversions/droid/training_data"
+CONFIG_PATH="/workspace/conversions/droid/training_data/config.yaml"
+SCRIPT_DIR="/workspace/conversions/droid/training_data"
 LOG_DIR="/data/logs/pipeline_huggingface_$(date +%Y%m%d_%H%M%S)"
 EPISODES_FILE="${LOG_DIR}/episodes.txt"
 TIMING_FILE="${LOG_DIR}/timing.csv"
@@ -77,7 +77,7 @@ HF_REPO_TYPE="dataset"                      # Type: dataset, model, or space
 # ----------------------------------------------------------------------------
 
 # Load HF_TOKEN from .env file explicitly
-ENV_FILE=".env"
+ENV_FILE="/workspace/.env"
 if [ -f "${ENV_FILE}" ]; then
     # Extract HF_TOKEN from .env file (handles quotes)
     HF_TOKEN=$(grep -E '^HF_TOKEN=' "${ENV_FILE}" | sed 's/^HF_TOKEN=//; s/^"//; s/"$//')

@@ -2,26 +2,33 @@
 # DROID Training Data Processing Pipeline (Metadata Only - No Depth Extraction)
 # METADATA ONLY VERSION: Generates complete tracks + metadata WITHOUT depth maps
 #
-# This pipeline extracts intrinsics from ZED (no GPU needed) and generates:
+# **GPU REQUIRED:** Despite being "metadata only", the ZED SDK requires CUDA/GPU
+# to open SVO files and extract intrinsics. However, this is much lighter than
+# full depth extraction (no depth inference, just intrinsics reading).
+#
+# This pipeline extracts intrinsics from ZED and generates:
 # - tracks.npz: 3D tracks + 2D projections + normalized flow (1mm resampling)
 # - extrinsics.npz: Camera extrinsics (external + wrist)
 # - quality.json: Episode metadata and calibration info
 # - intrinsics.json: Camera parameters per camera
 #
-# Since no GPU depth extraction is done, this can run with many more parallel workers.
+# Lighter than full pipeline: Uses GPU only for intrinsics (seconds vs minutes per episode)
 # Perfect for training vision-based models that don't need depth maps.
 #
 # BATCH UPLOAD MODE: Episodes are staged locally and uploaded to HuggingFace
 # every 10 minutes (configurable via BATCH_UPLOAD_INTERVAL) to avoid rate limits.
 #
 # Usage:
-#   ./run_pipeline_cluster_huggingface_metadata_only.sh                    # Process 10 episodes, 16 workers
-#   ./run_pipeline_cluster_huggingface_metadata_only.sh 100                # Process 100 episodes
-#   ./run_pipeline_cluster_huggingface_metadata_only.sh 100 32             # Process 100 episodes, 32 workers
-#   ./run_pipeline_cluster_huggingface_metadata_only.sh -1                 # Process all episodes
+#   ./run_pipeline_cluster_huggingface_metadata_only_no_depth.sh                    # Process 10 episodes, auto-detect GPUs, 6 workers/GPU
+#   ./run_pipeline_cluster_huggingface_metadata_only_no_depth.sh 100                # Process 100 episodes
+#   ./run_pipeline_cluster_huggingface_metadata_only_no_depth.sh 100 12             # Process 100 episodes, 12 workers/GPU
+#   ./run_pipeline_cluster_huggingface_metadata_only_no_depth.sh 100 12 4           # Process 100 episodes, 12 workers/GPU, 4 GPUs
+#   ./run_pipeline_cluster_huggingface_metadata_only_no_depth.sh -1                 # Process all episodes
 #
 # Environment Variables:
-#   DROID_NUM_WORKERS       Number of parallel workers (default: 16)
+#   CUDA_VISIBLE_DEVICES    Override which GPUs to use (e.g., "0,1,2,3")
+#   DROID_WORKERS_PER_GPU   Workers per GPU (default: 6, lighter than full pipeline)
+#   DROID_NUM_GPUS          Number of GPUs to use (default: auto-detect)
 #   SKIP_HF_CHECK=1         Skip checking HuggingFace for existing episodes (fast mode)
 #   BATCH_UPLOAD_INTERVAL   Seconds between batch uploads (default: 600 = 10 min)
 
@@ -32,13 +39,14 @@ set -e
 # ============================================================================
 
 LIMIT=${1:-10}
-NUM_WORKERS=${2:-${DROID_NUM_WORKERS:-16}}  # More workers since no GPU needed
-SKIP_HF_CHECK=${SKIP_HF_CHECK:-0}           # Set to 1 to skip HuggingFace existence checks (fast mode)
+WORKERS_PER_GPU=${2:-${DROID_WORKERS_PER_GPU:-6}}   # Lighter than full pipeline (no depth inference)
+NUM_GPUS=${3:-${DROID_NUM_GPUS:-0}}                 # 0 = auto-detect
+SKIP_HF_CHECK=${SKIP_HF_CHECK:-0}                   # Set to 1 to skip HuggingFace existence checks (fast mode)
 
 # Paths (all on fast /data storage)
 CAM2BASE_PATH="/data/cam2base_extrinsic_superset.json"
-CONFIG_PATH="conversions/droid/training_data/config.yaml"
-SCRIPT_DIR="conversions/droid/training_data"
+CONFIG_PATH="/workspace/conversions/droid/training_data/config.yaml"
+SCRIPT_DIR="/workspace/conversions/droid/training_data"
 LOG_DIR="/data/logs/pipeline_metadata_only_$(date +%Y%m%d_%H%M%S)"
 EPISODES_FILE="${LOG_DIR}/episodes.txt"
 TIMING_FILE="${LOG_DIR}/timing.csv"
@@ -76,7 +84,7 @@ HF_REPO_TYPE="dataset"                          # Type: dataset, model, or space
 # ----------------------------------------------------------------------------
 
 # Load HF_TOKEN from .env file explicitly
-ENV_FILE=".env"
+ENV_FILE="/workspace/.env"
 if [ -f "${ENV_FILE}" ]; then
     # Extract HF_TOKEN from .env file (handles quotes)
     HF_TOKEN=$(grep -E '^HF_TOKEN=' "${ENV_FILE}" | sed 's/^HF_TOKEN=//; s/^"//; s/"$//')
@@ -180,14 +188,69 @@ if [ ! -f "${CAM2BASE_PATH}" ]; then
 fi
 
 # ============================================================================
-# NO GPU NEEDED - This is CPU-only processing
+# GPU DETECTION AND SETUP (Required for ZED SDK intrinsics extraction)
 # ============================================================================
 
-TOTAL_WORKERS=${NUM_WORKERS}
+detect_gpus() {
+    # Try nvidia-smi first
+    if command -v nvidia-smi &> /dev/null; then
+        local gpu_count=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | wc -l)
+        if [ "${gpu_count}" -gt 0 ]; then
+            echo "${gpu_count}"
+            return
+        fi
+    fi
+    
+    # Fallback: check /dev for nvidia devices
+    local dev_count=$(ls /dev/nvidia[0-9]* 2>/dev/null | wc -l)
+    if [ "${dev_count}" -gt 0 ]; then
+        echo "${dev_count}"
+        return
+    fi
+    
+    # No GPUs found
+    echo "0"
+}
+
+# Auto-detect GPUs if not specified
+if [ "${NUM_GPUS}" -eq 0 ]; then
+    NUM_GPUS=$(detect_gpus)
+    if [ "${NUM_GPUS}" -eq 0 ]; then
+        echo "[ERROR] No GPUs detected! GPU required for ZED SDK intrinsics extraction."
+        echo "[ERROR] Set CUDA_VISIBLE_DEVICES or DROID_NUM_GPUS"
+        exit 1
+    fi
+fi
+
+# Cap at 8 GPUs max
+if [ "${NUM_GPUS}" -gt 8 ]; then
+    echo "[WARN] Capping NUM_GPUS from ${NUM_GPUS} to 8"
+    NUM_GPUS=8
+fi
+
+# Calculate total workers
+TOTAL_WORKERS=$((NUM_GPUS * WORKERS_PER_GPU))
+
+# Build GPU list (respect CUDA_VISIBLE_DEVICES if set)
+if [ -n "${CUDA_VISIBLE_DEVICES}" ]; then
+    IFS=',' read -ra GPU_ARRAY <<< "${CUDA_VISIBLE_DEVICES}"
+    # Limit to requested number
+    GPU_LIST=()
+    for ((i=0; i<NUM_GPUS && i<${#GPU_ARRAY[@]}; i++)); do
+        GPU_LIST+=("${GPU_ARRAY[$i]}")
+    done
+else
+    GPU_LIST=()
+    for ((i=0; i<NUM_GPUS; i++)); do
+        GPU_LIST+=("$i")
+    done
+fi
+
+GPU_LIST_STR=$(IFS=,; echo "${GPU_LIST[*]}")
 
 # Export variables for parallel workers
 export CAM2BASE_PATH CONFIG_PATH SCRIPT_DIR GCS_BUCKET LOCAL_DROID_SOURCE USE_GCS FAST_LOCAL_DIR STAGING_DIR BATCH_UPLOAD_DIR TIMING_FILE DEFAULT_INNER_FINGER_MESH
-export NUM_WORKERS LOG_DIR
+export NUM_GPUS WORKERS_PER_GPU GPU_LIST_STR LOG_DIR
 export STATUS_FILE ERROR_LOG FAILED_EPISODES_FILE ERROR_COUNTS_FILE
 export HF_TOKEN HF_REPO_ID HF_REPO_TYPE BATCH_UPLOAD_INTERVAL
 
@@ -226,7 +289,9 @@ mkdir -p "${BATCH_UPLOAD_DIR}"
 
 echo "=== DROID Training Data Pipeline (METADATA ONLY: tracks + extrinsics + quality) ==="
 echo "Limit: ${LIMIT}"
-echo "Workers: ${TOTAL_WORKERS} (CPU-only, no GPU needed)"
+echo "GPUs: ${NUM_GPUS} (${GPU_LIST_STR})"
+echo "Workers/GPU: ${WORKERS_PER_GPU}"
+echo "Total Workers: ${TOTAL_WORKERS}"
 echo "Local Scratch: ${FAST_LOCAL_DIR}"
 echo "Staging Dir: ${STAGING_DIR}"
 echo "Batch Upload Dir: ${BATCH_UPLOAD_DIR}"
@@ -234,12 +299,12 @@ echo "Batch Upload Interval: ${BATCH_UPLOAD_INTERVAL}s (every $((BATCH_UPLOAD_IN
 echo "HuggingFace Repo: ${HF_REPO_ID}"
 echo "Log dir: ${LOG_DIR}"
 echo ""
-echo "NOTE: This pipeline extracts intrinsics only (no depth/RGB) and generates metadata."
-echo "      Includes: tracks.npz (3D + 2D normalized), extrinsics.npz, quality.json"
+echo "NOTE: This pipeline extracts intrinsics only (GPU needed for ZED SDK, but no depth inference)."
+echo "      Includes: tracks.npz (3D + 2D normalized), extrinsics.npz, quality.json, intrinsics.json"
 echo ""
 
-# Initialize timing CSV (with intrinsics time)
-echo "episode_id,worker_id,prep_time_sec,download_time_sec,intrinsics_time_sec,tracks_time_sec,sync_time_sec,cleanup_time_sec,total_time_sec" > "${TIMING_FILE}"
+# Initialize timing CSV (with GPU info and intrinsics time)
+echo "episode_id,gpu_id,prep_time_sec,download_time_sec,intrinsics_time_sec,tracks_time_sec,sync_time_sec,cleanup_time_sec,total_time_sec" > "${TIMING_FILE}"
 
 # ============================================================================
 # WORKER FUNCTION (CPU-Only Parallel Execution)
@@ -251,6 +316,15 @@ process_episode_worker() {
     local WORKER_ID=$BASHPID     # Unique Process ID for isolation
     local PIPELINE_START=$(date +%s)
     local DEST_LOG_DIR="${LOG_DIR}/${EPISODE_ID}"
+    
+    # Determine which GPU this worker should use
+    # Workers are distributed round-robin across GPUs
+    IFS=',' read -ra GPU_ARRAY <<< "${GPU_LIST_STR}"
+    local GPU_IDX=$((WORKER_NUM % NUM_GPUS))
+    local ASSIGNED_GPU="${GPU_ARRAY[$GPU_IDX]}"
+    
+    # Set CUDA device for this worker
+    export CUDA_VISIBLE_DEVICES="${ASSIGNED_GPU}"
     
     # Define unique local workspace for this worker
     local JOB_DIR="${FAST_LOCAL_DIR}/${EPISODE_ID}_${WORKER_ID}"
@@ -389,8 +463,8 @@ process_episode_worker() {
     local EPISODE_END=$(date +%s)
     local TOTAL_TIME=$((EPISODE_END - PIPELINE_START))
     
-    # Atomic append to CSV (with intrinsics time)
-    echo "${EPISODE_ID},${WORKER_NUM},${PREP_TIME},${DOWNLOAD_TIME},${INTRINSICS_TIME},${TRACKS_TIME},${SYNC_TIME},${CLEANUP_TIME},${TOTAL_TIME}" >> "${TIMING_FILE}"
+    # Atomic append to CSV (with GPU info)
+    echo "${EPISODE_ID},${ASSIGNED_GPU},${PREP_TIME},${DOWNLOAD_TIME},${INTRINSICS_TIME},${TRACKS_TIME},${SYNC_TIME},${CLEANUP_TIME},${TOTAL_TIME}" >> "${TIMING_FILE}"
     record_status "success" "${EPISODE_ID}" "complete"
 }
 
@@ -529,11 +603,11 @@ progress_monitor() {
         if [ "${total}" -gt 0 ]; then
             percent=$(( 100 * done / total ))
         fi
-        printf "\r[progress] %d/%d (%d%%) | success: %d/%d | failures: %d/%d | workers: %d (CPU-only)" \
+        printf "\r[progress] %d/%d (%d%%) | success: %d/%d | failures: %d/%d | workers: %d (per GPU: %d; GPUs: %s)" \
             "${done}" "${total}" "${percent}" \
             "${success}" "${total}" \
             "${failure}" "${total}" \
-            "${TOTAL_WORKERS}"
+            "${TOTAL_WORKERS}" "${WORKERS_PER_GPU}" "${GPU_LIST_STR}"
         sleep "${interval}"
     done
 }
@@ -791,7 +865,9 @@ PROCESSED_COUNT=$((PROCESSED_COUNT - 1))
 echo ""
 echo "=== TIMING STATISTICS ==="
 echo "Processed: ${PROCESSED_COUNT} episodes"
-echo "Workers: ${TOTAL_WORKERS} (CPU-only)"
+echo "GPUs used: ${NUM_GPUS} (${GPU_LIST_STR})"
+echo "Workers per GPU: ${WORKERS_PER_GPU}"
+echo "Total workers: ${TOTAL_WORKERS}"
 echo "Timing log: ${TIMING_FILE}"
 echo "HuggingFace Repo: ${HF_REPO_ID}"
 
@@ -801,9 +877,10 @@ echo "Batch uploads completed: ${BATCH_UPLOAD_COUNT}"
 echo "Batch upload log: ${BATCH_UPLOAD_LOG}"
 
 if [ "${PROCESSED_COUNT}" -gt 0 ]; then
-    # Calculate averages using awk from the CSV (with intrinsics time)
+    # Calculate averages and per-GPU statistics using awk from the CSV
     awk -F',' 'NR>1 {
         sum_prep+=$3; sum_dl+=$4; sum_intrinsics+=$5; sum_tracks+=$6; sum_sync+=$7; sum_cleanup+=$8; sum_total+=$9; count++;
+        gpu_count[$2]++; gpu_time[$2]+=$9
     } END {
         if (count > 0) {
             print "\nFinal Averages:";
@@ -814,6 +891,11 @@ if [ "${PROCESSED_COUNT}" -gt 0 ]; then
             printf "  Sync:        %.1fs\n", sum_sync/count;
             printf "  Cleanup:     %.1fs\n", sum_cleanup/count;
             printf "  Total:       %.1fs\n", sum_total/count;
+            
+            print "\nPer-GPU Statistics:";
+            for (gpu in gpu_count) {
+                printf "  GPU %s: %d episodes, avg %.1fs/episode\n", gpu, gpu_count[gpu], gpu_time[gpu]/gpu_count[gpu];
+            }
         }
     }' "${TIMING_FILE}"
 fi
