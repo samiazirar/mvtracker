@@ -36,8 +36,8 @@ SKIP_HF_CHECK=${SKIP_HF_CHECK:-0}        # Set to 1 to skip HuggingFace existenc
 
 # Paths (all on fast /data storage)
 CAM2BASE_PATH="/data/cam2base_extrinsic_superset.json"
-CONFIG_PATH="/workspace/conversions/droid/training_data/config.yaml"
-SCRIPT_DIR="/workspace/conversions/droid/training_data"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_PATH="${SCRIPT_DIR}/config.yaml"
 LOG_DIR="/data/logs/pipeline_huggingface_$(date +%Y%m%d_%H%M%S)"
 EPISODES_FILE="${LOG_DIR}/episodes.txt"
 TIMING_FILE="${LOG_DIR}/timing.csv"
@@ -76,9 +76,15 @@ HF_METADATA_REPO_ID="sazirarrwth99/droid_metadata_only"  # Metadata-only repo (t
 HF_REPO_TYPE="dataset"                      # Type: dataset, model, or space
 # ----------------------------------------------------------------------------
 
-# Load HF_TOKEN from .env file explicitly
-ENV_FILE="/root/mvtracker/.env"
-if [ -f "${ENV_FILE}" ]; then
+# Load HF_TOKEN from .env file explicitly (search multiple locations)
+for candidate in "/root/mvtracker/.env" "/workspace/.env" "${SCRIPT_DIR}/../../../.env"; do
+    if [ -f "${candidate}" ]; then
+        ENV_FILE="${candidate}"
+        break
+    fi
+done
+
+if [ -n "${ENV_FILE}" ] && [ -f "${ENV_FILE}" ]; then
     # Extract HF_TOKEN from .env file (handles quotes)
     HF_TOKEN=$(grep -E '^HF_TOKEN=' "${ENV_FILE}" | sed 's/^HF_TOKEN=//; s/^"//; s/"$//')
     if [ -z "${HF_TOKEN}" ]; then

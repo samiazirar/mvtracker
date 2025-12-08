@@ -45,8 +45,8 @@ SKIP_HF_CHECK=${SKIP_HF_CHECK:-0}                   # Set to 1 to skip HuggingFa
 
 # Paths (all on fast /data storage)
 CAM2BASE_PATH="/data/cam2base_extrinsic_superset.json"
-CONFIG_PATH="/workspace/conversions/droid/training_data/config.yaml"
-SCRIPT_DIR="/workspace/conversions/droid/training_data"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_PATH="${SCRIPT_DIR}/config.yaml"
 LOG_DIR="/data/logs/pipeline_metadata_only_$(date +%Y%m%d_%H%M%S)"
 EPISODES_FILE="${LOG_DIR}/episodes.txt"
 TIMING_FILE="${LOG_DIR}/timing.csv"
