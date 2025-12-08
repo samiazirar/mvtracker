@@ -232,11 +232,12 @@ echo "Batch Upload Interval: ${BATCH_UPLOAD_INTERVAL}s (every $((BATCH_UPLOAD_IN
 echo "HuggingFace Repo: ${HF_REPO_ID}"
 echo "Log dir: ${LOG_DIR}"
 echo ""
-echo "NOTE: This pipeline SKIPS depth extraction - only generates metadata files."
+echo "NOTE: This pipeline extracts intrinsics only (no depth/RGB) and generates metadata."
+echo "      Includes: tracks.npz (3D + 2D normalized), extrinsics.npz, quality.json"
 echo ""
 
-# Initialize timing CSV (no rgb_depth time since we skip it)
-echo "episode_id,worker_id,prep_time_sec,download_time_sec,tracks_time_sec,sync_time_sec,cleanup_time_sec,total_time_sec" > "${TIMING_FILE}"
+# Initialize timing CSV (with intrinsics time)
+echo "episode_id,worker_id,prep_time_sec,download_time_sec,intrinsics_time_sec,tracks_time_sec,sync_time_sec,cleanup_time_sec,total_time_sec" > "${TIMING_FILE}"
 
 # ============================================================================
 # WORKER FUNCTION (CPU-Only Parallel Execution)
@@ -312,14 +313,29 @@ process_episode_worker() {
     local DOWNLOAD_TIME=$((DOWNLOAD_END - DOWNLOAD_START))
     
     # ------------------------------------------------------------------------
-    # STEP B: SKIPPED - No depth extraction (metadata only mode)
+    # STEP B: Extract Camera Intrinsics ONLY (No GPU needed, no depth/RGB)
+    # This extracts intrinsics.json from ZED SVO files for 2D track projection
     # ------------------------------------------------------------------------
-    # We skip extract_rgb_depth.py entirely - no depth inference needed
+    local INTRINSICS_START=$(date +%s)
+    
+    python "${SCRIPT_DIR}/extract_intrinsics_only.py" \
+        --episode_id "${EPISODE_ID}" \
+        --config "${TEMP_CONFIG}" \
+        > "${JOB_LOGS}/intrinsics.log" 2>&1 || {
+            cp -a "${JOB_LOGS}/." "${DEST_LOG_DIR}/" 2>/dev/null || true
+            record_error "${EPISODE_ID}" "intrinsics" "Intrinsics extraction failed (see ${DEST_LOG_DIR}/intrinsics.log)"
+            record_status "failure" "${EPISODE_ID}" "intrinsics"
+            rm -rf "${JOB_DIR}"
+            return 1
+        }
+    
+    local INTRINSICS_END=$(date +%s)
+    local INTRINSICS_TIME=$((INTRINSICS_END - INTRINSICS_START))
     
     # ------------------------------------------------------------------------
     # STEP C: Generate Tracks and Metadata (CPU Step)
     # This generates tracks.npz, extrinsics.npz, and quality.json
-    # Note: 2D tracks won't be generated since no intrinsics.json exists
+    # Now includes 2D track projections since intrinsics are available
     # ------------------------------------------------------------------------
     local TRACKS_START=$(date +%s)
     
@@ -371,8 +387,8 @@ process_episode_worker() {
     local EPISODE_END=$(date +%s)
     local TOTAL_TIME=$((EPISODE_END - PIPELINE_START))
     
-    # Atomic append to CSV (no GPU info, no rgb_depth time)
-    echo "${EPISODE_ID},${WORKER_NUM},${PREP_TIME},${DOWNLOAD_TIME},${TRACKS_TIME},${SYNC_TIME},${CLEANUP_TIME},${TOTAL_TIME}" >> "${TIMING_FILE}"
+    # Atomic append to CSV (with intrinsics time)
+    echo "${EPISODE_ID},${WORKER_NUM},${PREP_TIME},${DOWNLOAD_TIME},${INTRINSICS_TIME},${TRACKS_TIME},${SYNC_TIME},${CLEANUP_TIME},${TOTAL_TIME}" >> "${TIMING_FILE}"
     record_status "success" "${EPISODE_ID}" "complete"
 }
 
@@ -737,12 +753,14 @@ if [ -f "${FAILED_EPISODES_FILE}" ] && [ -s "${FAILED_EPISODES_FILE}" ]; then
     echo "=== ERRORS BY STEP ==="
     # Count errors by step
     DOWNLOAD_ERRORS=$(awk -F, '$2=="download"{c++} END{print c+0}' "${FAILED_EPISODES_FILE}")
+    INTRINSICS_ERRORS=$(awk -F, '$2=="intrinsics"{c++} END{print c+0}' "${FAILED_EPISODES_FILE}")
     TRACKS_ERRORS=$(awk -F, '$2=="tracks"{c++} END{print c+0}' "${FAILED_EPISODES_FILE}")
     SYNC_ERRORS=$(awk -F, '$2=="sync"{c++} END{print c+0}' "${FAILED_EPISODES_FILE}")
     
-    echo "  download:  ${DOWNLOAD_ERRORS}"
-    echo "  tracks:    ${TRACKS_ERRORS}"
-    echo "  sync:      ${SYNC_ERRORS}"
+    echo "  download:    ${DOWNLOAD_ERRORS}"
+    echo "  intrinsics:  ${INTRINSICS_ERRORS}"
+    echo "  tracks:      ${TRACKS_ERRORS}"
+    echo "  sync:        ${SYNC_ERRORS}"
     echo ""
     
     echo "=== FAILED RUNS ==="
@@ -781,29 +799,31 @@ echo "Batch uploads completed: ${BATCH_UPLOAD_COUNT}"
 echo "Batch upload log: ${BATCH_UPLOAD_LOG}"
 
 if [ "${PROCESSED_COUNT}" -gt 0 ]; then
-    # Calculate averages using awk from the CSV (no GPU stats, no rgb_depth)
+    # Calculate averages using awk from the CSV (with intrinsics time)
     awk -F',' 'NR>1 {
-        sum_prep+=$3; sum_dl+=$4; sum_tracks+=$5; sum_sync+=$6; sum_cleanup+=$7; sum_total+=$8; count++;
+        sum_prep+=$3; sum_dl+=$4; sum_intrinsics+=$5; sum_tracks+=$6; sum_sync+=$7; sum_cleanup+=$8; sum_total+=$9; count++;
     } END {
         if (count > 0) {
             print "\nFinal Averages:";
-            printf "  Prep:       %.1fs\n", sum_prep/count;
-            printf "  Download:   %.1fs\n", sum_dl/count;
-            printf "  Tracks:     %.1fs\n", sum_tracks/count;
-            printf "  Sync:       %.1fs\n", sum_sync/count;
-            printf "  Cleanup:    %.1fs\n", sum_cleanup/count;
-            printf "  Total:      %.1fs\n", sum_total/count;
+            printf "  Prep:        %.1fs\n", sum_prep/count;
+            printf "  Download:    %.1fs\n", sum_dl/count;
+            printf "  Intrinsics:  %.1fs\n", sum_intrinsics/count;
+            printf "  Tracks:      %.1fs\n", sum_tracks/count;
+            printf "  Sync:        %.1fs\n", sum_sync/count;
+            printf "  Cleanup:     %.1fs\n", sum_cleanup/count;
+            printf "  Total:       %.1fs\n", sum_total/count;
         }
     }' "${TIMING_FILE}"
 fi
 
 echo ""
 echo "Output files per episode:"
-echo "  - tracks.npz (gripper contact tracks, 3D only)"
+echo "  - tracks.npz (3D tracks + 2D projections per camera, normalized flow)"
 echo "  - extrinsics.npz (camera poses)"
 echo "  - quality.json (metadata)"
+echo "  - recordings/{camera}/intrinsics.json (camera parameters)"
 echo ""
-echo "NOTE: No 2D track projections included (requires depth extraction first)"
+echo "NOTE: Includes normalized flow data (resampled at 1mm distance steps)"
 
 exit "${PIPELINE_EXIT_CODE}"
 
