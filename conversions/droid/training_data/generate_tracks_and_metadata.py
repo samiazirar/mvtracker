@@ -19,12 +19,15 @@ tracks.npz contents:
     - contact_frames: [T, 4, 4] float32 - Combined contact frame (centroid + EE orientation)
     - left_contact_frames: [T, 4, 4] float32 - Left finger contact frames
     - right_contact_frames: [T, 4, 4] float32 - Right finger contact frames
-    - normalized_centroids: [N, 3] float32 - Centroids resampled at 1mm distance steps
-    - normalized_frames: [N, 4, 4] float32 - Frames resampled at 1mm distance steps
+    - normalized_centroids: [M, 3] float32 - Centroids resampled at 1mm distance steps
+    - normalized_frames: [M, 4, 4] float32 - Contact frames resampled at 1mm distance steps
+    - normalized_tracks_3d: [M, N, 3] float32 - Contact points resampled at 1mm distance steps
+    - normalized_left_frames: [M, 4, 4] float32 - Left finger frames resampled at 1mm steps
+    - normalized_right_frames: [M, 4, 4] float32 - Right finger frames resampled at 1mm steps
     - cumulative_distance_mm: [T] float32 - Cumulative distance traveled at each frame (mm)
     - frame_to_normalized_idx: [T] int32 - Mapping from original frame to normalized index
     - normalized_step_size_mm: float - Step size used for normalization (default: 1.0)
-    - num_normalized_steps: int - Number of normalized flow steps
+    - num_normalized_steps: int (M) - Number of normalized flow steps
     - num_frames: int - Number of frames
     - num_points_per_finger: int - Number of track points per finger
     - fps: float - Frame rate
@@ -345,16 +348,20 @@ def generate_tracks(h5_path: str, num_track_points: int, max_frames: int = None,
                 right_contact_frames[i] = right_frame
 
     # Compute normalized flow (resampled at 1mm steps)
+    # This normalizes centroids, frames, contact points, AND per-finger frames
     step_size_mm = 1.0
     print(f"[INFO] Computing normalized flow at {step_size_mm}mm steps...")
-    (normalized_centroids, normalized_frames,
-     cumulative_distance_mm, frame_to_normalized_idx) = compute_normalized_flow(
-        contact_centroids, contact_frames, step_size_mm=step_size_mm
+    norm_result = compute_normalized_flow(
+        contact_centroids, contact_frames, step_size_mm=step_size_mm,
+        tracks_3d=tracks_3d,
+        left_contact_frames=left_contact_frames,
+        right_contact_frames=right_contact_frames,
     )
-    print(f"[INFO] Normalized flow: {len(normalized_centroids)} steps "
-          f"(total distance: {cumulative_distance_mm[-1]:.1f}mm)")
+    print(f"[INFO] Normalized flow: {norm_result['num_normalized_steps']} steps "
+          f"(total distance: {norm_result['cumulative_distance_mm'][-1]:.1f}mm)")
 
     return {
+        # Original (unnormalized) data
         'tracks_3d': tracks_3d,
         'contact_points_local': contact_tracker.contact_points_local,
         'gripper_poses': np.stack(gripper_poses, axis=0),
@@ -364,13 +371,16 @@ def generate_tracks(h5_path: str, num_track_points: int, max_frames: int = None,
         'contact_frames': contact_frames,
         'left_contact_frames': left_contact_frames,
         'right_contact_frames': right_contact_frames,
-        # Normalized flow data
-        'normalized_centroids': normalized_centroids,
-        'normalized_frames': normalized_frames,
-        'cumulative_distance_mm': cumulative_distance_mm,
-        'frame_to_normalized_idx': frame_to_normalized_idx,
+        # Normalized flow data (all resampled at 1mm steps)
+        'normalized_centroids': norm_result['normalized_centroids'],
+        'normalized_frames': norm_result['normalized_frames'],
+        'normalized_tracks_3d': norm_result['normalized_tracks_3d'],
+        'normalized_left_frames': norm_result['normalized_left_frames'],
+        'normalized_right_frames': norm_result['normalized_right_frames'],
+        'cumulative_distance_mm': norm_result['cumulative_distance_mm'],
+        'frame_to_normalized_idx': norm_result['frame_to_normalized_idx'],
         'normalized_step_size_mm': step_size_mm,
-        'num_normalized_steps': len(normalized_centroids),
+        'num_normalized_steps': norm_result['num_normalized_steps'],
         'num_frames': actual_frames,
         'num_points_per_finger': num_contact_pts,
     }
@@ -573,6 +583,9 @@ def main():
         # Normalized flow data (resampled at fixed distance steps)
         'normalized_centroids': tracks_data['normalized_centroids'],
         'normalized_frames': tracks_data['normalized_frames'],
+        'normalized_tracks_3d': tracks_data['normalized_tracks_3d'],
+        'normalized_left_frames': tracks_data['normalized_left_frames'],
+        'normalized_right_frames': tracks_data['normalized_right_frames'],
         'cumulative_distance_mm': tracks_data['cumulative_distance_mm'],
         'frame_to_normalized_idx': tracks_data['frame_to_normalized_idx'],
         'normalized_step_size_mm': tracks_data['normalized_step_size_mm'],

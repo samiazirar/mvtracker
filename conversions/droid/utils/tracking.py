@@ -121,7 +121,8 @@ def compute_contact_frame_per_finger(pts_world, T_finger):
     return centroid, frame
 
 
-def compute_normalized_flow(contact_centroids, contact_frames, step_size_mm=1.0):
+def compute_normalized_flow(contact_centroids, contact_frames, step_size_mm=1.0,
+                           tracks_3d=None, left_contact_frames=None, right_contact_frames=None):
     """Normalize contact flow to fixed distance steps (e.g., 1mm).
 
     Resamples the trajectory based on 3D distance traveled rather than time.
@@ -132,19 +133,39 @@ def compute_normalized_flow(contact_centroids, contact_frames, step_size_mm=1.0)
         contact_centroids: [T, 3] center of mass positions over time
         contact_frames: [T, 4, 4] contact frames over time
         step_size_mm: Target step size in millimeters (default: 1.0)
+        tracks_3d: [T, N, 3] optional contact track points to also normalize
+        left_contact_frames: [T, 4, 4] optional left finger frames to normalize
+        right_contact_frames: [T, 4, 4] optional right finger frames to normalize
 
     Returns:
-        normalized_centroids: [N, 3] resampled centroids at fixed distance steps
-        normalized_frames: [N, 4, 4] resampled frames at fixed distance steps
-        cumulative_distance: [T] cumulative distance at each original frame (in mm)
-        original_to_normalized_idx: [T] mapping from original frame to normalized index
+        dict with:
+            normalized_centroids: [M, 3] resampled centroids at fixed distance steps
+            normalized_frames: [M, 4, 4] resampled frames at fixed distance steps
+            normalized_tracks_3d: [M, N, 3] resampled contact points (if tracks_3d provided)
+            normalized_left_frames: [M, 4, 4] resampled left finger frames (if provided)
+            normalized_right_frames: [M, 4, 4] resampled right finger frames (if provided)
+            cumulative_distance_mm: [T] cumulative distance at each original frame (in mm)
+            frame_to_normalized_idx: [T] mapping from original frame to normalized index
+            num_normalized_steps: int number of normalized steps
     """
     step_size_m = step_size_mm / 1000.0  # Convert to meters
 
     T = len(contact_centroids)
+    result = {}
+
     if T < 2:
-        return (contact_centroids.copy(), contact_frames.copy(),
-                np.zeros(T), np.zeros(T, dtype=np.int32))
+        result['normalized_centroids'] = contact_centroids.copy()
+        result['normalized_frames'] = contact_frames.copy()
+        result['cumulative_distance_mm'] = np.zeros(T)
+        result['frame_to_normalized_idx'] = np.zeros(T, dtype=np.int32)
+        result['num_normalized_steps'] = T
+        if tracks_3d is not None:
+            result['normalized_tracks_3d'] = tracks_3d.copy()
+        if left_contact_frames is not None:
+            result['normalized_left_frames'] = left_contact_frames.copy()
+        if right_contact_frames is not None:
+            result['normalized_right_frames'] = right_contact_frames.copy()
+        return result
 
     # Compute distances between consecutive frames
     diffs = np.diff(contact_centroids, axis=0)  # [T-1, 3]
@@ -159,12 +180,20 @@ def compute_normalized_flow(contact_centroids, contact_frames, step_size_mm=1.0)
 
     if total_distance < step_size_m:
         # Very short trajectory - return start and end only
-        normalized_centroids = np.array([contact_centroids[0], contact_centroids[-1]])
-        normalized_frames = np.array([contact_frames[0], contact_frames[-1]])
-        original_to_normalized_idx = np.zeros(T, dtype=np.int32)
-        original_to_normalized_idx[T//2:] = 1
-        return (normalized_centroids, normalized_frames,
-                cumulative_distance * 1000, original_to_normalized_idx)
+        result['normalized_centroids'] = np.array([contact_centroids[0], contact_centroids[-1]])
+        result['normalized_frames'] = np.array([contact_frames[0], contact_frames[-1]])
+        result['cumulative_distance_mm'] = cumulative_distance * 1000
+        frame_to_normalized_idx = np.zeros(T, dtype=np.int32)
+        frame_to_normalized_idx[T//2:] = 1
+        result['frame_to_normalized_idx'] = frame_to_normalized_idx
+        result['num_normalized_steps'] = 2
+        if tracks_3d is not None:
+            result['normalized_tracks_3d'] = np.array([tracks_3d[0], tracks_3d[-1]])
+        if left_contact_frames is not None:
+            result['normalized_left_frames'] = np.array([left_contact_frames[0], left_contact_frames[-1]])
+        if right_contact_frames is not None:
+            result['normalized_right_frames'] = np.array([right_contact_frames[0], right_contact_frames[-1]])
+        return result
 
     # Number of normalized steps
     num_steps = int(np.ceil(total_distance / step_size_m)) + 1
@@ -176,6 +205,24 @@ def compute_normalized_flow(contact_centroids, contact_frames, step_size_mm=1.0)
     normalized_centroids = np.zeros((num_steps, 3), dtype=np.float32)
     normalized_frames = np.zeros((num_steps, 4, 4), dtype=np.float32)
 
+    # Optional: normalize tracks_3d
+    if tracks_3d is not None:
+        num_points = tracks_3d.shape[1]
+        normalized_tracks_3d = np.zeros((num_steps, num_points, 3), dtype=np.float32)
+    else:
+        normalized_tracks_3d = None
+
+    # Optional: normalize per-finger frames
+    if left_contact_frames is not None:
+        normalized_left_frames = np.zeros((num_steps, 4, 4), dtype=np.float32)
+    else:
+        normalized_left_frames = None
+
+    if right_contact_frames is not None:
+        normalized_right_frames = np.zeros((num_steps, 4, 4), dtype=np.float32)
+    else:
+        normalized_right_frames = None
+
     for i, target_dist in enumerate(target_distances):
         # Find the two original frames that bracket this distance
         idx = np.searchsorted(cumulative_distance, target_dist)
@@ -183,9 +230,21 @@ def compute_normalized_flow(contact_centroids, contact_frames, step_size_mm=1.0)
         if idx == 0:
             normalized_centroids[i] = contact_centroids[0]
             normalized_frames[i] = contact_frames[0]
+            if normalized_tracks_3d is not None:
+                normalized_tracks_3d[i] = tracks_3d[0]
+            if normalized_left_frames is not None:
+                normalized_left_frames[i] = left_contact_frames[0]
+            if normalized_right_frames is not None:
+                normalized_right_frames[i] = right_contact_frames[0]
         elif idx >= T:
             normalized_centroids[i] = contact_centroids[-1]
             normalized_frames[i] = contact_frames[-1]
+            if normalized_tracks_3d is not None:
+                normalized_tracks_3d[i] = tracks_3d[-1]
+            if normalized_left_frames is not None:
+                normalized_left_frames[i] = left_contact_frames[-1]
+            if normalized_right_frames is not None:
+                normalized_right_frames[i] = right_contact_frames[-1]
         else:
             # Linear interpolation between frames idx-1 and idx
             d0 = cumulative_distance[idx - 1]
@@ -203,15 +262,41 @@ def compute_normalized_flow(contact_centroids, contact_frames, step_size_mm=1.0)
                 contact_frames[idx - 1], contact_frames[idx], t
             )
 
+            # Interpolate track points
+            if normalized_tracks_3d is not None:
+                normalized_tracks_3d[i] = (1 - t) * tracks_3d[idx - 1] + t * tracks_3d[idx]
+
+            # Interpolate per-finger frames
+            if normalized_left_frames is not None:
+                normalized_left_frames[i] = _interpolate_transform(
+                    left_contact_frames[idx - 1], left_contact_frames[idx], t
+                )
+            if normalized_right_frames is not None:
+                normalized_right_frames[i] = _interpolate_transform(
+                    right_contact_frames[idx - 1], right_contact_frames[idx], t
+                )
+
     # Map original frames to nearest normalized index
-    original_to_normalized_idx = np.zeros(T, dtype=np.int32)
+    frame_to_normalized_idx = np.zeros(T, dtype=np.int32)
     for i in range(T):
         # Find closest target distance
-        original_to_normalized_idx[i] = np.argmin(np.abs(target_distances - cumulative_distance[i]))
+        frame_to_normalized_idx[i] = np.argmin(np.abs(target_distances - cumulative_distance[i]))
 
-    return (normalized_centroids, normalized_frames,
-            cumulative_distance * 1000,  # Return in mm
-            original_to_normalized_idx)
+    # Build result dict
+    result['normalized_centroids'] = normalized_centroids
+    result['normalized_frames'] = normalized_frames
+    result['cumulative_distance_mm'] = cumulative_distance * 1000  # Return in mm
+    result['frame_to_normalized_idx'] = frame_to_normalized_idx
+    result['num_normalized_steps'] = num_steps
+
+    if normalized_tracks_3d is not None:
+        result['normalized_tracks_3d'] = normalized_tracks_3d
+    if normalized_left_frames is not None:
+        result['normalized_left_frames'] = normalized_left_frames
+    if normalized_right_frames is not None:
+        result['normalized_right_frames'] = normalized_right_frames
+
+    return result
 
 
 def _interpolate_transform(T0, T1, t):

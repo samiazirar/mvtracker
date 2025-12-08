@@ -20,11 +20,11 @@ min_depth_wrist: 0.01  # Meters (Minimum depth for wrist cam rendering - include
 min_depth_wrist_icp: 0.15  # Meters (Minimum depth for ICP - excludes gripper at ~15cm)
 
 # Visualization parameters
-max_frames: 350         # Max frames to process
+max_frames: 10000         # Max frames to process
 radii_size: 0.001      # Point size in meters
 track_trail_length: 10 # How many past frames to keep line trails for gripper tracks
 track_trail_length_video: 10 # How many past frames of tracks to draw onto output videos
-num_track_points: 480  # Number of points to track on the gripper
+num_track_points: 520  # Number of points to track on the gripper
 
 # ICP optimization parameters
 icp_num_frames: 10     # Number of frames to sample for ICP optimization

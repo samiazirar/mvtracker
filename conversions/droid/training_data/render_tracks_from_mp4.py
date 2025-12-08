@@ -69,7 +69,15 @@ from utils import (  # type: ignore
 )
 
 # Visualization mode constants
-VIS_MODES = ["tracks_overlay", "contact_frames", "gripper_poses", "normalized_flow", "all"]
+VIS_MODES = [
+    "tracks_overlay",           # Original contact points (time-based)
+    "contact_frames",           # Original contact frames (time-based)
+    "gripper_poses",            # End-effector poses
+    "normalized_flow",          # Normalized trajectory waypoints only
+    "normalized_tracks",        # Normalized contact points (distance-based)
+    "normalized_frames",        # Normalized contact frames (distance-based)
+    "all",                      # Generate all visualization types
+]
 
 
 DEFAULT_CONFIG = {
@@ -788,21 +796,31 @@ def render_all_visualizations(
         min_depth: Minimum depth for projection
     """
     # Extract data from tracks_data
+    # Original (time-based) data
     tracks_3d = tracks_data.get("tracks_3d")
     contact_frames = tracks_data.get("contact_frames")
     left_contact_frames = tracks_data.get("left_contact_frames")
     right_contact_frames = tracks_data.get("right_contact_frames")
     gripper_poses = tracks_data.get("gripper_poses")
     contact_centroids = tracks_data.get("contact_centroids")
+
+    # Normalized (distance-based) data
     normalized_centroids = tracks_data.get("normalized_centroids")
-    normalized_frames = tracks_data.get("normalized_frames")
+    normalized_frames_data = tracks_data.get("normalized_frames")
+    normalized_tracks_3d = tracks_data.get("normalized_tracks_3d")
+    normalized_left_frames = tracks_data.get("normalized_left_frames")
+    normalized_right_frames = tracks_data.get("normalized_right_frames")
     frame_to_normalized_idx = tracks_data.get("frame_to_normalized_idx")
+    num_normalized_steps = int(tracks_data.get("num_normalized_steps", 0))
 
     num_frames = int(tracks_data.get("num_frames", len(tracks_3d) if tracks_3d is not None else 0))
 
     # Determine actual modes to render
     if "all" in modes:
-        active_modes = ["tracks_overlay", "contact_frames", "gripper_poses", "normalized_flow"]
+        active_modes = [
+            "tracks_overlay", "contact_frames", "gripper_poses",
+            "normalized_flow", "normalized_tracks", "normalized_frames"
+        ]
     else:
         active_modes = modes
 
@@ -956,7 +974,7 @@ def render_all_visualizations(
                         )
 
                 elif mode == "normalized_flow":
-                    # Draw normalized flow waypoints
+                    # Draw normalized flow waypoints (trajectory overview)
                     if normalized_centroids is not None and frame_to_normalized_idx is not None:
                         current_norm_idx = int(frame_to_normalized_idx[frame_idx])
 
@@ -974,15 +992,84 @@ def render_all_visualizations(
                         )
 
                         # Draw current normalized frame coordinate system
-                        if normalized_frames is not None:
+                        if normalized_frames_data is not None:
                             frame = draw_coordinate_frame(
-                                frame, normalized_frames[current_norm_idx],
+                                frame, normalized_frames_data[current_norm_idx],
                                 K, world_T_cam, width, height,
                                 axis_length=0.04, line_thickness=3, min_depth=min_depth,
                             )
 
                         # Add text overlay with normalized step info
                         text = f"Norm step: {current_norm_idx}/{len(normalized_centroids)-1}"
+                        cv2.putText(frame, text, (10, 30),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+
+                elif mode == "normalized_tracks":
+                    # Draw normalized contact points (distance-based)
+                    if normalized_tracks_3d is not None and frame_to_normalized_idx is not None:
+                        current_norm_idx = int(frame_to_normalized_idx[frame_idx])
+                        norm_track_points = normalized_tracks_3d[current_norm_idx]
+
+                        # Project and draw normalized track points
+                        uv_tracks, cols_tracks = project_points_to_image(
+                            norm_track_points, K, world_T_cam, width, height,
+                            colors=track_colors_rgb, min_depth=min_depth,
+                        )
+                        frame = draw_points_on_image(
+                            frame, uv_tracks, colors=cols_tracks,
+                            radius=5, default_color=(0, 255, 255)
+                        )
+
+                        # Draw trajectory line through normalized centroids
+                        if normalized_centroids is not None:
+                            frame = draw_trajectory_line(
+                                frame, normalized_centroids, K, world_T_cam,
+                                width, height, color=(255, 255, 0), line_thickness=1,
+                                min_depth=min_depth,
+                            )
+
+                        # Add text overlay
+                        text = f"Norm step: {current_norm_idx}/{num_normalized_steps-1}"
+                        cv2.putText(frame, text, (10, 30),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+
+                elif mode == "normalized_frames":
+                    # Draw normalized contact frames (distance-based)
+                    if frame_to_normalized_idx is not None:
+                        current_norm_idx = int(frame_to_normalized_idx[frame_idx])
+
+                        # Draw combined normalized frame
+                        if normalized_frames_data is not None:
+                            frame = draw_coordinate_frame(
+                                frame, normalized_frames_data[current_norm_idx],
+                                K, world_T_cam, width, height,
+                                axis_length=0.04, line_thickness=3, min_depth=min_depth,
+                            )
+
+                        # Draw per-finger normalized frames
+                        if normalized_left_frames is not None:
+                            frame = draw_coordinate_frame(
+                                frame, normalized_left_frames[current_norm_idx],
+                                K, world_T_cam, width, height,
+                                axis_length=0.025, line_thickness=2, min_depth=min_depth,
+                            )
+                        if normalized_right_frames is not None:
+                            frame = draw_coordinate_frame(
+                                frame, normalized_right_frames[current_norm_idx],
+                                K, world_T_cam, width, height,
+                                axis_length=0.025, line_thickness=2, min_depth=min_depth,
+                            )
+
+                        # Draw trajectory through normalized centroids
+                        if normalized_centroids is not None:
+                            frame = draw_trajectory_line(
+                                frame, normalized_centroids, K, world_T_cam,
+                                width, height, color=(0, 255, 255), line_thickness=2,
+                                min_depth=min_depth,
+                            )
+
+                        # Add text overlay
+                        text = f"Norm step: {current_norm_idx}/{num_normalized_steps-1}"
                         cv2.putText(frame, text, (10, 30),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
 
