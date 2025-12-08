@@ -141,3 +141,7 @@ droid_processed/
 droid_processed/*
 
 check_data.ipynb
+
+hf_render_cache
+hf_render_cache/
+hf_render_cache/*
