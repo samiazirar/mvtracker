@@ -1,13 +1,15 @@
 #!/bin/bash
-# DROID Training Data Processing Pipeline (Metadata Only - No Depth Inference)
-# METADATA ONLY VERSION: Only generates tracks.npz, extrinsics.npz, quality.json
+# DROID Training Data Processing Pipeline (Metadata Only - No Depth Extraction)
+# METADATA ONLY VERSION: Generates complete tracks + metadata WITHOUT depth maps
 #
-# This pipeline SKIPS the GPU-intensive depth extraction step and only generates:
-# - tracks.npz: Gripper contact surface tracks (3D only, no 2D since no intrinsics)
+# This pipeline extracts intrinsics from ZED (no GPU needed) and generates:
+# - tracks.npz: 3D tracks + 2D projections + normalized flow (1mm resampling)
 # - extrinsics.npz: Camera extrinsics (external + wrist)
 # - quality.json: Episode metadata and calibration info
+# - intrinsics.json: Camera parameters per camera
 #
-# Since no GPU is needed, this can run with many more parallel workers.
+# Since no GPU depth extraction is done, this can run with many more parallel workers.
+# Perfect for training vision-based models that don't need depth maps.
 #
 # BATCH UPLOAD MODE: Episodes are staged locally and uploaded to HuggingFace
 # every 10 minutes (configurable via BATCH_UPLOAD_INTERVAL) to avoid rate limits.

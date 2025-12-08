@@ -1,9 +1,10 @@
 #!/bin/bash
 # DROID Training Data Processing Pipeline (Multi-GPU Parallel Optimized)
-# COMPRESSED VERSION: Skips RGB, stores depth as FFV1 lossless video (z16)
+# COMPRESSED VERSION: Stores depth as FFV1 lossless video (z16) for HuggingFace upload
 #
-# Downloads, extracts depth only (as FFV1 video), and generates tracks for episodes
+# Extracts depth from ZED (GPU required), saves as compressed FFV1 video, and generates tracks
 # Output format: depth.mkv (FFV1 lossless, 16-bit depth in millimeters)
+# NOTE: Despite filename, this uses LOSSLESS FFV1 compression (~70% size reduction)
 #
 # BATCH UPLOAD MODE: Episodes are staged locally and uploaded to HuggingFace
 # every 10 minutes (configurable via BATCH_UPLOAD_INTERVAL) to avoid rate limits.
@@ -437,9 +438,10 @@ process_episode_worker() {
     # A background process will batch upload every BATCH_UPLOAD_INTERVAL seconds
     local SYNC_START=$(date +%s)
 
-    # First, copy metadata-only files (tracks.npz, extrinsics.npz, quality.json) to metadata batch dir
+    # First, copy metadata-only files to metadata batch dir
     # This must happen BEFORE rsync --remove-source-files
-    find "${JOB_OUTPUT}" -type f \( -name "tracks.npz" -o -name "extrinsics.npz" -o -name "quality.json" \) 2>/dev/null | while read file; do
+    # Include: tracks.npz, extrinsics.npz, quality.json, intrinsics.json
+    find "${JOB_OUTPUT}" -type f \( -name "tracks.npz" -o -name "extrinsics.npz" -o -name "quality.json" -o -name "intrinsics.json" \) 2>/dev/null | while read file; do
         # Get relative path from JOB_OUTPUT
         rel_path="${file#${JOB_OUTPUT}/}"
         target_dir="${BATCH_METADATA_DIR}/$(dirname "${rel_path}")"
