@@ -70,6 +70,196 @@ def compute_finger_transforms(T_base_ee, gripper_pos):
     return T_world_left_finger, T_world_right_finger
 
 
+def compute_contact_frame(pts_left_world, pts_right_world, T_base_ee):
+    """Compute a simplified pose (coordinate frame) for the contact points.
+
+    The contact frame represents the center of mass of all contact points
+    with an orientation derived from the gripper's end-effector orientation.
+
+    Args:
+        pts_left_world: [N, 3] contact points on left finger in world frame
+        pts_right_world: [N, 3] contact points on right finger in world frame
+        T_base_ee: [4, 4] end-effector pose (used for orientation)
+
+    Returns:
+        contact_centroid: [3] center of mass of all contact points
+        contact_frame: [4, 4] homogeneous transform with centroid as origin
+                       and orientation from the end-effector
+    """
+    # Combine all contact points
+    all_pts = np.vstack([pts_left_world, pts_right_world])
+
+    # Compute centroid (center of mass)
+    contact_centroid = np.mean(all_pts, axis=0)
+
+    # Build contact frame: position = centroid, orientation = from end-effector
+    # This gives a stable orientation that follows the gripper
+    contact_frame = np.eye(4)
+    contact_frame[:3, :3] = T_base_ee[:3, :3]  # Use EE orientation
+    contact_frame[:3, 3] = contact_centroid     # Position at centroid
+
+    return contact_centroid, contact_frame
+
+
+def compute_contact_frame_per_finger(pts_world, T_finger):
+    """Compute a simplified pose for a single finger's contact points.
+
+    Args:
+        pts_world: [N, 3] contact points on finger in world frame
+        T_finger: [4, 4] finger transform (used for orientation)
+
+    Returns:
+        centroid: [3] center of mass of contact points
+        frame: [4, 4] homogeneous transform with centroid as origin
+    """
+    centroid = np.mean(pts_world, axis=0)
+
+    frame = np.eye(4)
+    frame[:3, :3] = T_finger[:3, :3]
+    frame[:3, 3] = centroid
+
+    return centroid, frame
+
+
+def compute_normalized_flow(contact_centroids, contact_frames, step_size_mm=1.0):
+    """Normalize contact flow to fixed distance steps (e.g., 1mm).
+
+    Resamples the trajectory based on 3D distance traveled rather than time.
+    - If robot moves 10mm in one frame, interpolates to 10 steps
+    - If robot moves 1mm over 10 frames, combines into 1 step
+
+    Args:
+        contact_centroids: [T, 3] center of mass positions over time
+        contact_frames: [T, 4, 4] contact frames over time
+        step_size_mm: Target step size in millimeters (default: 1.0)
+
+    Returns:
+        normalized_centroids: [N, 3] resampled centroids at fixed distance steps
+        normalized_frames: [N, 4, 4] resampled frames at fixed distance steps
+        cumulative_distance: [T] cumulative distance at each original frame (in mm)
+        original_to_normalized_idx: [T] mapping from original frame to normalized index
+    """
+    step_size_m = step_size_mm / 1000.0  # Convert to meters
+
+    T = len(contact_centroids)
+    if T < 2:
+        return (contact_centroids.copy(), contact_frames.copy(),
+                np.zeros(T), np.zeros(T, dtype=np.int32))
+
+    # Compute distances between consecutive frames
+    diffs = np.diff(contact_centroids, axis=0)  # [T-1, 3]
+    distances = np.linalg.norm(diffs, axis=1)   # [T-1]
+
+    # Cumulative distance (in meters)
+    cumulative_distance = np.zeros(T)
+    cumulative_distance[1:] = np.cumsum(distances)
+
+    # Total distance traveled
+    total_distance = cumulative_distance[-1]
+
+    if total_distance < step_size_m:
+        # Very short trajectory - return start and end only
+        normalized_centroids = np.array([contact_centroids[0], contact_centroids[-1]])
+        normalized_frames = np.array([contact_frames[0], contact_frames[-1]])
+        original_to_normalized_idx = np.zeros(T, dtype=np.int32)
+        original_to_normalized_idx[T//2:] = 1
+        return (normalized_centroids, normalized_frames,
+                cumulative_distance * 1000, original_to_normalized_idx)
+
+    # Number of normalized steps
+    num_steps = int(np.ceil(total_distance / step_size_m)) + 1
+
+    # Target distances for each normalized step
+    target_distances = np.linspace(0, total_distance, num_steps)
+
+    # Interpolate centroids at target distances
+    normalized_centroids = np.zeros((num_steps, 3), dtype=np.float32)
+    normalized_frames = np.zeros((num_steps, 4, 4), dtype=np.float32)
+
+    for i, target_dist in enumerate(target_distances):
+        # Find the two original frames that bracket this distance
+        idx = np.searchsorted(cumulative_distance, target_dist)
+
+        if idx == 0:
+            normalized_centroids[i] = contact_centroids[0]
+            normalized_frames[i] = contact_frames[0]
+        elif idx >= T:
+            normalized_centroids[i] = contact_centroids[-1]
+            normalized_frames[i] = contact_frames[-1]
+        else:
+            # Linear interpolation between frames idx-1 and idx
+            d0 = cumulative_distance[idx - 1]
+            d1 = cumulative_distance[idx]
+            if d1 - d0 < 1e-10:
+                t = 0.0
+            else:
+                t = (target_dist - d0) / (d1 - d0)
+
+            # Interpolate centroid (position)
+            normalized_centroids[i] = (1 - t) * contact_centroids[idx - 1] + t * contact_centroids[idx]
+
+            # Interpolate frame (position + rotation via SLERP)
+            normalized_frames[i] = _interpolate_transform(
+                contact_frames[idx - 1], contact_frames[idx], t
+            )
+
+    # Map original frames to nearest normalized index
+    original_to_normalized_idx = np.zeros(T, dtype=np.int32)
+    for i in range(T):
+        # Find closest target distance
+        original_to_normalized_idx[i] = np.argmin(np.abs(target_distances - cumulative_distance[i]))
+
+    return (normalized_centroids, normalized_frames,
+            cumulative_distance * 1000,  # Return in mm
+            original_to_normalized_idx)
+
+
+def _interpolate_transform(T0, T1, t):
+    """Interpolate between two 4x4 transforms using linear + SLERP.
+
+    Args:
+        T0: [4, 4] start transform
+        T1: [4, 4] end transform
+        t: interpolation parameter [0, 1]
+
+    Returns:
+        T_interp: [4, 4] interpolated transform
+    """
+    # Interpolate position linearly
+    pos = (1 - t) * T0[:3, 3] + t * T1[:3, 3]
+
+    # Interpolate rotation using SLERP
+    R0 = R.from_matrix(T0[:3, :3])
+    R1 = R.from_matrix(T1[:3, :3])
+
+    # SLERP via quaternions
+    q0 = R0.as_quat()
+    q1 = R1.as_quat()
+
+    # Ensure shortest path
+    if np.dot(q0, q1) < 0:
+        q1 = -q1
+
+    # Spherical linear interpolation
+    dot = np.clip(np.dot(q0, q1), -1.0, 1.0)
+    if dot > 0.9995:
+        # Very close - use linear interpolation
+        q_interp = (1 - t) * q0 + t * q1
+        q_interp = q_interp / np.linalg.norm(q_interp)
+    else:
+        theta = np.arccos(dot)
+        q_interp = (np.sin((1 - t) * theta) * q0 + np.sin(t * theta) * q1) / np.sin(theta)
+
+    R_interp = R.from_quat(q_interp).as_matrix()
+
+    # Build output transform
+    T_interp = np.eye(4, dtype=np.float32)
+    T_interp[:3, :3] = R_interp
+    T_interp[:3, 3] = pos
+
+    return T_interp
+
+
 class ContactSurfaceTracker:
     """Sample and track contact surface points on the gripper fingers."""
 
@@ -101,6 +291,39 @@ class ContactSurfaceTracker:
         pts_left_world = (T_left @ pts_local.T).T[:, :3]
         pts_right_world = (T_right @ pts_local.T).T[:, :3]
         return pts_left_world, pts_right_world
+
+    def get_contact_points_and_frames(self, T_base_ee, gripper_pos):
+        """Return contact points AND contact frames for both fingers.
+
+        Returns:
+            pts_left_world: [N, 3] left finger contact points in world frame
+            pts_right_world: [N, 3] right finger contact points in world frame
+            contact_centroid: [3] center of mass of all contact points
+            contact_frame: [4, 4] combined contact frame (centroid + EE orientation)
+            left_contact_frame: [4, 4] left finger contact frame
+            right_contact_frame: [4, 4] right finger contact frame
+        """
+        if self.contact_points_local is None:
+            return None, None, None, None, None, None
+
+        pts_local = np.hstack([self.contact_points_local, np.ones((len(self.contact_points_local), 1))])
+        T_left, T_right = compute_finger_transforms(T_base_ee, gripper_pos)
+
+        pts_left_world = (T_left @ pts_local.T).T[:, :3]
+        pts_right_world = (T_right @ pts_local.T).T[:, :3]
+
+        # Compute combined contact frame (center of mass of all points)
+        contact_centroid, contact_frame = compute_contact_frame(
+            pts_left_world, pts_right_world, T_base_ee
+        )
+
+        # Compute per-finger contact frames
+        _, left_contact_frame = compute_contact_frame_per_finger(pts_left_world, T_left)
+        _, right_contact_frame = compute_contact_frame_per_finger(pts_right_world, T_right)
+
+        return (pts_left_world, pts_right_world,
+                contact_centroid, contact_frame,
+                left_contact_frame, right_contact_frame)
 
 
 class MinimalGripperVisualizer:

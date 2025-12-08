@@ -15,6 +15,16 @@ tracks.npz contents:
     - gripper_poses: [T, 4, 4] float32 - End-effector poses
     - gripper_positions: [T] float32 - Gripper aperture values
     - cartesian_positions: [T, 6] float32 - Robot cartesian state
+    - contact_centroids: [T, 3] float32 - Center of mass of all contact points per frame
+    - contact_frames: [T, 4, 4] float32 - Combined contact frame (centroid + EE orientation)
+    - left_contact_frames: [T, 4, 4] float32 - Left finger contact frames
+    - right_contact_frames: [T, 4, 4] float32 - Right finger contact frames
+    - normalized_centroids: [N, 3] float32 - Centroids resampled at 1mm distance steps
+    - normalized_frames: [N, 4, 4] float32 - Frames resampled at 1mm distance steps
+    - cumulative_distance_mm: [T] float32 - Cumulative distance traveled at each frame (mm)
+    - frame_to_normalized_idx: [T] int32 - Mapping from original frame to normalized index
+    - normalized_step_size_mm: float - Step size used for normalization (default: 1.0)
+    - num_normalized_steps: int - Number of normalized flow steps
     - num_frames: int - Number of frames
     - num_points_per_finger: int - Number of track points per finger
     - fps: float - Frame rate
@@ -59,7 +69,7 @@ from transforms import (  # type: ignore
     external_cam_to_world,
     project_tracks_to_2d,
 )
-from tracking import ContactSurfaceTracker, compute_finger_transforms  # type: ignore
+from tracking import ContactSurfaceTracker, compute_finger_transforms, compute_normalized_flow  # type: ignore
 
 
 def parse_episode_id(episode_id: str) -> dict:
@@ -277,59 +287,90 @@ def compute_2d_tracks(
 
 def generate_tracks(h5_path: str, num_track_points: int, max_frames: int = None, mesh_path: str = "/workspace/third_party/robotiq_arg85_description/meshes/inner_finger_fine.STL") -> dict:
     """Generate gripper contact surface tracks.
-    
+
     Returns:
-        dict containing tracks_3d, gripper_poses, and metadata
+        dict containing tracks_3d, contact frames, gripper_poses, and metadata
     """
     # Load trajectory
     with h5py.File(h5_path, 'r') as h5_file:
         cartesian_positions = h5_file['observation/robot_state/cartesian_position'][:]
         gripper_positions = h5_file['observation/robot_state/gripper_position'][:]
-    
+
     num_frames = len(cartesian_positions)
     if max_frames is not None:
         actual_frames = min(max_frames, num_frames)
     else:
         actual_frames = num_frames
-    
+
     # Initialize contact tracker
     contact_tracker = ContactSurfaceTracker(num_track_points=num_track_points,mesh_path=mesh_path)
     num_contact_pts = len(contact_tracker.contact_points_local) if contact_tracker.contact_points_local is not None else 0
     total_track_pts = num_contact_pts * 2  # Both fingers
-    
+
     print(f"[INFO] Tracking {total_track_pts} contact points across both fingers")
-    
+
     # Storage
     tracks_3d = np.zeros((actual_frames, total_track_pts, 3), dtype=np.float32)
     gripper_poses = []
-    
+    contact_centroids = np.zeros((actual_frames, 3), dtype=np.float32)
+    contact_frames = np.zeros((actual_frames, 4, 4), dtype=np.float32)
+    left_contact_frames = np.zeros((actual_frames, 4, 4), dtype=np.float32)
+    right_contact_frames = np.zeros((actual_frames, 4, 4), dtype=np.float32)
+
     # Rotation fix for gripper
     R_fix = R.from_euler('z', 90, degrees=True).as_matrix()
-    
+
     for i in range(actual_frames):
         if i % 100 == 0:
             print(f"  Processing frame {i}/{actual_frames}")
-        
+
         # Compute end-effector pose with rotation fix
         T_base_ee = pose6_to_T(cartesian_positions[i])
         T_base_ee[:3, :3] = T_base_ee[:3, :3] @ R_fix
         gripper_poses.append(T_base_ee.copy())
-        
-        # Get contact points in world space
+
+        # Get contact points AND contact frames in world space
         if num_contact_pts > 0:
-            pts_left, pts_right = contact_tracker.get_contact_points_world(
+            result = contact_tracker.get_contact_points_and_frames(
                 T_base_ee, gripper_positions[i]
             )
+            pts_left, pts_right, centroid, frame, left_frame, right_frame = result
+
             if pts_left is not None:
                 tracks_3d[i, :num_contact_pts, :] = pts_left
                 tracks_3d[i, num_contact_pts:, :] = pts_right
-    
+                contact_centroids[i] = centroid
+                contact_frames[i] = frame
+                left_contact_frames[i] = left_frame
+                right_contact_frames[i] = right_frame
+
+    # Compute normalized flow (resampled at 1mm steps)
+    step_size_mm = 1.0
+    print(f"[INFO] Computing normalized flow at {step_size_mm}mm steps...")
+    (normalized_centroids, normalized_frames,
+     cumulative_distance_mm, frame_to_normalized_idx) = compute_normalized_flow(
+        contact_centroids, contact_frames, step_size_mm=step_size_mm
+    )
+    print(f"[INFO] Normalized flow: {len(normalized_centroids)} steps "
+          f"(total distance: {cumulative_distance_mm[-1]:.1f}mm)")
+
     return {
         'tracks_3d': tracks_3d,
         'contact_points_local': contact_tracker.contact_points_local,
         'gripper_poses': np.stack(gripper_poses, axis=0),
         'gripper_positions': gripper_positions[:actual_frames],
         'cartesian_positions': cartesian_positions[:actual_frames],
+        'contact_centroids': contact_centroids,
+        'contact_frames': contact_frames,
+        'left_contact_frames': left_contact_frames,
+        'right_contact_frames': right_contact_frames,
+        # Normalized flow data
+        'normalized_centroids': normalized_centroids,
+        'normalized_frames': normalized_frames,
+        'cumulative_distance_mm': cumulative_distance_mm,
+        'frame_to_normalized_idx': frame_to_normalized_idx,
+        'normalized_step_size_mm': step_size_mm,
+        'num_normalized_steps': len(normalized_centroids),
         'num_frames': actual_frames,
         'num_points_per_finger': num_contact_pts,
     }
@@ -524,6 +565,18 @@ def main():
         'gripper_poses': tracks_data['gripper_poses'],
         'gripper_positions': tracks_data['gripper_positions'],
         'cartesian_positions': tracks_data['cartesian_positions'],
+        # Contact frame data (simplified pose of contact points)
+        'contact_centroids': tracks_data['contact_centroids'],
+        'contact_frames': tracks_data['contact_frames'],
+        'left_contact_frames': tracks_data['left_contact_frames'],
+        'right_contact_frames': tracks_data['right_contact_frames'],
+        # Normalized flow data (resampled at fixed distance steps)
+        'normalized_centroids': tracks_data['normalized_centroids'],
+        'normalized_frames': tracks_data['normalized_frames'],
+        'cumulative_distance_mm': tracks_data['cumulative_distance_mm'],
+        'frame_to_normalized_idx': tracks_data['frame_to_normalized_idx'],
+        'normalized_step_size_mm': tracks_data['normalized_step_size_mm'],
+        'num_normalized_steps': tracks_data['num_normalized_steps'],
         'num_frames': tracks_data['num_frames'],
         'num_points_per_finger': tracks_data['num_points_per_finger'],
         'fps': config.get('fps', 30.0),
