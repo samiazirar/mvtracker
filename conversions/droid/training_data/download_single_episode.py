@@ -1,13 +1,16 @@
 """Download a single DROID episode from local storage or GCS.
 
+By default, tries local storage first, then falls back to GCS if not found locally.
+
 Usage:
+    # Auto mode (try local first, fallback to GCS)
     python download_single_episode.py --episode_id "AUTOLab+84bd5053+2023-08-18-12h-01m-10s"
-    
-Local mode (default):
-    python download_single_episode.py --episode_id "..." --local_source /data/droid/data/droid_raw/1.0.1
-    
-GCS mode:
-    python download_single_episode.py --episode_id "..." --use_gcs --gcs_bucket gs://gresearch/robotics/droid_raw/1.0.1
+
+    # Force GCS mode (skip local check)
+    python download_single_episode.py --episode_id "..." --use_gcs
+
+    # Local only (error if not found locally)
+    python download_single_episode.py --episode_id "..." --local_only
 """
 
 import argparse
@@ -55,30 +58,26 @@ def parse_episode_id(episode_id: str) -> dict:
 
 def find_episode_local(local_source: str, episode_info: dict) -> tuple:
     """Find episode in local storage.
-    
+
     Returns:
-        tuple: (source_path, outcome) if found, raises FileNotFoundError otherwise
+        tuple: (source_path, outcome) if found, (None, None) otherwise
     """
+    if not local_source or not os.path.isdir(local_source):
+        return None, None
+
     lab = episode_info['lab']
     date = episode_info['date']
     timestamp_folder = episode_info['timestamp_folder']
-    
+
     # Try both success and failure paths
     for outcome in ['success', 'failure']:
         source_path = os.path.join(local_source, lab, outcome, date, timestamp_folder)
         h5_path = os.path.join(source_path, 'trajectory.h5')
-        
+
         if os.path.exists(h5_path):
             return source_path, outcome
-    
-    # Episode not found - search for similar paths to help debug
-    search_results = search_for_episode(local_source, episode_info)
-    
-    raise FileNotFoundError(
-        f"Episode not found locally: {episode_info['full_id']}\n"
-        f"  Expected path: {local_source}/{lab}/{{success|failure}}/{date}/{timestamp_folder}\n"
-        f"  Search results: {search_results}"
-    )
+
+    return None, None
 
 
 def search_for_episode(local_source: str, episode_info: dict) -> str:
@@ -251,47 +250,84 @@ def download_episode(
     local_source: str = None,
     gcs_bucket: str = None,
     use_gcs: bool = False,
+    local_only: bool = False,
     use_symlinks: bool = True,
 ) -> str:
     """Download/copy episode to output directory.
-    
+
     Args:
         episode_id: Episode identifier
         output_dir: Where to put the episode
         local_source: Local DROID data root (for local mode)
         gcs_bucket: GCS bucket path (for GCS mode)
-        use_gcs: If True, download from GCS; if False, use local source
+        use_gcs: If True, skip local check and download from GCS directly
+        local_only: If True, error if not found locally (no GCS fallback)
         use_symlinks: If True, symlink local files; if False, copy them
-        
+
     Returns:
         Path to the episode in output_dir
     """
     episode_info = parse_episode_id(episode_id)
-    
+
+    # Force GCS mode - skip local check entirely
     if use_gcs:
         if not gcs_bucket:
             raise ValueError("gcs_bucket required for GCS mode")
         return download_episode_gcs(episode_id, gcs_bucket, output_dir)
-    
-    # Local mode
-    if not local_source:
-        raise ValueError("local_source required for local mode")
-    
-    # Find episode in local storage
+
+    # Try local first (if local_source is provided and exists)
     source_path, outcome = find_episode_local(local_source, episode_info)
-    
-    # Build output path
-    rel_path = f"{episode_info['lab']}/{outcome}/{episode_info['date']}/{episode_info['timestamp_folder']}"
-    output_path = os.path.join(output_dir, rel_path)
-    
-    print(f"Found episode locally: {rel_path}")
-    
-    # Copy/symlink to output
-    return copy_episode_local(source_path, output_path, use_symlinks)
+
+    if source_path:
+        # Found locally - copy/symlink
+        rel_path = f"{episode_info['lab']}/{outcome}/{episode_info['date']}/{episode_info['timestamp_folder']}"
+        output_path = os.path.join(output_dir, rel_path)
+        print(f"Found episode locally: {rel_path}")
+        return copy_episode_local(source_path, output_path, use_symlinks)
+
+    # Not found locally
+    if local_only:
+        raise FileNotFoundError(
+            f"Episode not found locally: {episode_id}\n"
+            f"  Local source: {local_source}\n"
+            f"  Use --use_gcs to download from GCS instead"
+        )
+
+    # Fallback to GCS
+    if not gcs_bucket:
+        raise ValueError(
+            f"Episode not found locally and no GCS bucket specified.\n"
+            f"  Episode: {episode_id}\n"
+            f"  Local source: {local_source}\n"
+            f"  Provide --gcs_bucket or set gcs_bucket in config"
+        )
+
+    print(f"Episode not found locally, downloading from GCS...")
+    return download_episode_gcs(episode_id, gcs_bucket, output_dir)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Download/copy a single DROID episode.")
+    import yaml
+    from pathlib import Path
+
+    # Load config for defaults
+    config_path = Path(__file__).parent / "config.yaml"
+    config = {}
+    if config_path.exists():
+        with open(config_path, 'r') as f:
+            config = yaml.safe_load(f) or {}
+
+    default_local_source = config.get('droid_root') or os.environ.get('DROID_ROOT')
+    default_output_dir = config.get('download_dir', './droid_downloads')
+    default_gcs_bucket = config.get('gcs_bucket', 'gs://gresearch/robotics/droid_raw/1.0.1')
+
+    parser = argparse.ArgumentParser(
+        description="Download/copy a single DROID episode.",
+        epilog="""
+By default, tries local storage first, then falls back to GCS if not found.
+Paths are read from config.yaml or environment variables.
+        """
+    )
     parser.add_argument(
         "--episode_id",
         required=True,
@@ -299,23 +335,28 @@ def main():
     )
     parser.add_argument(
         "--output_dir",
-        default="./droid_downloads",
-        help="Local output directory",
+        default=default_output_dir,
+        help=f"Local output directory (default: {default_output_dir})",
     )
     parser.add_argument(
         "--local_source",
-        default="/data/droid/data/droid_raw/1.0.1",
-        help="Local DROID data root (default: /data/droid/data/droid_raw/1.0.1)",
+        default=default_local_source,
+        help=f"Local DROID data root (default: {default_local_source or 'none'})",
     )
     parser.add_argument(
         "--use_gcs",
         action="store_true",
-        help="Download from GCS instead of local source",
+        help="Force download from GCS (skip local check)",
+    )
+    parser.add_argument(
+        "--local_only",
+        action="store_true",
+        help="Only use local source, error if not found (no GCS fallback)",
     )
     parser.add_argument(
         "--gcs_bucket",
-        default="gs://gresearch/robotics/droid_raw/1.0.1",
-        help="GCS bucket path (only used with --use_gcs)",
+        default=default_gcs_bucket,
+        help=f"GCS bucket path (default: {default_gcs_bucket})",
     )
     parser.add_argument(
         "--copy",
@@ -328,13 +369,14 @@ def main():
         help="Path to cam2base JSON (optional, unused but kept for compatibility)",
     )
     args = parser.parse_args()
-    
+
     download_episode(
         episode_id=args.episode_id,
         output_dir=args.output_dir,
         local_source=args.local_source,
         gcs_bucket=args.gcs_bucket,
         use_gcs=args.use_gcs,
+        local_only=args.local_only,
         use_symlinks=not args.copy,
     )
 
