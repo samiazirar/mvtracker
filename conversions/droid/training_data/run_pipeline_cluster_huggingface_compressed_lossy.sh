@@ -65,11 +65,13 @@ BATCH_UPLOAD_DIR="/data/droid_batch_upload" # Completed episodes waiting for bat
 # Batch Upload Configuration
 # ----------------------------------------------------------------------------
 BATCH_UPLOAD_INTERVAL=${BATCH_UPLOAD_INTERVAL:-600}  # Upload every 10 minutes (600 seconds)
+BATCH_METADATA_DIR="/data/droid_batch_metadata"  # Metadata-only files for second repo
 # ----------------------------------------------------------------------------
 
 # Hugging Face Configuration
 # ----------------------------------------------------------------------------
-HF_REPO_ID="sazirarrwth99/lossy_comr_traject"     # Your HF dataset repo
+HF_REPO_ID="sazirarrwth99/lossy_comr_traject"     # Full dataset repo (depth videos + metadata)
+HF_METADATA_REPO_ID="sazirarrwth99/droid_metadata_only"  # Metadata-only repo (tracks, extrinsics, quality)
 HF_REPO_TYPE="dataset"                      # Type: dataset, model, or space
 # ----------------------------------------------------------------------------
 
@@ -91,43 +93,52 @@ else
 fi
 
 # ----------------------------------------------------------------------------
-# CREATE HUGGINGFACE REPO IF IT DOESN'T EXIST
+# CREATE HUGGINGFACE REPOS IF THEY DON'T EXIST
 # ----------------------------------------------------------------------------
-echo "[INFO] Ensuring HuggingFace repo exists: ${HF_REPO_ID}..."
+echo "[INFO] Ensuring HuggingFace repos exist..."
+echo "       Full dataset repo: ${HF_REPO_ID}"
+echo "       Metadata-only repo: ${HF_METADATA_REPO_ID}"
+export HF_METADATA_REPO_ID
 python3 << 'PYTHON_SCRIPT'
 import os
 from huggingface_hub import HfApi, create_repo
 from huggingface_hub.utils import RepositoryNotFoundError
 
 token = os.environ['HF_TOKEN']
-repo_id = os.environ.get('HF_REPO_ID', 'sazirarrwth99/lossy_comr_traject')
 repo_type = os.environ.get('HF_REPO_TYPE', 'dataset')
 
 api = HfApi(token=token)
 
-try:
-    # Check if repo exists
-    api.repo_info(repo_id=repo_id, repo_type=repo_type)
-    print(f"[INFO] Repo '{repo_id}' already exists.")
-except RepositoryNotFoundError:
-    print(f"[INFO] Creating new {repo_type} repo: {repo_id}")
-    create_repo(
-        repo_id=repo_id,
-        repo_type=repo_type,
-        private=False,  # Set to True if you want a private repo
-        token=token,
-    )
-    print(f"[SUCCESS] Created repo: https://huggingface.co/datasets/{repo_id}")
-except Exception as e:
-    print(f"[ERROR] Failed to check/create repo: {e}")
-    exit(1)
+# List of repos to check/create
+repos = [
+    os.environ.get('HF_REPO_ID', 'sazirarrwth99/lossy_comr_traject'),
+    os.environ.get('HF_METADATA_REPO_ID', 'sazirarrwth99/droid_metadata_only'),
+]
+
+for repo_id in repos:
+    try:
+        # Check if repo exists
+        api.repo_info(repo_id=repo_id, repo_type=repo_type)
+        print(f"[INFO] Repo '{repo_id}' already exists.")
+    except RepositoryNotFoundError:
+        print(f"[INFO] Creating new {repo_type} repo: {repo_id}")
+        create_repo(
+            repo_id=repo_id,
+            repo_type=repo_type,
+            private=False,  # Set to True if you want a private repo
+            token=token,
+        )
+        print(f"[SUCCESS] Created repo: https://huggingface.co/datasets/{repo_id}")
+    except Exception as e:
+        print(f"[ERROR] Failed to check/create repo '{repo_id}': {e}")
+        exit(1)
 PYTHON_SCRIPT
 
 if [ $? -ne 0 ]; then
-    echo "[ERROR] Failed to create/verify HuggingFace repo"
+    echo "[ERROR] Failed to create/verify HuggingFace repos"
     exit 1
 fi
-export HF_REPO_ID HF_REPO_TYPE
+export HF_REPO_ID HF_REPO_TYPE HF_METADATA_REPO_ID
 # ----------------------------------------------------------------------------
 
 
@@ -238,10 +249,10 @@ fi
 GPU_LIST_STR=$(IFS=,; echo "${GPU_LIST[*]}")
 
 # Export variables for parallel workers
-export CAM2BASE_PATH CONFIG_PATH SCRIPT_DIR GCS_BUCKET LOCAL_DROID_SOURCE USE_GCS FAST_LOCAL_DIR STAGING_DIR BATCH_UPLOAD_DIR TIMING_FILE DEFAULT_INNER_FINGER_MESH
+export CAM2BASE_PATH CONFIG_PATH SCRIPT_DIR GCS_BUCKET LOCAL_DROID_SOURCE USE_GCS FAST_LOCAL_DIR STAGING_DIR BATCH_UPLOAD_DIR BATCH_METADATA_DIR TIMING_FILE DEFAULT_INNER_FINGER_MESH
 export NUM_GPUS WORKERS_PER_GPU GPU_LIST_STR LOG_DIR
 export STATUS_FILE ERROR_LOG FAILED_EPISODES_FILE ERROR_COUNTS_FILE
-export HF_TOKEN HF_REPO_ID HF_REPO_TYPE BATCH_UPLOAD_INTERVAL
+export HF_TOKEN HF_REPO_ID HF_REPO_TYPE HF_METADATA_REPO_ID BATCH_UPLOAD_INTERVAL
 
 record_status() {
     local status=$1
@@ -275,6 +286,7 @@ mkdir -p "${LOG_DIR}"
 mkdir -p "${FAST_LOCAL_DIR}"
 mkdir -p "${STAGING_DIR}"
 mkdir -p "${BATCH_UPLOAD_DIR}"
+mkdir -p "${BATCH_METADATA_DIR}"
 
 echo "=== DROID Training Data Pipeline (COMPRESSED: Depth FFV1 Only + HuggingFace) ==="
 echo "Limit: ${LIMIT}"
@@ -284,8 +296,10 @@ echo "Total Workers: ${TOTAL_WORKERS}"
 echo "Local Scratch: ${FAST_LOCAL_DIR}"
 echo "Staging Dir: ${STAGING_DIR}"
 echo "Batch Upload Dir: ${BATCH_UPLOAD_DIR}"
+echo "Batch Metadata Dir: ${BATCH_METADATA_DIR}"
 echo "Batch Upload Interval: ${BATCH_UPLOAD_INTERVAL}s (every $((BATCH_UPLOAD_INTERVAL / 60)) min)"
-echo "HuggingFace Repo: ${HF_REPO_ID}"
+echo "HuggingFace Full Repo: ${HF_REPO_ID}"
+echo "HuggingFace Metadata Repo: ${HF_METADATA_REPO_ID}"
 echo "Log dir: ${LOG_DIR}"
 echo ""
 
@@ -422,17 +436,28 @@ process_episode_worker() {
     # Move to batch upload directory instead of uploading directly
     # A background process will batch upload every BATCH_UPLOAD_INTERVAL seconds
     local SYNC_START=$(date +%s)
-    
-    # Move output to batch upload directory (atomic via rename within same filesystem)
+
+    # First, copy metadata-only files (tracks.npz, extrinsics.npz, quality.json) to metadata batch dir
+    # This must happen BEFORE rsync --remove-source-files
+    find "${JOB_OUTPUT}" -type f \( -name "tracks.npz" -o -name "extrinsics.npz" -o -name "quality.json" \) 2>/dev/null | while read file; do
+        # Get relative path from JOB_OUTPUT
+        rel_path="${file#${JOB_OUTPUT}/}"
+        target_dir="${BATCH_METADATA_DIR}/$(dirname "${rel_path}")"
+        mkdir -p "${target_dir}"
+        cp "${file}" "${target_dir}/" 2>/dev/null || true
+    done
+    echo "[BATCH] Staged ${EPISODE_ID} metadata for metadata-only repo" >> "${JOB_LOGS}/sync.log"
+
+    # Move full output to batch upload directory (atomic via rename within same filesystem)
     # Use rsync to merge into the batch upload directory (preserves existing content)
-    rsync -a --remove-source-files "${JOB_OUTPUT}/" "${BATCH_UPLOAD_DIR}/" 2>"${JOB_LOGS}/sync.log" || {
+    rsync -a --remove-source-files "${JOB_OUTPUT}/" "${BATCH_UPLOAD_DIR}/" 2>>"${JOB_LOGS}/sync.log" || {
         cp -a "${JOB_LOGS}/." "${DEST_LOG_DIR}/" 2>/dev/null || true
         record_error "${EPISODE_ID}" "sync" "Failed to move to batch upload dir (see ${DEST_LOG_DIR}/sync.log)"
         record_status "failure" "${EPISODE_ID}" "sync"
         rm -rf "${JOB_DIR}"
         return 1
     }
-    echo "[BATCH] Staged ${EPISODE_ID} for batch upload" >> "${JOB_LOGS}/sync.log"
+    echo "[BATCH] Staged ${EPISODE_ID} for full batch upload" >> "${JOB_LOGS}/sync.log"
     
     local SYNC_END=$(date +%s)
     local SYNC_TIME=$((SYNC_END - SYNC_START))
@@ -575,6 +600,145 @@ fi
 echo "Found ${EPISODE_COUNT} episodes to process"
 echo ""
 
+# ============================================================================
+# ESTIMATION: Check both repos and estimate space requirements
+# ============================================================================
+echo "============================================================"
+echo "=== REPOSITORY ESTIMATION ==="
+echo "============================================================"
+
+export EPISODE_COUNT
+python3 << 'PYTHON_ESTIMATION'
+import os
+import sys
+from huggingface_hub import HfApi, list_repo_tree
+from huggingface_hub.utils import RepositoryNotFoundError
+
+token = os.environ.get('HF_TOKEN')
+full_repo = os.environ.get('HF_REPO_ID', 'sazirarrwth99/lossy_comr_traject')
+metadata_repo = os.environ.get('HF_METADATA_REPO_ID', 'sazirarrwth99/droid_metadata_only')
+episodes_to_process = int(os.environ.get('EPISODE_COUNT', 0))
+
+api = HfApi(token=token)
+
+def format_size(size_bytes):
+    """Format bytes to human readable string."""
+    for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+        if size_bytes < 1024:
+            return f"{size_bytes:.2f} {unit}"
+        size_bytes /= 1024
+    return f"{size_bytes:.2f} PB"
+
+def get_repo_stats(repo_id, repo_type="dataset"):
+    """Get repository statistics: episode count, total size, avg size per episode."""
+    try:
+        # Get all files in repo
+        files = list(api.list_repo_tree(repo_id=repo_id, repo_type=repo_type, recursive=True))
+
+        total_size = 0
+        episode_dirs = set()
+
+        for item in files:
+            if hasattr(item, 'size') and item.size:
+                total_size += item.size
+
+            # Extract episode directory (format: lab/outcome/date/timestamp/...)
+            path_parts = item.path.split('/')
+            if len(path_parts) >= 4:
+                # Episode signature: lab/outcome/date/timestamp
+                episode_key = '/'.join(path_parts[:4])
+                episode_dirs.add(episode_key)
+
+        num_episodes = len(episode_dirs)
+        avg_size_per_episode = total_size / num_episodes if num_episodes > 0 else 0
+
+        return {
+            'num_episodes': num_episodes,
+            'total_size': total_size,
+            'avg_size_per_episode': avg_size_per_episode,
+            'num_files': len(files),
+        }
+    except RepositoryNotFoundError:
+        return {
+            'num_episodes': 0,
+            'total_size': 0,
+            'avg_size_per_episode': 0,
+            'num_files': 0,
+            'error': 'Repository not found'
+        }
+    except Exception as e:
+        return {
+            'num_episodes': 0,
+            'total_size': 0,
+            'avg_size_per_episode': 0,
+            'num_files': 0,
+            'error': str(e)
+        }
+
+def print_repo_stats(name, repo_id, stats, episodes_remaining):
+    """Print formatted repository statistics."""
+    print(f"\n--- {name} ---")
+    print(f"  Repo: {repo_id}")
+
+    if 'error' in stats:
+        print(f"  Status: {stats['error']}")
+        print(f"  Episodes uploaded: 0")
+    else:
+        print(f"  Episodes uploaded: {stats['num_episodes']}")
+        print(f"  Files in repo: {stats['num_files']}")
+        print(f"  Current size: {format_size(stats['total_size'])}")
+
+        if stats['num_episodes'] > 0:
+            print(f"  Avg size/episode: {format_size(stats['avg_size_per_episode'])}")
+
+            # Estimate space for remaining episodes
+            estimated_new_size = stats['avg_size_per_episode'] * episodes_remaining
+            estimated_total = stats['total_size'] + estimated_new_size
+
+            print(f"  ---")
+            print(f"  Episodes to add: {episodes_remaining}")
+            print(f"  Est. space for new: {format_size(estimated_new_size)}")
+            print(f"  Est. total after: {format_size(estimated_total)}")
+        else:
+            print(f"  (No episodes yet - cannot estimate avg size)")
+
+print(f"\nFetching repository statistics...")
+
+# Get stats for full repo
+print(f"  Checking full repo: {full_repo}...")
+full_stats = get_repo_stats(full_repo)
+
+# Get stats for metadata repo
+print(f"  Checking metadata repo: {metadata_repo}...")
+metadata_stats = get_repo_stats(metadata_repo)
+
+# Print results
+print_repo_stats("FULL DATASET REPO", full_repo, full_stats, episodes_to_process)
+print_repo_stats("METADATA-ONLY REPO", metadata_repo, metadata_stats, episodes_to_process)
+
+# Summary
+print(f"\n--- SUMMARY ---")
+print(f"  Episodes to process this run: {episodes_to_process}")
+
+if full_stats['num_episodes'] > 0:
+    full_est = full_stats['avg_size_per_episode'] * episodes_to_process
+    print(f"  Est. data to upload (full): {format_size(full_est)}")
+
+if metadata_stats['num_episodes'] > 0:
+    meta_est = metadata_stats['avg_size_per_episode'] * episodes_to_process
+    print(f"  Est. data to upload (metadata): {format_size(meta_est)}")
+elif full_stats['num_episodes'] > 0:
+    # Estimate metadata as ~1-2% of full (rough estimate)
+    meta_est_ratio = 0.015  # 1.5% is typical for metadata-only
+    meta_est = full_stats['avg_size_per_episode'] * meta_est_ratio * episodes_to_process
+    print(f"  Est. data to upload (metadata, estimated): {format_size(meta_est)}")
+
+print()
+PYTHON_ESTIMATION
+
+echo "============================================================"
+echo ""
+
 progress_monitor() {
     local total=$1
     local interval=${2:-5}
@@ -624,16 +788,20 @@ trap cleanup_on_exit EXIT
 # ============================================================================
 
 BATCH_UPLOAD_LOG="${LOG_DIR}/batch_upload.log"
+BATCH_METADATA_UPLOAD_LOG="${LOG_DIR}/batch_metadata_upload.log"
 BATCH_UPLOAD_LOCK="${BATCH_UPLOAD_DIR}/.upload.lock"
+BATCH_METADATA_LOCK="${BATCH_METADATA_DIR}/.upload.lock"
 BATCH_UPLOAD_COUNT_FILE="${LOG_DIR}/batch_upload_count.txt"
+BATCH_METADATA_UPLOAD_COUNT_FILE="${LOG_DIR}/batch_metadata_upload_count.txt"
 echo "0" > "${BATCH_UPLOAD_COUNT_FILE}"
-export BATCH_UPLOAD_LOG BATCH_UPLOAD_LOCK BATCH_UPLOAD_COUNT_FILE
+echo "0" > "${BATCH_METADATA_UPLOAD_COUNT_FILE}"
+export BATCH_UPLOAD_LOG BATCH_METADATA_UPLOAD_LOG BATCH_UPLOAD_LOCK BATCH_METADATA_LOCK BATCH_UPLOAD_COUNT_FILE BATCH_METADATA_UPLOAD_COUNT_FILE
 
 do_batch_upload() {
-    # Acquire lock to prevent concurrent uploads
+    # Upload to FULL dataset repo
     (
         flock -n 200 || {
-            echo "[$(date +'%Y-%m-%d %H:%M:%S')] Skipping: another upload in progress" >> "${BATCH_UPLOAD_LOG}"
+            echo "[$(date +'%Y-%m-%d %H:%M:%S')] Skipping full upload: another upload in progress" >> "${BATCH_UPLOAD_LOG}"
             return 0
         }
 
@@ -648,15 +816,13 @@ do_batch_upload() {
         fi
 
         if [ "${file_count}" -eq 0 ]; then
-            echo "[$(date +'%Y-%m-%d %H:%M:%S')] No files to upload" | tee -a "${BATCH_UPLOAD_LOG}"
-            return 0
-        fi
+            echo "[$(date +'%Y-%m-%d %H:%M:%S')] No files to upload to full repo" | tee -a "${BATCH_UPLOAD_LOG}"
+        else
+            echo "[$(date +'%Y-%m-%d %H:%M:%S')] Starting FULL batch upload of ${file_count} files (${human_size}) to ${HF_REPO_ID}..." | tee -a "${BATCH_UPLOAD_LOG}"
+            local upload_start=$(date +%s)
 
-        echo "[$(date +'%Y-%m-%d %H:%M:%S')] Starting batch upload of ${file_count} files (${human_size})..." | tee -a "${BATCH_UPLOAD_LOG}"
-        local upload_start=$(date +%s)
-
-        # Upload the batch
-        python3 -c "
+            # Upload the batch to full repo
+            python3 -c "
 import os
 import sys
 from huggingface_hub import HfApi
@@ -673,27 +839,92 @@ try:
         commit_message=f'Batch upload {datetime.now().strftime(\"%Y-%m-%d %H:%M:%S\")}',
         run_as_future=False,
     )
-    print(f'[HF] Batch upload successful')
+    print(f'[HF] Full batch upload successful')
 except Exception as e:
-    print(f'[HF] Batch upload failed: {e}', file=sys.stderr)
+    print(f'[HF] Full batch upload failed: {e}', file=sys.stderr)
     sys.exit(1)
 " >> "${BATCH_UPLOAD_LOG}" 2>&1
 
-        local upload_status=$?
-        local upload_end=$(date +%s)
-        local upload_time=$((upload_end - upload_start))
-        if [ ${upload_status} -eq 0 ]; then
-            # Success: clear the batch upload directory
-            echo "[$(date +'%Y-%m-%d %H:%M:%S')] Upload successful in ${upload_time}s, clearing batch directory" | tee -a "${BATCH_UPLOAD_LOG}"
-            find "${BATCH_UPLOAD_DIR}" -mindepth 1 -delete 2>/dev/null || true
+            local upload_status=$?
+            local upload_end=$(date +%s)
+            local upload_time=$((upload_end - upload_start))
+            if [ ${upload_status} -eq 0 ]; then
+                # Success: clear the batch upload directory
+                echo "[$(date +'%Y-%m-%d %H:%M:%S')] Full upload successful in ${upload_time}s, clearing batch directory" | tee -a "${BATCH_UPLOAD_LOG}"
+                find "${BATCH_UPLOAD_DIR}" -mindepth 1 -delete 2>/dev/null || true
 
-            # Increment upload counter
-            local count=$(cat "${BATCH_UPLOAD_COUNT_FILE}")
-            echo $((count + 1)) > "${BATCH_UPLOAD_COUNT_FILE}"
-        else
-            echo "[$(date +'%Y-%m-%d %H:%M:%S')] Upload failed after ${upload_time}s, will retry next interval" | tee -a "${BATCH_UPLOAD_LOG}"
+                # Increment upload counter
+                local count=$(cat "${BATCH_UPLOAD_COUNT_FILE}")
+                echo $((count + 1)) > "${BATCH_UPLOAD_COUNT_FILE}"
+            else
+                echo "[$(date +'%Y-%m-%d %H:%M:%S')] Full upload failed after ${upload_time}s, will retry next interval" | tee -a "${BATCH_UPLOAD_LOG}"
+            fi
         fi
     ) 200>"${BATCH_UPLOAD_LOCK}"
+
+    # Upload to METADATA-ONLY repo
+    (
+        flock -n 201 || {
+            echo "[$(date +'%Y-%m-%d %H:%M:%S')] Skipping metadata upload: another upload in progress" >> "${BATCH_METADATA_UPLOAD_LOG}"
+            return 0
+        }
+
+        # Check if there's anything to upload
+        local meta_file_count=$(find "${BATCH_METADATA_DIR}" -type f 2>/dev/null | wc -l)
+        local meta_total_bytes=$(du -sb "${BATCH_METADATA_DIR}" 2>/dev/null | awk '{print $1}')
+        local meta_human_size="0B"
+        if command -v numfmt >/dev/null 2>&1 && [ -n "${meta_total_bytes}" ]; then
+            meta_human_size=$(numfmt --to=iec --suffix=B --format "%.2f" ${meta_total_bytes})
+        else
+            meta_human_size="${meta_total_bytes:-0}B"
+        fi
+
+        if [ "${meta_file_count}" -eq 0 ]; then
+            echo "[$(date +'%Y-%m-%d %H:%M:%S')] No files to upload to metadata repo" | tee -a "${BATCH_METADATA_UPLOAD_LOG}"
+        else
+            echo "[$(date +'%Y-%m-%d %H:%M:%S')] Starting METADATA batch upload of ${meta_file_count} files (${meta_human_size}) to ${HF_METADATA_REPO_ID}..." | tee -a "${BATCH_METADATA_UPLOAD_LOG}"
+            local meta_upload_start=$(date +%s)
+
+            # Upload the batch to metadata-only repo
+            python3 -c "
+import os
+import sys
+from huggingface_hub import HfApi
+from datetime import datetime
+
+batch_dir = '${BATCH_METADATA_DIR}'
+api = HfApi(token=os.environ['HF_TOKEN'])
+
+try:
+    api.upload_folder(
+        folder_path=batch_dir,
+        repo_id='${HF_METADATA_REPO_ID}',
+        repo_type='${HF_REPO_TYPE}',
+        commit_message=f'Metadata batch upload {datetime.now().strftime(\"%Y-%m-%d %H:%M:%S\")}',
+        run_as_future=False,
+    )
+    print(f'[HF] Metadata batch upload successful')
+except Exception as e:
+    print(f'[HF] Metadata batch upload failed: {e}', file=sys.stderr)
+    sys.exit(1)
+" >> "${BATCH_METADATA_UPLOAD_LOG}" 2>&1
+
+            local meta_upload_status=$?
+            local meta_upload_end=$(date +%s)
+            local meta_upload_time=$((meta_upload_end - meta_upload_start))
+            if [ ${meta_upload_status} -eq 0 ]; then
+                # Success: clear the metadata batch directory
+                echo "[$(date +'%Y-%m-%d %H:%M:%S')] Metadata upload successful in ${meta_upload_time}s, clearing metadata batch directory" | tee -a "${BATCH_METADATA_UPLOAD_LOG}"
+                find "${BATCH_METADATA_DIR}" -mindepth 1 -delete 2>/dev/null || true
+
+                # Increment metadata upload counter
+                local meta_count=$(cat "${BATCH_METADATA_UPLOAD_COUNT_FILE}")
+                echo $((meta_count + 1)) > "${BATCH_METADATA_UPLOAD_COUNT_FILE}"
+            else
+                echo "[$(date +'%Y-%m-%d %H:%M:%S')] Metadata upload failed after ${meta_upload_time}s, will retry next interval" | tee -a "${BATCH_METADATA_UPLOAD_LOG}"
+            fi
+        fi
+    ) 201>"${BATCH_METADATA_LOCK}"
 }
 export -f do_batch_upload
 
@@ -723,16 +954,25 @@ stop_batch_uploader() {
 
 final_batch_upload() {
     echo ""
-    echo "[INFO] Performing final batch upload..."
+    echo "[INFO] Performing final batch uploads to both repos..."
     do_batch_upload
-    
-    # Check if anything remains
+
+    # Check if anything remains in full repo dir
     local remaining=$(find "${BATCH_UPLOAD_DIR}" -type f 2>/dev/null | wc -l)
     if [ "${remaining}" -gt 0 ]; then
-        echo "[WARN] ${remaining} files still pending upload in ${BATCH_UPLOAD_DIR}"
+        echo "[WARN] ${remaining} files still pending in full repo dir: ${BATCH_UPLOAD_DIR}"
         echo "[WARN] You may need to run the upload manually or retry"
     else
-        echo "[INFO] All files uploaded successfully"
+        echo "[INFO] All files uploaded to full repo (${HF_REPO_ID})"
+    fi
+
+    # Check if anything remains in metadata repo dir
+    local meta_remaining=$(find "${BATCH_METADATA_DIR}" -type f 2>/dev/null | wc -l)
+    if [ "${meta_remaining}" -gt 0 ]; then
+        echo "[WARN] ${meta_remaining} files still pending in metadata repo dir: ${BATCH_METADATA_DIR}"
+        echo "[WARN] You may need to run the upload manually or retry"
+    else
+        echo "[INFO] All metadata files uploaded to metadata repo (${HF_METADATA_REPO_ID})"
     fi
 }
 
@@ -857,12 +1097,18 @@ echo "GPUs used: ${NUM_GPUS} (${GPU_LIST_STR})"
 echo "Workers per GPU: ${WORKERS_PER_GPU}"
 echo "Total workers: ${TOTAL_WORKERS}"
 echo "Timing log: ${TIMING_FILE}"
-echo "HuggingFace Repo: ${HF_REPO_ID}"
+echo "HuggingFace Full Repo: ${HF_REPO_ID}"
+echo "HuggingFace Metadata Repo: ${HF_METADATA_REPO_ID}"
 
 # Show batch upload statistics
 BATCH_UPLOAD_COUNT=$(cat "${BATCH_UPLOAD_COUNT_FILE}" 2>/dev/null || echo "0")
-echo "Batch uploads completed: ${BATCH_UPLOAD_COUNT}"
-echo "Batch upload log: ${BATCH_UPLOAD_LOG}"
+BATCH_METADATA_UPLOAD_COUNT=$(cat "${BATCH_METADATA_UPLOAD_COUNT_FILE}" 2>/dev/null || echo "0")
+echo ""
+echo "=== UPLOAD STATISTICS ==="
+echo "Full repo batch uploads completed: ${BATCH_UPLOAD_COUNT}"
+echo "Full repo batch upload log: ${BATCH_UPLOAD_LOG}"
+echo "Metadata repo batch uploads completed: ${BATCH_METADATA_UPLOAD_COUNT}"
+echo "Metadata repo batch upload log: ${BATCH_METADATA_UPLOAD_LOG}"
 
 if [ "${PROCESSED_COUNT}" -gt 0 ]; then
     # Calculate averages and per-GPU statistics using awk from the CSV
