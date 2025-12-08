@@ -77,7 +77,7 @@ HF_REPO_TYPE="dataset"                      # Type: dataset, model, or space
 # ----------------------------------------------------------------------------
 
 # Load HF_TOKEN from .env file explicitly
-ENV_FILE="/workspace/.env"
+ENV_FILE="/root/mvtracker/.env"
 if [ -f "${ENV_FILE}" ]; then
     # Extract HF_TOKEN from .env file (handles quotes)
     HF_TOKEN=$(grep -E '^HF_TOKEN=' "${ENV_FILE}" | sed 's/^HF_TOKEN=//; s/^"//; s/"$//')
