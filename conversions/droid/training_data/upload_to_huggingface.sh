@@ -16,22 +16,47 @@
 
 set -e
 
+# ============================================================================
+# LOAD ENVIRONMENT VARIABLES FROM .ENV FILE
+# ============================================================================
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+
+# Try multiple possible .env locations
+ENV_LOCATIONS=(
+    "/root/mvtracker/.env"           # Docker container location
+    "${REPO_ROOT}/.env"              # Repository root
+    "${HOME}/.env"                    # User home directory
+)
+
+HF_TOKEN_LOADED=0
+for ENV_FILE in "${ENV_LOCATIONS[@]}"; do
+    if [ -f "${ENV_FILE}" ]; then
+        echo "[INFO] Loading environment variables from: ${ENV_FILE}"
+        set -a  # automatically export all variables
+        source "${ENV_FILE}"
+        set +a  # turn off auto-export
+        HF_TOKEN_LOADED=1
+        break
+    fi
+done
+
+# Verify HF_TOKEN is set
+if [ -z "${HF_TOKEN}" ]; then
+    echo "[ERROR] HF_TOKEN not set"
+    echo "Please set HF_TOKEN in one of these locations:"
+    for loc in "${ENV_LOCATIONS[@]}"; do
+        echo "  - ${loc}"
+    done
+    echo "Or set it as an environment variable: export HF_TOKEN=\"hf_your_token\""
+    exit 1
+fi
+
 BATCH_UPLOAD_DIR="${1:-/data/droid_batch_upload_metadata}"
 HF_REPO_ID="${HF_REPO_ID:-sazirarrwth99/droid_metadata_only}"
 HF_REPO_TYPE="dataset"
 DRY_RUN="${DRY_RUN:-0}"
 DELETE_AFTER="${DELETE_AFTER:-1}"
-
-# Load HF_TOKEN
-ENV_FILE="/root/mvtracker/.env"
-if [ -f "${ENV_FILE}" ]; then
-    HF_TOKEN=$(grep -E '^HF_TOKEN=' "${ENV_FILE}" | sed 's/^HF_TOKEN=//; s/^"//; s/"$//')
-    [ -z "${HF_TOKEN}" ] && { echo "[ERROR] HF_TOKEN not found in ${ENV_FILE}"; exit 1; }
-    export HF_TOKEN
-    echo "[INFO] Loaded HF_TOKEN from ${ENV_FILE}"
-else
-    [ -z "${HF_TOKEN}" ] && { echo "[ERROR] HF_TOKEN not set"; exit 1; }
-fi
 
 echo ""
 echo "============================================================"
