@@ -86,7 +86,7 @@ echo ""
 # BATCH UPLOAD LOGIC
 # ============================================================================
 # HuggingFace has a 25k file limit per commit, so we upload in batches by episode
-BATCH_SIZE="${BATCH_SIZE:-500}"  # Number of episodes per batch (each episode ~3-5 files)
+BATCH_SIZE="${BATCH_SIZE:-3000}"  # Number of episodes per batch (each episode ~3-5 files)
 echo "[INFO] Starting batch upload (batch size: ${BATCH_SIZE} episodes)..."
 export BATCH_UPLOAD_DIR HF_REPO_ID HF_REPO_TYPE BATCH_SIZE DELETE_AFTER
 
