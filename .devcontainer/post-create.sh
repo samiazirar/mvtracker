@@ -3,6 +3,27 @@ set -e
 
 echo "Starting post-create setup..."
 
+# ============================================================
+# SSH Setup: Copy from mounted host keys and fix ownership
+# ============================================================
+echo "Setting up SSH credentials from host..."
+if [ -d /tmp/host-ssh ]; then
+    mkdir -p /root/.ssh
+    # Copy all files from host SSH directory
+    cp -r /tmp/host-ssh/* /root/.ssh/ 2>/dev/null || true
+    # Fix ownership to root
+    chown -R root:root /root/.ssh
+    # Set correct permissions (SSH is very strict about this)
+    chmod 700 /root/.ssh
+    chmod 600 /root/.ssh/config 2>/dev/null || true
+    chmod 600 /root/.ssh/id_* 2>/dev/null || true
+    chmod 644 /root/.ssh/*.pub 2>/dev/null || true
+    chmod 644 /root/.ssh/known_hosts 2>/dev/null || true
+    echo "SSH credentials copied and permissions set correctly."
+else
+    echo "No host SSH keys found at /tmp/host-ssh, skipping SSH setup."
+fi
+
 # Upgrade pip
 echo "Upgrading pip..."
 python -m pip install --upgrade pip
