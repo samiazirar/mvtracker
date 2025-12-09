@@ -35,6 +35,30 @@
 set -e
 
 # ============================================================================
+# LOAD ENVIRONMENT VARIABLES FROM .ENV FILE
+# ============================================================================
+# Auto-load .env file if it exists (works on both cluster and local)
+SCRIPT_DIR_TEMP="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT_TEMP="$(cd "${SCRIPT_DIR_TEMP}/../../.." && pwd)"
+
+# Try multiple possible .env locations
+ENV_LOCATIONS=(
+    "/root/mvtracker/.env"           # Docker container location
+    "${REPO_ROOT_TEMP}/.env"         # Repository root
+    "${HOME}/.env"                    # User home directory
+)
+
+for ENV_FILE_LOAD in "${ENV_LOCATIONS[@]}"; do
+    if [ -f "${ENV_FILE_LOAD}" ]; then
+        echo "[INFO] Loading environment variables from: ${ENV_FILE_LOAD}"
+        set -a  # automatically export all variables
+        source "${ENV_FILE_LOAD}"
+        set +a  # turn off auto-export
+        break
+    fi
+done
+
+# ============================================================================
 # CONFIGURATION
 # ============================================================================
 
