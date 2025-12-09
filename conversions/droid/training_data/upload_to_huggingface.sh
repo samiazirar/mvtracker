@@ -83,17 +83,19 @@ echo ""
 [ "${DRY_RUN}" -eq 1 ] && { echo "[DRY RUN] Would upload ${FILE_COUNT} files to ${HF_REPO_ID}"; exit 0; }
 
 # ============================================================================
-# UPLOAD WITH MULTI-COMMIT (Handles large uploads automatically)
+# BATCH UPLOAD (Compatible with older huggingface_hub versions)
 # ============================================================================
-echo "[INFO] Starting upload with multi-commit mode..."
-echo "[INFO] HuggingFace will automatically split into multiple commits if needed."
+BATCH_SIZE="${BATCH_SIZE:-500}"  # Episodes per batch (500 episodes * ~5 files = ~2500 files/batch)
+echo "[INFO] Starting batch upload (${BATCH_SIZE} episodes per batch)..."
 echo ""
-export BATCH_UPLOAD_DIR HF_REPO_ID HF_REPO_TYPE DELETE_AFTER
+export BATCH_UPLOAD_DIR HF_REPO_ID HF_REPO_TYPE DELETE_AFTER BATCH_SIZE
 
 python3 << 'PYTHON_SCRIPT'
 import os
 import sys
 import shutil
+import tempfile
+import time
 from pathlib import Path
 from datetime import datetime
 from huggingface_hub import HfApi
@@ -101,47 +103,109 @@ from huggingface_hub import HfApi
 batch_dir = Path(os.environ.get('BATCH_UPLOAD_DIR', '/data/droid_batch_upload_metadata'))
 repo_id = os.environ.get('HF_REPO_ID', 'sazirarrwth99/droid_metadata_only')
 repo_type = os.environ.get('HF_REPO_TYPE', 'dataset')
+batch_size = int(os.environ.get('BATCH_SIZE', '500'))
 delete_after = os.environ.get('DELETE_AFTER', '1') == '1'
 token = os.environ['HF_TOKEN']
 
 api = HfApi(token=token)
 
-print(f"[INFO] Uploading from: {batch_dir}")
-print(f"[INFO] Target repo: {repo_id}")
+def get_episode_dirs(base_path):
+    """Get unique episode directories (lab/outcome/date/timestamp)"""
+    episodes = set()
+    for path in base_path.rglob('*'):
+        if path.is_file():
+            rel_parts = path.relative_to(base_path).parts
+            if len(rel_parts) >= 4:
+                episode_path = Path(*rel_parts[:4])
+                episodes.add(episode_path)
+    return sorted(episodes)
+
+print(f"[INFO] Scanning for episodes in {batch_dir}...")
+episodes = get_episode_dirs(batch_dir)
+total_episodes = len(episodes)
+print(f"[INFO] Found {total_episodes} episodes to upload")
+
+if total_episodes == 0:
+    print("[INFO] No episodes found. Nothing to upload.")
+    sys.exit(0)
+
+# Split into batches
+batches = [episodes[i:i + batch_size] for i in range(0, len(episodes), batch_size)]
+total_batches = len(batches)
+print(f"[INFO] Will upload in {total_batches} batches ({batch_size} episodes per batch)")
 print()
 
-try:
-    # Use multi_commit=True for large uploads - HuggingFace handles chunking automatically
-    api.upload_folder(
-        folder_path=str(batch_dir),
-        repo_id=repo_id,
-        repo_type=repo_type,
-        commit_message=f'Upload {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}',
-        multi_commit=True,  # Automatically splits large uploads into multiple commits
-        multi_commit_every=100,  # Create a commit every 100 files (adjustable)
-    )
-    print()
-    print("[SUCCESS] Upload completed!")
-    print(f"Repository: https://huggingface.co/datasets/{repo_id}")
+successful_count = 0
+failed_batches = []
+
+for batch_num, batch_episodes in enumerate(batches, 1):
+    print(f"[BATCH {batch_num}/{total_batches}] Preparing {len(batch_episodes)} episodes...")
     
-    # Delete uploaded files if DELETE_AFTER is enabled
-    if delete_after:
-        print()
-        print("[INFO] Cleaning up uploaded files...")
-        for item in batch_dir.iterdir():
-            if item.is_dir():
-                shutil.rmtree(item, ignore_errors=True)
-            else:
-                item.unlink(missing_ok=True)
-        print("[INFO] Cleanup complete.")
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        file_count = 0
         
-except Exception as e:
-    print(f"[ERROR] Upload failed: {e}", file=sys.stderr)
+        for episode in batch_episodes:
+            src_episode = batch_dir / episode
+            if src_episode.exists():
+                for src_file in src_episode.rglob('*'):
+                    if src_file.is_file():
+                        rel_path = src_file.relative_to(batch_dir)
+                        dst_file = temp_path / rel_path
+                        dst_file.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(src_file, dst_file)
+                        file_count += 1
+        
+        print(f"[BATCH {batch_num}/{total_batches}] Uploading {file_count} files...")
+        
+        # Retry logic
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                api.upload_folder(
+                    folder_path=str(temp_path),
+                    repo_id=repo_id,
+                    repo_type=repo_type,
+                    commit_message=f'Batch {batch_num}/{total_batches} - {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}',
+                )
+                print(f"[BATCH {batch_num}/{total_batches}] SUCCESS")
+                successful_count += len(batch_episodes)
+                
+                # Delete uploaded episodes
+                if delete_after:
+                    for episode in batch_episodes:
+                        src_episode = batch_dir / episode
+                        if src_episode.exists():
+                            shutil.rmtree(src_episode, ignore_errors=True)
+                break
+                
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    wait_time = (attempt + 1) * 30  # 30s, 60s, 90s
+                    print(f"[BATCH {batch_num}] Attempt {attempt+1} failed: {e}")
+                    print(f"[BATCH {batch_num}] Retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+                else:
+                    print(f"[BATCH {batch_num}/{total_batches}] FAILED after {max_retries} attempts: {e}")
+                    failed_batches.append(batch_num)
+    
     print()
-    print("Troubleshooting:")
-    print("  1. Check your HF_TOKEN is valid")
-    print("  2. Ensure you have write access to the repository")
-    print("  3. Check your internet connection")
-    print("  4. Try again - the upload is resumable")
+
+# Summary
+print("=" * 60)
+print("UPLOAD SUMMARY")
+print("=" * 60)
+print(f"Total episodes:     {total_episodes}")
+print(f"Successful:         {successful_count}")
+print(f"Failed batches:     {len(failed_batches)}")
+
+if failed_batches:
+    print(f"Failed batch numbers: {failed_batches}")
+    print()
+    print("[WARN] Some batches failed. Re-run the script to retry remaining episodes.")
     sys.exit(1)
+else:
+    print()
+    print("[SUCCESS] All episodes uploaded!")
+    print(f"Repository: https://huggingface.co/datasets/{repo_id}")
 PYTHON_SCRIPT
