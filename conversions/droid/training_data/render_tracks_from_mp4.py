@@ -59,14 +59,32 @@ import numpy as np
 import yaml
 
 # Make repo root utils importable
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# We need to import specific modules without triggering utils/__init__.py
+# which imports optional dependencies (pyzed, trimesh)
+import importlib.util
 
-from utils import (  # type: ignore
-    VideoRecorder,
-    draw_points_on_image,
-    draw_track_trails_on_image,
-    project_points_to_image,
-)
+_utils_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "utils")
+
+def _import_module_from_path(module_name, file_path):
+    """Import a module directly from file path without triggering package __init__."""
+    spec = importlib.util.spec_from_file_location(module_name, file_path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+# First import transforms (needed by video_utils)
+_transforms = _import_module_from_path("_transforms", os.path.join(_utils_dir, "transforms.py"))
+sys.modules["utils.transforms"] = _transforms
+
+# Then import video_utils
+_video_utils = _import_module_from_path("_video_utils", os.path.join(_utils_dir, "video_utils.py"))
+
+# Extract what we need
+VideoRecorder = _video_utils.VideoRecorder
+draw_points_on_image = _video_utils.draw_points_on_image
+draw_track_trails_on_image = _video_utils.draw_track_trails_on_image
+project_points_to_image = _video_utils.project_points_to_image
 
 # Visualization mode constants
 VIS_MODES = [
@@ -548,17 +566,66 @@ def download_videos_from_gcs(
     return videos
 
 
+def estimate_zed_intrinsics(width: int, height: int) -> Tuple[np.ndarray, int, int]:
+    """Estimate ZED camera intrinsics from video dimensions.
+    
+    Uses typical ZED 2 camera parameters as a reasonable approximation.
+    These parameters work well for visualization but may not be exact.
+    
+    For 1280x720 (HD720):
+        - fx, fy ~ 530-540 (typical for 110° HFOV)
+        - cx = width/2, cy = height/2
+    
+    Args:
+        width: Video width in pixels
+        height: Video height in pixels
+        
+    Returns:
+        Tuple of (K, width, height) where K is 3x3 intrinsic matrix
+    """
+    # Approximate focal length based on ZED 2 with ~110° HFOV
+    # For 110° HFOV: fx = width / (2 * tan(55°)) ≈ width / 2.86 ≈ 0.35 * width
+    # However, ZED reports closer to fx ~ 530-540 for 1280 width
+    # Using a scale factor that matches typical ZED parameters
+    fx = 0.42 * width  # ~537 for 1280 width
+    fy = fx  # Square pixels assumed
+    cx = width / 2.0
+    cy = height / 2.0
+    
+    K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float64)
+    return K, width, height
+
+
 def build_camera_info(
     extrinsics: np.lib.npyio.NpzFile,
     tracks: np.lib.npyio.NpzFile,
     video_paths: Dict[str, str],
+    estimate_intrinsics: bool = False,
 ) -> Dict[str, dict]:
-    """Build camera metadata from extrinsics, tracks (for intrinsics), and video paths."""
+    """Build camera metadata from extrinsics, tracks (for intrinsics), and video paths.
+    
+    Args:
+        extrinsics: Loaded extrinsics.npz file
+        tracks: Loaded tracks.npz file
+        video_paths: Dict mapping camera serial to video path
+        estimate_intrinsics: If True, estimate intrinsics from video dimensions
+                            when not available in tracks.npz
+    """
     cameras = {}
     # Get list of cameras with 2D tracks (they have intrinsics)
     cameras_with_intrinsics = []
     if "cameras_with_2d_tracks" in tracks:
         cameras_with_intrinsics = list(tracks["cameras_with_2d_tracks"])
+    
+    def get_video_dimensions(video_path: str) -> Tuple[int, int]:
+        """Get width, height from video file."""
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            raise ValueError(f"Cannot open video: {video_path}")
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        cap.release()
+        return width, height
     
     # External cameras
     for key in extrinsics.files:
@@ -571,25 +638,26 @@ def build_camera_info(
             print(f"  [SKIP] Camera {serial}: no MP4 video found")
             continue
         
-        # Get intrinsics from tracks.npz (required)
-        if serial not in cameras_with_intrinsics:
-            raise ValueError(
-                f"Camera {serial}: no intrinsics found in tracks.npz. "
-                f"Run the full pipeline with extract_rgb_depth.py first to generate intrinsics."
-            )
+        # Try to get intrinsics from tracks.npz
+        has_intrinsics = (
+            serial in cameras_with_intrinsics and 
+            f"intrinsics_{serial}" in tracks and 
+            f"image_size_{serial}" in tracks
+        )
         
-        if f"intrinsics_{serial}" not in tracks:
-            raise ValueError(
-                f"Camera {serial}: intrinsics_{serial} not found in tracks.npz"
-            )
-        if f"image_size_{serial}" not in tracks:
-            raise ValueError(
-                f"Camera {serial}: image_size_{serial} not found in tracks.npz"
-            )
-        
-        K = tracks[f"intrinsics_{serial}"]
-        size = tracks[f"image_size_{serial}"]
-        width, height = int(size[0]), int(size[1])
+        if has_intrinsics:
+            K = tracks[f"intrinsics_{serial}"]
+            size = tracks[f"image_size_{serial}"]
+            width, height = int(size[0]), int(size[1])
+            print(f"  [OK] Camera {serial}: external, {width}x{height} (from tracks.npz)")
+        elif estimate_intrinsics:
+            # Estimate intrinsics from video dimensions
+            width, height = get_video_dimensions(video_paths[serial])
+            K, _, _ = estimate_zed_intrinsics(width, height)
+            print(f"  [OK] Camera {serial}: external, {width}x{height} (estimated intrinsics)")
+        else:
+            print(f"  [SKIP] Camera {serial}: no intrinsics found. Use --estimate_intrinsics to enable estimation.")
+            continue
         
         cameras[serial] = {
             "type": "external",
@@ -599,7 +667,6 @@ def build_camera_info(
             "height": height,
             "video_path": video_paths[serial],
         }
-        print(f"  [OK] Camera {serial}: external, {width}x{height}")
 
     # Wrist camera
     wrist_serial = None
@@ -610,25 +677,26 @@ def build_camera_info(
     
     if wrist_serial and "wrist_extrinsics" in extrinsics:
         if wrist_serial in video_paths:
-            # Get intrinsics from tracks.npz (required)
-            if wrist_serial not in cameras_with_intrinsics:
-                raise ValueError(
-                    f"Wrist camera {wrist_serial}: no intrinsics found in tracks.npz. "
-                    f"Run the full pipeline with extract_rgb_depth.py first to generate intrinsics."
-                )
+            # Try to get intrinsics from tracks.npz
+            has_intrinsics = (
+                wrist_serial in cameras_with_intrinsics and 
+                f"intrinsics_{wrist_serial}" in tracks and 
+                f"image_size_{wrist_serial}" in tracks
+            )
             
-            if f"intrinsics_{wrist_serial}" not in tracks:
-                raise ValueError(
-                    f"Wrist camera {wrist_serial}: intrinsics_{wrist_serial} not found in tracks.npz"
-                )
-            if f"image_size_{wrist_serial}" not in tracks:
-                raise ValueError(
-                    f"Wrist camera {wrist_serial}: image_size_{wrist_serial} not found in tracks.npz"
-                )
-            
-            K = tracks[f"intrinsics_{wrist_serial}"]
-            size = tracks[f"image_size_{wrist_serial}"]
-            width, height = int(size[0]), int(size[1])
+            if has_intrinsics:
+                K = tracks[f"intrinsics_{wrist_serial}"]
+                size = tracks[f"image_size_{wrist_serial}"]
+                width, height = int(size[0]), int(size[1])
+                print(f"  [OK] Camera {wrist_serial}: wrist, {width}x{height} (from tracks.npz)")
+            elif estimate_intrinsics:
+                # Estimate intrinsics from video dimensions
+                width, height = get_video_dimensions(video_paths[wrist_serial])
+                K, _, _ = estimate_zed_intrinsics(width, height)
+                print(f"  [OK] Camera {wrist_serial}: wrist, {width}x{height} (estimated intrinsics)")
+            else:
+                print(f"  [SKIP] Wrist camera {wrist_serial}: no intrinsics found. Use --estimate_intrinsics to enable estimation.")
+                return cameras
             
             cameras[wrist_serial] = {
                 "type": "wrist",
@@ -638,7 +706,6 @@ def build_camera_info(
                 "height": height,
                 "video_path": video_paths[wrist_serial],
             }
-            print(f"  [OK] Camera {wrist_serial}: wrist, {width}x{height}")
         else:
             print(f"  [SKIP] Wrist camera {wrist_serial}: no MP4 video found")
 
@@ -1150,6 +1217,12 @@ def main():
         choices=VIS_MODES,
         help=f"Visualization mode(s) to render. Options: {VIS_MODES}. Default: tracks_overlay",
     )
+    parser.add_argument(
+        "--estimate_intrinsics",
+        action="store_true",
+        help="Estimate camera intrinsics from video dimensions if not in tracks.npz. "
+             "Useful for metadata-only pipeline outputs.",
+    )
     args = parser.parse_args()
 
     # Validate inputs
@@ -1229,7 +1302,7 @@ def main():
 
     # 3. Build camera info
     print("\n[INFO] Building camera metadata...")
-    cameras = build_camera_info(extrinsics, tracks, video_paths)
+    cameras = build_camera_info(extrinsics, tracks, video_paths, estimate_intrinsics=args.estimate_intrinsics)
     
     if not cameras:
         raise RuntimeError("No cameras with both extrinsics and video found")

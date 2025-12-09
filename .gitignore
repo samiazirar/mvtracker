@@ -149,3 +149,7 @@ hf_render_cache/*
 .claude
 .claude/
 .claude/*
+
+rendered_tracks
+rendered_tracks/
+rendered_tracks/*
