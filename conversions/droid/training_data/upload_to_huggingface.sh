@@ -27,6 +27,7 @@ ENV_LOCATIONS=(
     "/root/mvtracker/.env"           # Docker container location
     "${REPO_ROOT}/.env"              # Repository root
     "${HOME}/.env"                    # User home directory
+    "./.env"                          # Current directory
 )
 
 HF_TOKEN_LOADED=0

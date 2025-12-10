@@ -46,7 +46,9 @@ ENV_LOCATIONS=(
     "/root/mvtracker/.env"           # Docker container location
     "${REPO_ROOT_TEMP}/.env"         # Repository root
     "${HOME}/.env"                    # User home directory
+    "./.env"                          # Current directory
 )
+echo "test"
 
 for ENV_FILE_LOAD in "${ENV_LOCATIONS[@]}"; do
     if [ -f "${ENV_FILE_LOAD}" ]; then
@@ -78,7 +80,7 @@ STATUS_FILE="${LOG_DIR}/status.log"
 ERROR_LOG="${LOG_DIR}/errors.log"
 FAILED_EPISODES_FILE="${LOG_DIR}/failed_episodes.txt"
 ERROR_COUNTS_FILE="${LOG_DIR}/error_counts.txt"
-DEFAULT_INNER_FINGER_MESH="/data/robotiq_arg85_description/meshes/inner_finger_fine.STL"
+DEFAULT_INNER_FINGER_MESH="${SCRIPT_DIR}/../../../third_party/robotiq_arg85_description/meshes/inner_finger_fine.STL"
 
 # Data source configuration
 # ----------------------------------------------------------------------------

@@ -632,11 +632,13 @@ def build_camera_info(
             width, height = int(size[0]), int(size[1])
             print(f"  [OK] Camera {serial}: external, {width}x{height} (from tracks.npz)")
         elif estimate_intrinsics:
+            raise ValueError("estimate_intrinsics is not supposed to be used")
             # Estimate intrinsics from video dimensions
             width, height = get_video_dimensions(video_paths[serial])
             K, _, _ = estimate_zed_intrinsics(width, height)
             print(f"  [OK] Camera {serial}: external, {width}x{height} (estimated intrinsics)")
         else:
+            raise ValueError("estimate_intrinsics is not supposed to be used")  
             print(f"  [SKIP] Camera {serial}: no intrinsics found. Use --estimate_intrinsics to enable estimation.")
             continue
         
@@ -1287,6 +1289,8 @@ def main():
     
     if not cameras:
         raise RuntimeError("No cameras with both extrinsics and video found")
+    
+    breakpoint()
 
     # 4. Render visualizations
     output_dir = args.output_dir or os.path.join("./rendered_tracks", episode_info['full_id'])

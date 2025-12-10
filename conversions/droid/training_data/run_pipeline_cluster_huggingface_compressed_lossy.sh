@@ -77,7 +77,7 @@ HF_REPO_TYPE="dataset"                      # Type: dataset, model, or space
 # ----------------------------------------------------------------------------
 
 # Load HF_TOKEN from .env file explicitly (search multiple locations)
-for candidate in "/root/mvtracker/.env" "/workspace/.env" "${SCRIPT_DIR}/../../../.env"; do
+for candidate in ".env" "/workspace/.env" "${SCRIPT_DIR}/../../../.env"; do
     if [ -f "${candidate}" ]; then
         ENV_FILE="${candidate}"
         break
