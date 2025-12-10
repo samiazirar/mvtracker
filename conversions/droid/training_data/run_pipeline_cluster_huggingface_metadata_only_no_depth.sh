@@ -280,6 +280,31 @@ export NUM_GPUS WORKERS_PER_GPU GPU_LIST_STR LOG_DIR
 export STATUS_FILE ERROR_LOG FAILED_EPISODES_FILE ERROR_COUNTS_FILE
 export HF_TOKEN HF_REPO_ID HF_REPO_TYPE BATCH_UPLOAD_INTERVAL
 
+echo "[INFO] Using ${NUM_GPUS} GPUs: ${GPU_LIST_STR}"
+echo "      Workers per GPU: ${WORKERS_PER_GPU} | Total Workers: ${TOTAL_WORKERS}"
+echo " CAM2BASE Path: ${CAM2BASE_PATH}"
+echo " Config Path:   ${CONFIG_PATH}"
+echo " Script Dir:    ${SCRIPT_DIR}"
+echo " GCS Bucket:    ${GCS_BUCKET}"
+echo " Local Source:  ${LOCAL_DROID_SOURCE}"
+echo " Use GCS:       ${USE_GCS}"
+echo " Fast Local:    ${FAST_LOCAL_DIR}"
+echo " Staging Dir:   ${STAGING_DIR}"
+echo " Batch Upload:  ${BATCH_UPLOAD_DIR}"
+echo " Timing File:   ${TIMING_FILE}"
+echo " Default Mesh:  ${DEFAULT_INNER_FINGER_MESH}"
+echo " Log Dir:       ${LOG_DIR}"
+echo " Status File:   ${STATUS_FILE}"
+echo " Error Log:     ${ERROR_LOG}"
+echo " Failed Eps:    ${FAILED_EPISODES_FILE}"
+echo " Error Counts:  ${ERROR_COUNTS_FILE}"
+echo " HF Repo ID:    ${HF_REPO_ID}"
+echo " HF Repo Type:  ${HF_REPO_TYPE}"
+echo " Batch Interval: ${BATCH_UPLOAD_INTERVAL}s"
+
+
+
+
 record_status() {
     local status=$1
     local episode=$2
