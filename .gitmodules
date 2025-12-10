@@ -1,0 +1,3 @@
+[submodule "external/robotiq_arg85_description"]
+	path = external/robotiq_arg85_description
+	url = https://github.com/a-price/robotiq_arg85_description.git

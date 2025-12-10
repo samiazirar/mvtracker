@@ -24,7 +24,7 @@ EPISODES_FILE="${LOG_DIR}/episodes.txt"
 TIMING_FILE="${LOG_DIR}/timing_ms.csv"
 STATUS_FILE="${LOG_DIR}/status.log"
 ERROR_LOG="${LOG_DIR}/errors.log"
-DEFAULT_INNER_FINGER_MESH="/data/robotiq_arg85_description/meshes/inner_finger_fine.STL"
+DEFAULT_INNER_FINGER_MESH="external/robotiq_arg85_description/meshes/inner_finger_fine.STL"
 
 # GCS bucket for downloads
 GCS_BUCKET="gs://gresearch/robotics/droid_raw/1.0.1"
