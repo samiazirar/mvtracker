@@ -153,3 +153,11 @@ hf_render_cache/*
 rendered_tracks
 rendered_tracks/
 rendered_tracks/*
+
+hf_render_cache
+hf_render_cache/
+hf_render_cache/*
+
+hf_droid_cache
+hf_droid_cache/
+hf_droid_cache/*
