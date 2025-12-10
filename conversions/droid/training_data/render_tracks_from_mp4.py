@@ -59,32 +59,13 @@ import numpy as np
 import yaml
 
 # Make repo root utils importable
-# We need to import specific modules without triggering utils/__init__.py
-# which imports optional dependencies (pyzed, trimesh)
-import importlib.util
+# Add the conversions/droid directory to path so we can import utils as a package
+_droid_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _droid_dir not in sys.path:
+    sys.path.insert(0, _droid_dir)
 
-_utils_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "utils")
-
-def _import_module_from_path(module_name, file_path):
-    """Import a module directly from file path without triggering package __init__."""
-    spec = importlib.util.spec_from_file_location(module_name, file_path)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
-    return module
-
-# First import transforms (needed by video_utils)
-_transforms = _import_module_from_path("_transforms", os.path.join(_utils_dir, "transforms.py"))
-sys.modules["utils.transforms"] = _transforms
-
-# Then import video_utils
-_video_utils = _import_module_from_path("_video_utils", os.path.join(_utils_dir, "video_utils.py"))
-
-# Extract what we need
-VideoRecorder = _video_utils.VideoRecorder
-draw_points_on_image = _video_utils.draw_points_on_image
-draw_track_trails_on_image = _video_utils.draw_track_trails_on_image
-project_points_to_image = _video_utils.project_points_to_image
+# Now import from utils package - this works because utils/__init__.py handles optional deps
+from utils.video_utils import VideoRecorder, draw_points_on_image, draw_track_trails_on_image, project_points_to_image
 
 # Visualization mode constants
 VIS_MODES = [
