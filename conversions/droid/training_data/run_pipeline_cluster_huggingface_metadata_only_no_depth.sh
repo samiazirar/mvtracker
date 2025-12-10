@@ -40,7 +40,7 @@ set -e
 # Auto-load .env file if it exists (works on both cluster and local)
 SCRIPT_DIR_TEMP="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT_TEMP="$(cd "${SCRIPT_DIR_TEMP}/../../.." && pwd)"
-
+echo "run git submodule update --init --recursive"
 # Try multiple possible .env locations
 ENV_LOCATIONS=(
     "/root/mvtracker/.env"           # Docker container location

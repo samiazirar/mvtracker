@@ -58,6 +58,23 @@ import cv2
 import numpy as np
 import yaml
 
+# Load environment variables from .env file
+try:
+    from dotenv import load_dotenv
+    # Try multiple possible .env locations
+    env_locations = [
+        "./.env",
+        "../../../.env",
+        "/workspace/.env",
+    ]
+    for env_file in env_locations:
+        if os.path.exists(env_file):
+            load_dotenv(env_file)
+            print(f"[INFO] Loaded environment from: {env_file}")
+            break
+except ImportError:
+    print("[WARN] python-dotenv not installed. Ensure HF_TOKEN is set via environment.")
+
 # Make repo root utils importable
 # Add the conversions/droid directory to path so we can import utils as a package
 _droid_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -1290,7 +1307,6 @@ def main():
     if not cameras:
         raise RuntimeError("No cameras with both extrinsics and video found")
     
-    breakpoint()
 
     # 4. Render visualizations
     output_dir = args.output_dir or os.path.join("./rendered_tracks", episode_info['full_id'])

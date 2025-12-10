@@ -430,13 +430,28 @@ def compute_extrinsics(
         wrist_pose_t0 = meta.get("wrist_cam_extrinsics")
         
         if wrist_pose_t0:
-            # Compute wrist camera offset
-            T_ee_cam = compute_wrist_cam_offset(wrist_pose_t0, cartesian_positions[0])
-            
-            # Rotation fix
+            # CRITICAL: Compute wrist camera offset using ROTATED initial EE pose
+            # 
+            # Why this matters:
+            # 1. Contact points are computed in world space using T_base_ee WITH R_fix rotation
+            # 2. Wrist camera is attached to gripper, so it must use the SAME rotation
+            # 3. If T_ee_cam is computed from unrotated EE pose but applied to rotated EE pose,
+            #    the camera frame will be misaligned by 90° relative to contact points
+            # 4. This causes contact flow to appear rotated when viewed from wrist camera
+            #
+            # Solution: Apply R_fix to initial EE pose BEFORE computing T_ee_cam offset
             R_fix = R.from_euler('z', 90, degrees=True).as_matrix()
             
-            # Precompute wrist transforms with rotation fix
+            # Apply rotation fix to initial EE pose before computing offset
+            T_base_ee0_original = pose6_to_T(cartesian_positions[0])
+            T_base_ee0_rotated = T_base_ee0_original.copy()
+            T_base_ee0_rotated[:3, :3] = T_base_ee0_rotated[:3, :3] @ R_fix
+            
+            # Compute offset from rotated frame
+            T_base_cam0 = pose6_to_T(wrist_pose_t0)
+            T_ee_cam = np.linalg.inv(T_base_ee0_rotated) @ T_base_cam0
+            
+            # Precompute wrist transforms with rotation fix applied consistently
             wrist_transforms = []
             for i in range(actual_frames):
                 T_base_ee_t = pose6_to_T(cartesian_positions[i])
