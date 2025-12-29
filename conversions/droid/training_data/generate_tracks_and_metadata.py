@@ -67,9 +67,6 @@ if str(UTILS_DIR) not in sys.path:
 from transforms import (  # type: ignore
     pose6_to_T,
     rvec_tvec_to_matrix,
-    compute_wrist_cam_offset,
-    precompute_wrist_trajectory,
-    external_cam_to_world,
     project_tracks_to_2d,
 )
 from tracking import ContactSurfaceTracker, compute_finger_transforms, compute_normalized_flow  # type: ignore
@@ -585,30 +582,72 @@ def main():
     # --- Save tracks.npz with both 3D and 2D tracks ---
     tracks_path = os.path.join(output_dir, 'tracks.npz')
     tracks_save_dict = {
+        # 3D track points in world coordinates [T, N, 3] where T=frames, N=total_points (left+right)
         'tracks_3d': tracks_data['tracks_3d'],
+        
+        # Local coordinates of contact points on gripper surface [N/2, 3] (one finger only, mirrored for other)
         'contact_points_local': tracks_data['contact_points_local'],
+        
+        # End-effector poses in world frame [T, 4, 4] - homogeneous transformation matrices
         'gripper_poses': tracks_data['gripper_poses'],
+        
+        # Gripper aperture (opening width) values [T] in meters
         'gripper_positions': tracks_data['gripper_positions'],
+        
+        # Robot cartesian state [T, 6] - [x, y, z, rx, ry, rz] in base frame
         'cartesian_positions': tracks_data['cartesian_positions'],
+        
         # Contact frame data (simplified pose of contact points)
+        # Center of mass of all contact points per frame [T, 3] in world coordinates
         'contact_centroids': tracks_data['contact_centroids'],
+        
+        # Combined contact frame [T, 4, 4] - centroid position + end-effector orientation
         'contact_frames': tracks_data['contact_frames'],
+        
+        # Left finger contact frame [T, 4, 4] - centroid of left finger points + orientation
         'left_contact_frames': tracks_data['left_contact_frames'],
+        
+        # Right finger contact frame [T, 4, 4] - centroid of right finger points + orientation
         'right_contact_frames': tracks_data['right_contact_frames'],
-        # Normalized flow data (resampled at fixed distance steps)
+        
+        # Normalized flow data (resampled at fixed distance steps for motion-invariant representation)
+        # Centroids resampled at 1mm distance intervals [M, 3] where M=num_normalized_steps
         'normalized_centroids': tracks_data['normalized_centroids'],
+        
+        # Contact frames resampled at 1mm distance intervals [M, 4, 4]
         'normalized_frames': tracks_data['normalized_frames'],
+        
+        # All contact points resampled at 1mm distance intervals [M, N, 3]
         'normalized_tracks_3d': tracks_data['normalized_tracks_3d'],
+        
+        # Left finger frames resampled at 1mm distance intervals [M, 4, 4]
         'normalized_left_frames': tracks_data['normalized_left_frames'],
+        
+        # Right finger frames resampled at 1mm distance intervals [M, 4, 4]
         'normalized_right_frames': tracks_data['normalized_right_frames'],
+        
+        # Cumulative distance traveled by centroid at each frame [T] in millimeters
         'cumulative_distance_mm': tracks_data['cumulative_distance_mm'],
+        
+        # Mapping from original frame index to normalized step index [T] - which normalized step is closest
         'frame_to_normalized_idx': tracks_data['frame_to_normalized_idx'],
+        
+        # Step size used for normalization (default: 1.0mm)
         'normalized_step_size_mm': tracks_data['normalized_step_size_mm'],
+        
+        # Number of normalized flow steps M (total_distance_mm / step_size_mm)
         'num_normalized_steps': tracks_data['num_normalized_steps'],
+        
+        # Total number of frames T in the trajectory
         'num_frames': tracks_data['num_frames'],
+        
+        # Number of track points per finger (total points N = 2 * num_points_per_finger)
         'num_points_per_finger': tracks_data['num_points_per_finger'],
+        
+        # Frame rate of the trajectory (frames per second)
         'fps': config.get('fps', 30.0),
-        # List of cameras with 2D tracks (for easy discovery)
+        
+        # List of camera serials that have 2D track projections available
         'cameras_with_2d_tracks': np.array(cameras_with_2d_tracks, dtype=object),
     }
     
