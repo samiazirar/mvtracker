@@ -357,6 +357,9 @@ class ContactSurfaceTracker:
 
         if os.path.exists(mesh_path):
             finger_mesh = trimesh.load(mesh_path)
+            # Convert from mm to meters if mesh is in mm (vertices > 1m suggests mm)
+            if np.abs(finger_mesh.vertices).max() > 1.0:
+                finger_mesh.vertices = finger_mesh.vertices / 1000.0
             contact_mesh = extract_contact_surface(finger_mesh)
             if contact_mesh is not None:
                 self.contact_mesh_vertices = contact_mesh.vertices.copy()
@@ -428,6 +431,9 @@ class MinimalGripperVisualizer:
 
         if os.path.exists(mesh_path):
             self.finger_mesh = trimesh.load(mesh_path)
+            # Convert from mm to meters if mesh is in mm (vertices > 1m suggests mm)
+            if np.abs(self.finger_mesh.vertices).max() > 1.0:
+                self.finger_mesh.vertices = self.finger_mesh.vertices / 1000.0
             # Extract the full contact surface (all faces facing -Y direction)
             self.contact_mesh = extract_contact_surface(self.finger_mesh)
             # Sample points from contact surface for tracking
