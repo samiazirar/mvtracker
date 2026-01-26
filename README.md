@@ -251,3 +251,49 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 ## 📧 Contact
 
 For questions or issues, please open a GitHub issue.
+
+---
+
+## 🎬 Generated Visualizations
+
+The following visualizations have been generated and are available:
+
+### Rerun RRD Files (Interactive 3D)
+
+| File | Size | Description |
+|------|------|-------------|
+| `shard_0000_contact_flow.rrd` | 1.6G | AUTOLab episodes with contact flow |
+| `shard_0001_contact_flow.rrd` | 1.2G | Multi-lab contact flow visualization |
+| `shard_0002_contact_flow.rrd` | 1.2G | Contact flow from various labs |
+| `shard_0003_contact_flow.rrd` | 1.4G | Additional episode visualizations |
+| `shard_0004_contact_flow.rrd` | 1.2G | Contact point tracking |
+| `shard_0005_contact_flow.rrd` | 1.2G | Gripper trajectory visualization |
+| `shard_0006_contact_flow.rrd` | 1.5G | Full contact flow analysis |
+| `combined_episodes.rrd` | 1.5G | Multi-lab combined view |
+
+**Total: ~10.8GB of 3D visualization data**
+
+### Video Outputs (MP4)
+
+Videos with 2D projected contact point tracks overlaid:
+- `s0000_000000_tracks.mp4` - `s0000_000002_tracks.mp4`
+- `s0001_000000_tracks.mp4` - `s0001_000002_tracks.mp4`
+
+### How to View
+
+```bash
+# View RRD files with Rerun
+rerun visualizations/shard_0000_contact_flow.rrd
+
+# Play video files
+ffplay output_videos/s0000_000000_tracks.mp4
+```
+
+## 🔬 Visualization Scripts
+
+| Script | Purpose |
+|--------|---------|
+| `visualize_training_shards.py` | Basic contact flow from training shards |
+| `generate_all_visualizations.py` | Batch process all shards |
+| `visualize_combined_episodes.py` | Multi-episode 3D view with orientation |
+| `visualize_videos_with_tracks.py` | Create MP4 with 2D track overlays |
