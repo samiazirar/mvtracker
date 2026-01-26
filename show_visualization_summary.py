@@ -21,15 +21,18 @@ def format_size(size_bytes):
 def main():
     workspace = Path("/workspace")
     viz_dir = workspace / "visualizations"
+    viz_v2_dir = workspace / "visualizations_v2"
     video_dir = workspace / "output_videos"
+    video_v2_dir = workspace / "output_videos_v2"
     
     print("=" * 70)
     print("  MVTracker Visualization Summary")
     print("=" * 70)
     print()
     
-    # RRD Files
+    # RRD Files (v1 and v2)
     rrd_files = list(viz_dir.glob("*.rrd")) + list(workspace.glob("*.rrd"))
+    rrd_v2_files = list(viz_v2_dir.glob("*.rrd")) if viz_v2_dir.exists() else []
     total_rrd_size = 0
     
     print("📊 Rerun RRD Files (Interactive 3D Visualizations)")
@@ -44,8 +47,28 @@ def main():
         print(f"{rrd.name:<45} {format_size(size):>10} {mtime:>15}")
     
     print("-" * 70)
-    print(f"{'Total RRD files:':<45} {len(rrd_files)} files, {format_size(total_rrd_size)}")
+    print(f"{'Total RRD files (v1):':<45} {len(rrd_files)} files, {format_size(total_rrd_size)}")
     print()
+    
+    # RRD Files v2
+    if rrd_v2_files:
+        total_rrd_v2_size = 0
+        print("📊 Rerun RRD Files v2 (Training Shards v2)")
+        print("-" * 70)
+        print(f"{'Filename':<45} {'Size':>10} {'Modified':>15}")
+        print("-" * 70)
+        
+        for rrd in sorted(rrd_v2_files):
+            size = rrd.stat().st_size
+            total_rrd_v2_size += size
+            mtime = datetime.fromtimestamp(rrd.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+            print(f"{rrd.name:<45} {format_size(size):>10} {mtime:>15}")
+        
+        print("-" * 70)
+        print(f"{'Total RRD files (v2):':<45} {len(rrd_v2_files)} files, {format_size(total_rrd_v2_size)}")
+        print()
+        total_rrd_size += total_rrd_v2_size
+        rrd_files = rrd_files + rrd_v2_files
     
     # Video Files
     video_files = list(video_dir.glob("*.mp4")) if video_dir.exists() else []
@@ -63,8 +86,29 @@ def main():
         print(f"{video.name:<45} {format_size(size):>10} {mtime:>15}")
     
     print("-" * 70)
-    print(f"{'Total video files:':<45} {len(video_files)} files, {format_size(total_video_size)}")
+    print(f"{'Total video files (v1):':<45} {len(video_files)} files, {format_size(total_video_size)}")
     print()
+    
+    # Video Files v2
+    video_v2_files = list(video_v2_dir.glob("*.mp4")) if video_v2_dir.exists() else []
+    if video_v2_files:
+        total_video_v2_size = 0
+        print("🎬 Video Files v2 (Training Shards v2)")
+        print("-" * 70)
+        print(f"{'Filename':<45} {'Size':>10} {'Modified':>15}")
+        print("-" * 70)
+        
+        for video in sorted(video_v2_files):
+            size = video.stat().st_size
+            total_video_v2_size += size
+            mtime = datetime.fromtimestamp(video.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+            print(f"{video.name:<45} {format_size(size):>10} {mtime:>15}")
+        
+        print("-" * 70)
+        print(f"{'Total video files (v2):':<45} {len(video_v2_files)} files, {format_size(total_video_v2_size)}")
+        print()
+        total_video_size += total_video_v2_size
+        video_files = video_files + video_v2_files
     
     # Summary
     print("=" * 70)
