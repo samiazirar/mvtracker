@@ -22,8 +22,10 @@ def main():
     workspace = Path("/workspace")
     viz_dir = workspace / "visualizations"
     viz_v2_dir = workspace / "visualizations_v2"
+    viz_episodes_dir = workspace / "visualizations" / "episodes"
     video_dir = workspace / "output_videos"
     video_v2_dir = workspace / "output_videos_v2"
+    test_data_dir = workspace / "test_data"
     
     print("=" * 70)
     print("  MVTracker Visualization Summary")
@@ -69,6 +71,51 @@ def main():
         print()
         total_rrd_size += total_rrd_v2_size
         rrd_files = rrd_files + rrd_v2_files
+    
+    # RRD Files - Episode Tracks (normalized/unnormalized)
+    episode_rrd_files = list(viz_episodes_dir.glob("*.rrd")) if viz_episodes_dir.exists() else []
+    if episode_rrd_files:
+        total_ep_size = 0
+        print("📊 Episode Track Visualizations (Normalized + Unnormalized)")
+        print("-" * 70)
+        print(f"{'Filename':<45} {'Size':>10} {'Modified':>15}")
+        print("-" * 70)
+        
+        for rrd in sorted(episode_rrd_files):
+            size = rrd.stat().st_size
+            total_ep_size += size
+            mtime = datetime.fromtimestamp(rrd.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+            print(f"{rrd.name:<45} {format_size(size):>10} {mtime:>15}")
+        
+        print("-" * 70)
+        print(f"{'Total episode RRD files:':<45} {len(episode_rrd_files)} files, {format_size(total_ep_size)}")
+        print()
+        total_rrd_size += total_ep_size
+        rrd_files = rrd_files + episode_rrd_files
+    
+    # Track NPZ files
+    track_npz_files = list(test_data_dir.rglob("tracks.npz")) if test_data_dir.exists() else []
+    if track_npz_files:
+        total_npz_size = 0
+        print("📁 Track Data Files (tracks.npz)")
+        print("-" * 70)
+        print(f"{'Relative Path':<50} {'Size':>10}")
+        print("-" * 70)
+        
+        for npz in sorted(track_npz_files)[:10]:  # Show first 10
+            size = npz.stat().st_size
+            total_npz_size += size
+            rel_path = str(npz.relative_to(test_data_dir))[:50]
+            print(f"{rel_path:<50} {format_size(size):>10}")
+        
+        if len(track_npz_files) > 10:
+            print(f"... and {len(track_npz_files) - 10} more files")
+            for npz in track_npz_files[10:]:
+                total_npz_size += npz.stat().st_size
+        
+        print("-" * 70)
+        print(f"{'Total track NPZ files:':<45} {len(track_npz_files)} files, {format_size(total_npz_size)}")
+        print()
     
     # Video Files
     video_files = list(video_dir.glob("*.mp4")) if video_dir.exists() else []
