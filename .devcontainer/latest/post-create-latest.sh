@@ -17,6 +17,17 @@ echo "=============================================="
 
 echo "Starting post-create setup..."
 
+# Copy host SSH keys into root's home with safe perms (bind mount is read-only).
+if [ -d "/ssh-host" ]; then
+    mkdir -p /root/.ssh
+    # Copy keys/config as real files (no symlinks) so ownership is root inside the container.
+    cp -aL /ssh-host/. /root/.ssh/ || true
+    chown -R root:root /root/.ssh || true
+    find /root/.ssh -type d -exec chmod 700 {} + || true
+    find /root/.ssh -type f -exec chmod 600 {} + || true
+    chmod 644 /root/.ssh/*.pub /root/.ssh/known_hosts 2>/dev/null || true
+fi
+
 # Upgrade pip
 echo "Upgrading pip..."
 python -m pip install --upgrade pip
@@ -192,11 +203,25 @@ pip install scipy opencv-python tqdm pyzed
 echo "Patching CUDA extension for PyTorch 2.7 compatibility..."
 CUDA_FILE="Mask2Former/mask2former/modeling/pixel_decoder/ops/src/cuda/ms_deform_attn_cuda.cu"
 if [ -f "$CUDA_FILE" ]; then
-    sed -i 's/AT_DISPATCH_FLOATING_TYPES(value\.type()/AT_DISPATCH_FLOATING_TYPES(value.scalar_type()/g' "$CUDA_FILE"
+    python - <<'PY'
+from pathlib import Path
+
+path = Path("Mask2Former/mask2former/modeling/pixel_decoder/ops/src/cuda/ms_deform_attn_cuda.cu")
+data = path.read_text()
+data = data.replace("value.type().is_cuda()", "value.is_cuda()")
+data = data.replace("AT_DISPATCH_FLOATING_TYPES(value.type()", "AT_DISPATCH_FLOATING_TYPES(value.scalar_type()")
+path.write_text(data)
+PY
     echo "Patched $CUDA_FILE"
 fi
 
 echo "Running Installation script for HOISTFormer..."
+if [ -d ".hoist" ]; then
+    if ! ./.hoist/bin/python -m pip --version >/dev/null 2>&1; then
+        echo "Detected broken HOISTFormer venv (missing pip); recreating..."
+        rm -rf .hoist
+    fi
+fi
 bash install_make_env.sh
 echo "HOISTFormer setup completed."
 

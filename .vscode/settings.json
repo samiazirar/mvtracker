@@ -3,5 +3,7 @@
     "geminicodeassist.contextExclusionGitignore": false,
     "geminicodeassist.contextExclusionFile": "",
     "geminicodeassist.agentDebugMode": true,
-    "geminicodeassist.inlineSuggestions.nextEditPredictions": true
+    "geminicodeassist.inlineSuggestions.nextEditPredictions": true,
+    "python-envs.defaultEnvManager": "ms-python.python:system",
+    "python-envs.pythonProjects": []
 }
