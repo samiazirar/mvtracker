@@ -346,26 +346,38 @@ echo "Installing Grounding DINO..."
 unset TORCH_CUDA_ARCH_LIST
 unset CUDA_HOME
 
+GROUNDINGDINO_REPO="${GROUNDINGDINO_REPO:-https://github.com/IDEA-Research/GroundingDINO.git}"
 GROUNDINGDINO_DIR="/workspace/third_party/groundingdino-cu128"
 if [ ! -d "$GROUNDINGDINO_DIR" ]; then
     mkdir -p /workspace/third_party
     echo "Cloning Grounding DINO repository..."
-    git clone https://github.com/ghostcipher1/groundingdino-cu128.git "$GROUNDINGDINO_DIR"
-    
-    cd "$GROUNDINGDINO_DIR"
-    
-    # Fix setup.py paths for proper compilation
-    echo "Patching setup.py for build..."
-    sed -i 's|sources = \[os.path.join(extensions_dir, s) for s in sources\]|sources = [os.path.relpath(s, this_dir) for s in sources]|g' setup.py
-    sed -i 's|include_dirs = \[extensions_dir\]|include_dirs = [os.path.relpath(extensions_dir, start=os.path.dirname(__file__))]|g' setup.py
-    
-    # Install Grounding DINO
-    pip install -e . --no-build-isolation
-    
-    cd /workspace
+    git clone "$GROUNDINGDINO_REPO" "$GROUNDINGDINO_DIR"
 else
     echo "Grounding DINO already exists, skipping clone."
 fi
+
+cd "$GROUNDINGDINO_DIR"
+
+# Fix setup.py paths for proper compilation
+echo "Patching setup.py for build..."
+sed -i 's|sources = \[os.path.join(extensions_dir, s) for s in sources\]|sources = [os.path.relpath(s, this_dir) for s in sources]|g' setup.py
+sed -i 's|include_dirs = \[extensions_dir\]|include_dirs = [os.path.relpath(extensions_dir, start=os.path.dirname(__file__))]|g' setup.py
+
+# Patch deprecated Tensor.type() usage for newer PyTorch
+echo "Patching MsDeformAttn for PyTorch compatibility..."
+# Fix deprecated .type().is_cuda() calls
+sed -i 's/\.type()\.is_cuda()/.is_cuda()/g' groundingdino/models/GroundingDINO/csrc/MsDeformAttn/ms_deform_attn.h
+sed -i 's/\.type()\.is_cuda()/.is_cuda()/g' groundingdino/models/GroundingDINO/csrc/MsDeformAttn/ms_deform_attn_cuda.cu
+# Fix deprecated value.type() in AT_DISPATCH_FLOATING_TYPES
+sed -i 's/AT_DISPATCH_FLOATING_TYPES(value\.type()/AT_DISPATCH_FLOATING_TYPES(value.scalar_type()/g' groundingdino/models/GroundingDINO/csrc/MsDeformAttn/ms_deform_attn_cuda.cu
+
+# Set CUDA architecture based on available GPU (default to 12.0 for Blackwell)
+export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-12.0}"
+
+# Install Grounding DINO
+pip install -e . --no-build-isolation
+
+cd /workspace
 
 echo "Grounding DINO installation completed."
 

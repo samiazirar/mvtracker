@@ -115,10 +115,14 @@ RUN cd /workspace/third_party_stable/HOISTFormer \
     && bash install_make_env.sh || true
 
 # --- Grounding DINO ---
-RUN git clone https://github.com/ghostcipher1/groundingdino-cu128.git /workspace/third_party_stable/groundingdino-cu128 \
+ARG GROUNDINGDINO_REPO=https://github.com/IDEA-Research/GroundingDINO.git
+RUN git clone ${GROUNDINGDINO_REPO} /workspace/third_party_stable/groundingdino-cu128 \
     && cd /workspace/third_party_stable/groundingdino-cu128 \
     && sed -i 's|sources = \[os.path.join(extensions_dir, s) for s in sources\]|sources = [os.path.relpath(s, this_dir) for s in sources]|g' setup.py \
     && sed -i 's|include_dirs = \[extensions_dir\]|include_dirs = [os.path.relpath(extensions_dir, start=os.path.dirname(__file__))]|g' setup.py \
+    && sed -i 's/\\.type()\\.is_cuda()/\\.is_cuda()/g' groundingdino/models/GroundingDINO/csrc/MsDeformAttn/ms_deform_attn.h \
+    && sed -i 's/\\.type()\\.is_cuda()/\\.is_cuda()/g' groundingdino/models/GroundingDINO/csrc/MsDeformAttn/ms_deform_attn_cuda.cu \
+    && sed -i 's/AT_DISPATCH_FLOATING_TYPES(value\\.type()/AT_DISPATCH_FLOATING_TYPES(value.scalar_type()/g' groundingdino/models/GroundingDINO/csrc/MsDeformAttn/ms_deform_attn_cuda.cu \
     && pip install -e . --no-build-isolation
 
 # --- Other repos (no special install) ---

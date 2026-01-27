@@ -518,9 +518,7 @@ class MinimalGripperVisualizer:
             self.root_path,
             rr.Transform3D(
                 translation=T_base_ee[:3, 3],
-                mat3x3=T_base_ee[:3, :3],
-                axis_length=0.1
-            )
+                mat3x3=T_base_ee[:3, :3])
         )
 
         # Calculate joint angle

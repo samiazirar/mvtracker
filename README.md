@@ -117,6 +117,23 @@ python conversions/droid/generate_pointcloud_from_droid.py
 rerun point_clouds/droid_full_fusion.rrd
 ```
 
+### Video with Gripper Track Reprojection (requires ZED SDK)
+
+Create MP4 videos with gripper contact points reprojected and tracked across frames:
+
+```bash
+# Edit config.yaml to point to your episode data
+vim conversions/droid/config.yaml
+
+# Generate videos with tracks + RRD visualization + tracks NPZ
+python conversions/droid/create_video_with_tracks.py --config conversions/droid/config.yaml
+
+# Output:
+# - point_clouds/videos/config/tracks_reprojection/*.mp4  (per-camera videos with tracks)
+# - point_clouds/droid_full_fusion_gripper_full_fusion.rrd  (3D visualization)
+# - point_clouds/droid_full_fusion_gripper_full_fusion_gripper_tracks.npz  (track data)
+```
+
 ## 🗂️ Training Data Processing
 
 ### Pipeline 1: Metadata-Only (CPU-only)

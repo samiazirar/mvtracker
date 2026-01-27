@@ -247,9 +247,7 @@ def main():
                     "world/wrist_cam",
                     rr.Transform3D(
                         translation=T_wrist[:3, 3],
-                        mat3x3=T_wrist[:3, :3],
-                        axis_length=0.1
-                    )
+                        mat3x3=T_wrist[:3, :3])
                 )
 
                 # Log Pinhole
@@ -315,9 +313,7 @@ def main():
                     f"world/external_cams/{serial}",
                     rr.Transform3D(
                         translation=T[:3, 3],
-                        mat3x3=T[:3, :3],
-                        axis_length=0.1
-                    )
+                        mat3x3=T[:3, :3])
                 )
 
                 # Log Pinhole

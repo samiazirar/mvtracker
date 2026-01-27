@@ -417,9 +417,7 @@ def render_episode(
                 cam_path,
                 rr.Transform3D(
                     translation=T_world_cam[:3, 3],
-                    mat3x3=T_world_cam[:3, :3],
-                    axis_length=0.1
-                )
+                    mat3x3=T_world_cam[:3, :3])
             )
             
             # Log pinhole

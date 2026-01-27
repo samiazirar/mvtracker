@@ -88,7 +88,7 @@ class GripperVisualizer:
             gripper_pos: Gripper position command (scalar or array)
         """
         # 1. Update Root (End Effector)
-        rr.log(self.root_path, rr.Transform3D(translation=T_base_ee[:3, 3], mat3x3=T_base_ee[:3, :3], axis_length=0.1))
+        rr.log(self.root_path, rr.Transform3D(translation=T_base_ee[:3, 3], mat3x3=T_base_ee[:3, :3]))
         
         # 2. Calculate Joint Angles
         val = gripper_pos[0] if isinstance(gripper_pos, (list, np.ndarray)) else gripper_pos
